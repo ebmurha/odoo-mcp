@@ -27,26 +27,6 @@ MODULE_MODEL_READ_ALLOWLIST: dict[str, frozenset[str]] = {
             "product.product",
         }
     ),
-    "payroll": frozenset(
-        {
-            "hr.payslip",
-            "hr.payslip.line",
-            "hr.payslip.run",
-            "hr.employee",
-            "hr.contract",
-            "hr.salary.rule",
-            "hr.attendance",
-        }
-    ),
-    "projects": frozenset(
-        {
-            "project.project",
-            "project.task",
-            "account.analytic.line",
-            "account.analytic.account",
-            "hr.timesheet",
-        }
-    ),
 }
 
 ACCOUNTING_MODEL_ACTION_ALLOWLIST: dict[str, frozenset[str]] = {

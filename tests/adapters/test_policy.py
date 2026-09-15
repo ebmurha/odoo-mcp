@@ -36,26 +36,6 @@ def test_policy_constants_match_the_public_adapter_contract() -> None:
                 "product.product",
             }
         ),
-        "payroll": frozenset(
-            {
-                "hr.payslip",
-                "hr.payslip.line",
-                "hr.payslip.run",
-                "hr.employee",
-                "hr.contract",
-                "hr.salary.rule",
-                "hr.attendance",
-            }
-        ),
-        "projects": frozenset(
-            {
-                "project.project",
-                "project.task",
-                "account.analytic.line",
-                "account.analytic.account",
-                "hr.timesheet",
-            }
-        ),
     }
     assert ACCOUNTING_MODEL_ACTION_ALLOWLIST == {
         "account.move": frozenset({"create_draft", "post_existing_draft", "reverse_existing_move"}),
@@ -124,9 +104,12 @@ def test_only_exact_capability_sentinel_is_probeable() -> None:
 
 
 def test_every_capability_probe_model_is_read_allowlisted() -> None:
-    read_models = set(CORE_MODEL_READ_ALLOWLIST)
-    for module_models in MODULE_MODEL_READ_ALLOWLIST.values():
-        read_models.update(module_models)
+    assert CAPABILITY_PROBES == {
+        "base": "res.company",
+        "account": "account.move",
+        "account_accountant": "account.bank.statement.line",
+    }
+    read_models = set(CORE_MODEL_READ_ALLOWLIST) | set(MODULE_MODEL_READ_ALLOWLIST["accounting"])
 
     assert set(CAPABILITY_PROBES.values()) <= read_models
 

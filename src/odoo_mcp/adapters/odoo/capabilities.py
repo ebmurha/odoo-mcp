@@ -9,11 +9,6 @@ CAPABILITY_PROBES: dict[str, str] = {
     "base": "res.company",
     "account": "account.move",
     "account_accountant": "account.bank.statement.line",
-    "hr_payroll": "hr.payslip.run",
-    "project": "project.project",
-    "hr_timesheet": "account.analytic.line",
-    "hr": "hr.employee",
-    "hr_attendance": "hr.attendance",
 }
 
 

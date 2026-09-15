@@ -30,6 +30,7 @@ async def test_connect_selects_version_transport_and_discovers_authorized_scope(
     expected_transport: str,
 ) -> None:
     requests: list[httpx.Request] = []
+    probed_models: list[str] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
         requests.append(request)
@@ -43,6 +44,7 @@ async def test_connect_selects_version_transport_and_discovers_authorized_scope(
                 return httpx.Response(200, json={"result": 7})
             model, method = args[3], args[4]
             if method == "search_count":
+                probed_models.append(model)
                 assert args[6] == {"context": {"allowed_company_ids": [1, 2]}}
                 if model in {"res.company", "account.move"}:
                     return httpx.Response(200, json={"result": 1})
@@ -66,6 +68,7 @@ async def test_connect_selects_version_transport_and_discovers_authorized_scope(
         if request.url.path == "/json/2/res.users/context_get":
             return httpx.Response(200, json={"uid": 7})
         if request.url.path.endswith("/search_count"):
+            probed_models.append(request.url.path.split("/")[3])
             assert body["context"] == {"allowed_company_ids": [1, 2]}
             available = request.url.path in {
                 "/json/2/res.company/search_count",
@@ -83,13 +86,35 @@ async def test_connect_selects_version_transport_and_discovers_authorized_scope(
     try:
         companies = await adapter.get_companies()
         capabilities = await adapter.get_capabilities()
+        discovery = await get_erp_capabilities(
+            adapter,
+            permissions=frozenset(),
+            default_company_id=1,
+            tools=(),
+            request_id="req_synthetic",
+        )
     finally:
         await adapter.close()
 
     assert capabilities.version == major
     assert capabilities.transport == expected_transport
     assert capabilities.edition == "enterprise"
-    assert capabilities.modules == {name: name in {"base", "account"} for name in CAPABILITY_PROBES}
+    assert CAPABILITY_PROBES == {
+        "base": "res.company",
+        "account": "account.move",
+        "account_accountant": "account.bank.statement.line",
+    }
+    assert probed_models == [*CAPABILITY_PROBES.values(), *CAPABILITY_PROBES.values()]
+    assert capabilities.modules == {
+        "base": True,
+        "account": True,
+        "account_accountant": False,
+    }
+    assert [item.name for item in discovery.installed_modules] == [
+        "account",
+        "account_accountant",
+        "base",
+    ]
     assert [(company.id, company.name) for company in companies] == [(1, "Alpha"), (2, "Beta")]
     assert requests[0].url.path == "/web/webclient/version_info"
 
