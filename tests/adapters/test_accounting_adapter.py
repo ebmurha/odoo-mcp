@@ -379,7 +379,8 @@ async def test_every_accounting_record_shape_is_normalized(
                 "amount_residual_currency": 2,
                 "reconciled": False,
                 "analytic_distribution": {"6": 100},
-            }
+            },
+            {"id": 2, "company_id": [1, "Synthetic Company"]},
         ],
         "account.partial.reconcile": [
             {
@@ -526,3 +527,40 @@ async def test_cross_company_response_is_rejected(
 
     assert caught.value.code is ErrorCode.ODOO_API_ERROR
     assert "Other company journal" not in str(caught.value)
+
+
+async def test_cross_company_partial_reconciliation_credit_is_rejected(
+    connection: OdooConnectionSettings,
+) -> None:
+    transport = FakeTransport(
+        {
+            "account.partial.reconcile": [
+                {
+                    "id": 1,
+                    "debit_move_id": [10, "Company 1 debit"],
+                    "credit_move_id": [20, "Other-company credit"],
+                    "amount": 5,
+                    "debit_amount_currency": 5,
+                    "credit_amount_currency": 5,
+                    "max_date": "2026-09-02",
+                }
+            ],
+            "account.move.line": [
+                {"id": 10, "company_id": [1, "Synthetic Company"]},
+                {"id": 20, "company_id": [2, "Synthetic Company 2"]},
+            ],
+        }
+    )
+    client = await _validated_client(connection, transport)
+
+    with pytest.raises(OdooMcpError) as caught:
+        await client.get_partial_reconciliations(
+            1,
+            ReadFilters(),
+            PageRequest(limit=1),
+        )
+
+    assert caught.value.code is ErrorCode.ODOO_API_ERROR
+    assert "Other-company credit" not in str(caught.value)
+    assert ["debit_move_id.company_id", "=", 1] in transport.calls[0]["domain"]
+    assert ["credit_move_id.company_id", "=", 1] in transport.calls[0]["domain"]

@@ -88,7 +88,10 @@ def ensure_accounting_action_allowed(model: str, action: str) -> None:
 def ensure_probe_allowed(capability: str, model: str) -> None:
     from odoo_mcp.adapters.odoo.capabilities import CAPABILITY_PROBES
 
-    if CAPABILITY_PROBES.get(capability) != model:
+    read_allowed = model in CORE_MODEL_READ_ALLOWLIST or any(
+        model in module_models for module_models in MODULE_MODEL_READ_ALLOWLIST.values()
+    )
+    if CAPABILITY_PROBES.get(capability) != model or not read_allowed:
         raise _model_denied()
 
 

@@ -14,13 +14,6 @@ CAPABILITY_PROBES: dict[str, str] = {
     "hr_timesheet": "account.analytic.line",
     "hr": "hr.employee",
     "hr_attendance": "hr.attendance",
-    "hr_leave": "hr.leave",
-    "purchase": "purchase.order",
-    "crm": "crm.lead",
-    "stock": "stock.picking",
-    "helpdesk": "helpdesk.ticket",
-    "sign": "sign.request",
-    "account_consolidation": "account.consolidation",
 }
 
 

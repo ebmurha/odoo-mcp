@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import base64
 import binascii
-from collections.abc import Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from datetime import date
 from decimal import Decimal, InvalidOperation
 from typing import TypeAlias, TypeVar, cast
@@ -39,6 +39,7 @@ from odoo_mcp.mcp.error_codes import ErrorCode, OdooMcpError
 
 RawRecord: TypeAlias = Mapping[str, object]
 RecordT = TypeVar("RecordT", bound=AdapterValue)
+RowValidator = Callable[[list[RawRecord], int], Awaitable[None]]
 
 _ACCOUNT_MOVE_FIELDS = [
     "id",
@@ -535,6 +536,7 @@ class AccountingReader:
         page: PageRequest,
         fields: list[str],
         normalize: Callable[[RawRecord], RecordT],
+        validate_rows: RowValidator | None = None,
     ) -> RecordPage[RecordT]:
         self._require_company(company_id)
         ensure_model_read_allowed(model, module="accounting")
@@ -559,12 +561,47 @@ class AccountingReader:
         ):
             raise _invalid_response()
         has_more = len(rows) > page.limit
-        selected = rows[: page.limit]
-        items = [
-            _enforce_output_scope(model, normalize(_record(row)), company_id) for row in selected
-        ]
+        selected = [_record(row) for row in rows[: page.limit]]
+        if validate_rows is not None:
+            await validate_rows(selected, company_id)
+        items = [_enforce_output_scope(model, normalize(row), company_id) for row in selected]
         next_cursor = _encode_cursor(identifiers[len(selected) - 1]) if has_more else None
         return RecordPage[RecordT](items=items, next_cursor=next_cursor)
+
+    async def _validate_partial_reconciliation_rows(
+        self,
+        rows: list[RawRecord],
+        company_id: int,
+    ) -> None:
+        line_ids = {
+            _relation(row.get(field)).id
+            for row in rows
+            for field in ("debit_move_id", "credit_move_id")
+        }
+        if not line_ids:
+            return
+        ensure_model_read_allowed("account.move.line", module="accounting")
+        attribution_rows = await self._transport.search_read(
+            "account.move.line",
+            [
+                ["id", "in", sorted(line_ids)],
+                ["company_id", "=", company_id],
+            ],
+            ["id", "company_id"],
+            limit=len(line_ids),
+            offset=0,
+            order="id asc",
+            company_ids=(company_id,),
+        )
+        attributed: set[int] = set()
+        for raw in attribution_rows:
+            row = _record(raw)
+            identifier = _positive_int(row.get("id"))
+            if identifier in attributed or _company_id(row.get("company_id")) != company_id:
+                raise _invalid_response()
+            attributed.add(identifier)
+        if attributed != line_ids:
+            raise _invalid_response()
 
     async def get_account_moves(
         self,
@@ -607,11 +644,15 @@ class AccountingReader:
         return await self._read_page(
             "account.partial.reconcile",
             company_id,
-            [["debit_move_id.company_id", "=", company_id]],
+            [
+                ["debit_move_id.company_id", "=", company_id],
+                ["credit_move_id.company_id", "=", company_id],
+            ],
             filters,
             page,
             _PARTIAL_RECONCILIATION_FIELDS,
             _normalize_partial_reconciliation,
+            self._validate_partial_reconciliation_rows,
         )
 
     async def get_journals(

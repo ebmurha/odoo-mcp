@@ -65,12 +65,17 @@ async def _qualify() -> None:
         journals = await adapter.get_journals(company_id, page=page)
         await adapter.get_bank_statement_lines(company_id, month, None, page=page)
         await adapter.get_payment_terms(company_id, page=page)
-        if journals.items:
-            await adapter.get_payment_method_lines(
-                company_id,
-                (journals.items[0].id,),
-                page=page,
+        if not journals.items:
+            raise OdooMcpError(
+                ErrorCode.CAPABILITY_NOT_AVAILABLE,
+                "No authorized journal is available for read qualification.",
+                "Configure an authorized accounting journal and retry.",
             )
+        await adapter.get_payment_method_lines(
+            company_id,
+            (journals.items[0].id,),
+            page=page,
+        )
         await adapter.get_partners(company_id, ReadFilters(), page=page)
         await adapter.get_products(company_id, ReadFilters(), page=page)
         await adapter.get_account_accounts(company_id, ReadFilters(), page=page)

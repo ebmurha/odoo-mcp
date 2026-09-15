@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import pytest
 
+from odoo_mcp.adapters.odoo.capabilities import CAPABILITY_PROBES
 from odoo_mcp.adapters.odoo.policy import (
     ACCOUNTING_MODEL_ACTION_ALLOWLIST,
     CORE_MODEL_READ_ALLOWLIST,
@@ -111,6 +112,23 @@ def test_only_exact_capability_sentinel_is_probeable() -> None:
         ensure_probe_allowed("account", "account.payment")
 
     assert caught.value.code is ErrorCode.MODEL_NOT_ALLOWED
+
+    CAPABILITY_PROBES["synthetic_unlisted"] = "ir.config_parameter"
+    try:
+        with pytest.raises(OdooMcpError) as unlisted:
+            ensure_probe_allowed("synthetic_unlisted", "ir.config_parameter")
+    finally:
+        del CAPABILITY_PROBES["synthetic_unlisted"]
+
+    assert unlisted.value.code is ErrorCode.MODEL_NOT_ALLOWED
+
+
+def test_every_capability_probe_model_is_read_allowlisted() -> None:
+    read_models = set(CORE_MODEL_READ_ALLOWLIST)
+    for module_models in MODULE_MODEL_READ_ALLOWLIST.values():
+        read_models.update(module_models)
+
+    assert set(CAPABILITY_PROBES.values()) <= read_models
 
 
 def test_field_denylist_is_removed_recursively() -> None:
