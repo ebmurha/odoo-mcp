@@ -1,0 +1,65 @@
+"""Single deterministic tool-registration and capability boundary."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Literal
+
+from mcp.types import ToolAnnotations
+
+from odoo_mcp.workflows.core.capabilities import ToolAvailability
+
+RiskLevel = Literal["read", "propose", "draft_write", "confirm_write"]
+
+
+@dataclass(frozen=True)
+class ToolDefinition:
+    name: str
+    version: str
+    title: str
+    description: str
+    risk_level: RiskLevel
+    required_permission: str
+    required_capability: str | None
+    annotations: ToolAnnotations
+
+    def availability(self) -> ToolAvailability:
+        return ToolAvailability(
+            name=self.name,
+            required_permission=self.required_permission,
+            required_capability=self.required_capability,
+        )
+
+    def protocol_meta(self) -> dict[str, str | None]:
+        return {
+            "toolVersion": self.version,
+            "riskLevel": self.risk_level,
+            "requiredPermission": self.required_permission,
+            "requiredCapability": self.required_capability,
+        }
+
+
+TOOL_REGISTRY: tuple[ToolDefinition, ...] = (
+    ToolDefinition(
+        name="get_erp_capabilities",
+        version="1.0.0",
+        title="Get ERP capabilities",
+        description=(
+            "Discover the connected Odoo edition, version, installed module capabilities, "
+            "available tools, and authorized companies."
+        ),
+        risk_level="read",
+        required_permission="core_read",
+        required_capability=None,
+        annotations=ToolAnnotations(
+            read_only_hint=True,
+            destructive_hint=False,
+            idempotent_hint=True,
+            open_world_hint=True,
+        ),
+    ),
+)
+
+
+def get_tool_definition(name: str) -> ToolDefinition:
+    return next(tool for tool in TOOL_REGISTRY if tool.name == name)

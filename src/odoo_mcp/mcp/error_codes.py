@@ -1,0 +1,47 @@
+"""Structured public errors; raw Odoo failures never cross this boundary."""
+
+from __future__ import annotations
+
+from enum import StrEnum
+from uuid import uuid4
+
+from pydantic import BaseModel, ConfigDict
+
+
+class ErrorCode(StrEnum):
+    ODOO_AUTH_FAILED = "ODOO_AUTH_FAILED"
+    ODOO_API_ERROR = "ODOO_API_ERROR"
+    ODOO_VERSION_UNSUPPORTED = "ODOO_VERSION_UNSUPPORTED"
+    ODOO_TRANSPORT_NEGOTIATION_FAILED = "ODOO_TRANSPORT_NEGOTIATION_FAILED"
+    COMPANY_NOT_FOUND = "COMPANY_NOT_FOUND"
+    CAPABILITY_NOT_AVAILABLE = "CAPABILITY_NOT_AVAILABLE"
+    INVALID_INPUT = "INVALID_INPUT"
+    UNKNOWN_ERROR = "UNKNOWN_ERROR"
+
+
+class ErrorResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: str = "failed"
+    error_code: ErrorCode
+    error_message: str
+    remediation_hint: str
+    request_id: str
+
+
+class OdooMcpError(RuntimeError):
+    """Internal exception carrying only a safe public description."""
+
+    def __init__(self, code: ErrorCode, message: str, remediation_hint: str) -> None:
+        super().__init__(message)
+        self.code = code
+        self.safe_message = message
+        self.remediation_hint = remediation_hint
+
+    def as_response(self, request_id: str | None = None) -> ErrorResponse:
+        return ErrorResponse(
+            error_code=self.code,
+            error_message=self.safe_message,
+            remediation_hint=self.remediation_hint,
+            request_id=request_id or f"req_{uuid4().hex}",
+        )
