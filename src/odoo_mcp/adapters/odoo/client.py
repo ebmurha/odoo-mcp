@@ -6,8 +6,28 @@ from typing import cast
 
 import httpx
 
+from odoo_mcp.adapters.accounting import (
+    DEFAULT_PAGE_REQUEST,
+    Account,
+    AccountMove,
+    AccountMoveLine,
+    AnalyticAccount,
+    BankStatementLine,
+    DatePeriod,
+    Journal,
+    PageRequest,
+    PartialReconciliation,
+    Partner,
+    PaymentMethodLine,
+    PaymentTerm,
+    Product,
+    ReadFilters,
+    RecordPage,
+)
 from odoo_mcp.adapters.base import CapabilitySnapshot, Company
+from odoo_mcp.adapters.odoo.accounting import AccountingReader
 from odoo_mcp.adapters.odoo.capabilities import detect_capabilities
+from odoo_mcp.adapters.odoo.policy import ensure_model_read_allowed
 from odoo_mcp.adapters.odoo.transports.base import OdooTransport
 from odoo_mcp.adapters.odoo.transports.json2 import Json2Transport
 from odoo_mcp.adapters.odoo.transports.json_rpc import JsonRpcTransport
@@ -29,6 +49,10 @@ class OdooClient:
         self._version = version
         self._transport = transport
         self._validated_company_ids: tuple[int, ...] | None = None
+        self._accounting = AccountingReader(
+            transport,
+            lambda: self._validated_company_ids,
+        )
 
     @classmethod
     async def connect(
@@ -84,11 +108,15 @@ class OdooClient:
     async def get_companies(self) -> list[Company]:
         self._validated_company_ids = None
         allowed = self._connection.allowed_company_ids
+        ensure_model_read_allowed("res.company", module=None)
         rows = await self._transport.search_read(
             "res.company",
             [["id", "in", list(allowed)]],
             ["id", "name"],
             limit=len(allowed),
+            offset=0,
+            order="id asc",
+            company_ids=allowed,
         )
         companies: list[Company] = []
         for row in rows:
@@ -109,6 +137,95 @@ class OdooClient:
             )
         self._validated_company_ids = allowed
         return sorted(companies, key=lambda company: company.id)
+
+    async def get_account_moves(
+        self, company_id: int, filters: ReadFilters, page: PageRequest
+    ) -> RecordPage[AccountMove]:
+        return await self._accounting.get_account_moves(company_id, filters, page)
+
+    async def get_account_move_lines(
+        self, company_id: int, filters: ReadFilters, page: PageRequest
+    ) -> RecordPage[AccountMoveLine]:
+        return await self._accounting.get_account_move_lines(company_id, filters, page)
+
+    async def get_partial_reconciliations(
+        self, company_id: int, filters: ReadFilters, page: PageRequest
+    ) -> RecordPage[PartialReconciliation]:
+        return await self._accounting.get_partial_reconciliations(company_id, filters, page)
+
+    async def get_journals(
+        self, company_id: int, *, page: PageRequest = DEFAULT_PAGE_REQUEST
+    ) -> RecordPage[Journal]:
+        return await self._accounting.get_journals(company_id, page=page)
+
+    async def get_bank_statement_lines(
+        self,
+        company_id: int,
+        period: DatePeriod,
+        journal_id: int | None,
+        *,
+        page: PageRequest = DEFAULT_PAGE_REQUEST,
+    ) -> RecordPage[BankStatementLine]:
+        return await self._accounting.get_bank_statement_lines(
+            company_id,
+            period,
+            journal_id,
+            page=page,
+        )
+
+    async def get_payment_terms(
+        self, company_id: int, *, page: PageRequest = DEFAULT_PAGE_REQUEST
+    ) -> RecordPage[PaymentTerm]:
+        return await self._accounting.get_payment_terms(company_id, page=page)
+
+    async def get_payment_method_lines(
+        self,
+        company_id: int,
+        journal_ids: tuple[int, ...],
+        *,
+        page: PageRequest = DEFAULT_PAGE_REQUEST,
+    ) -> RecordPage[PaymentMethodLine]:
+        return await self._accounting.get_payment_method_lines(
+            company_id,
+            journal_ids,
+            page=page,
+        )
+
+    async def get_partners(
+        self,
+        company_id: int,
+        filters: ReadFilters,
+        *,
+        page: PageRequest = DEFAULT_PAGE_REQUEST,
+    ) -> RecordPage[Partner]:
+        return await self._accounting.get_partners(company_id, filters, page=page)
+
+    async def get_products(
+        self,
+        company_id: int,
+        filters: ReadFilters,
+        *,
+        page: PageRequest = DEFAULT_PAGE_REQUEST,
+    ) -> RecordPage[Product]:
+        return await self._accounting.get_products(company_id, filters, page=page)
+
+    async def get_account_accounts(
+        self,
+        company_id: int,
+        filters: ReadFilters,
+        *,
+        page: PageRequest = DEFAULT_PAGE_REQUEST,
+    ) -> RecordPage[Account]:
+        return await self._accounting.get_account_accounts(company_id, filters, page=page)
+
+    async def get_analytic_accounts(
+        self,
+        company_id: int,
+        filters: ReadFilters,
+        *,
+        page: PageRequest = DEFAULT_PAGE_REQUEST,
+    ) -> RecordPage[AnalyticAccount]:
+        return await self._accounting.get_analytic_accounts(company_id, filters, page=page)
 
     async def close(self) -> None:
         await self._transport.close()

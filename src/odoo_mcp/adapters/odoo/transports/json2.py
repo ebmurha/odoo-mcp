@@ -35,13 +35,19 @@ class Json2Transport:
                 headers=self._headers,
                 json=payload,
             )
-            if response.status_code in {401, 403} or (
-                authenticating and response.status_code in {400, 404}
+            if response.status_code == 401 or (
+                authenticating and response.status_code in {400, 403, 404}
             ):
                 raise OdooMcpError(
                     ErrorCode.ODOO_AUTH_FAILED,
                     "Odoo authentication failed.",
                     "Check the database, API key, and technical-user access.",
+                )
+            if response.status_code == 403:
+                raise OdooMcpError(
+                    ErrorCode.ODOO_PERMISSION_DENIED,
+                    "Odoo denied the requested operation.",
+                    "Grant the required least-privilege Odoo access and retry.",
                 )
             response.raise_for_status()
             return response.json()
@@ -93,8 +99,21 @@ class Json2Transport:
             ) from exc
         return isinstance(result, int) and not isinstance(result, bool)
 
-    async def search_count(self, model: str, domain: list[Any]) -> int:
-        result = await self._call(model, "search_count", {"domain": domain})
+    async def search_count(
+        self,
+        model: str,
+        domain: list[Any],
+        *,
+        company_ids: tuple[int, ...],
+    ) -> int:
+        result = await self._call(
+            model,
+            "search_count",
+            {
+                "domain": domain,
+                "context": {"allowed_company_ids": list(company_ids)},
+            },
+        )
         if not isinstance(result, int) or isinstance(result, bool):
             raise OdooMcpError(
                 ErrorCode.ODOO_API_ERROR,
@@ -110,11 +129,21 @@ class Json2Transport:
         fields: list[str],
         *,
         limit: int,
+        offset: int = 0,
+        order: str = "id",
+        company_ids: tuple[int, ...],
     ) -> list[dict[str, Any]]:
         result = await self._call(
             model,
             "search_read",
-            {"domain": domain, "fields": fields, "limit": limit},
+            {
+                "domain": domain,
+                "fields": fields,
+                "limit": limit,
+                "offset": offset,
+                "order": order,
+                "context": {"allowed_company_ids": list(company_ids)},
+            },
         )
         if not isinstance(result, list) or not all(isinstance(row, dict) for row in result):
             raise OdooMcpError(

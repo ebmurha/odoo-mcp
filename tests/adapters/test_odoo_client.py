@@ -5,6 +5,7 @@ from typing import Any
 import httpx
 import pytest
 
+from odoo_mcp.adapters.accounting import PageRequest, ReadFilters
 from odoo_mcp.adapters.odoo.capabilities import CAPABILITY_PROBES
 from odoo_mcp.adapters.odoo.client import OdooClient
 from odoo_mcp.app.settings import OdooConnectionSettings
@@ -239,3 +240,151 @@ async def test_authentication_rejection_is_translated_without_raw_error(
 
     assert caught.value.code is ErrorCode.ODOO_AUTH_FAILED
     assert "synthetic-secret" not in str(caught.value)
+
+
+@pytest.mark.parametrize("major", [18, 19])
+async def test_accounting_read_uses_the_selected_transport_contract(
+    connection: OdooConnectionSettings,
+    major: int,
+) -> None:
+    accounting_requests: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/web/webclient/version_info":
+            return _version_response(major)
+        body: dict[str, Any] = __import__("json").loads(request.content)
+        if major == 18:
+            args = body["params"]["args"]
+            if body["params"]["service"] == "common":
+                return httpx.Response(200, json={"result": 7})
+            model, method = args[3], args[4]
+            if model == "res.company":
+                return httpx.Response(
+                    200,
+                    json={
+                        "result": [
+                            {"id": 1, "name": "Alpha"},
+                            {"id": 2, "name": "Beta"},
+                        ]
+                    },
+                )
+            assert model == "account.move" and method == "search_read"
+            accounting_requests.append(
+                {"domain": args[5][0], "keywords": args[6], "path": request.url.path}
+            )
+            return httpx.Response(200, json={"result": [_account_move_row()]})
+        if request.url.path == "/json/2/res.users/context_get":
+            return httpx.Response(200, json={"uid": 7})
+        if request.url.path == "/json/2/res.company/search_read":
+            return httpx.Response(
+                200,
+                json=[{"id": 1, "name": "Alpha"}, {"id": 2, "name": "Beta"}],
+            )
+        assert request.url.path == "/json/2/account.move/search_read"
+        accounting_requests.append({**body, "path": request.url.path})
+        return httpx.Response(200, json=[_account_move_row()])
+
+    adapter = await OdooClient.connect(
+        connection,
+        http_transport=httpx.MockTransport(handler),
+    )
+    try:
+        await adapter.get_companies()
+        page = await adapter.get_account_moves(1, ReadFilters(), PageRequest(limit=1))
+    finally:
+        await adapter.close()
+
+    assert page.items[0].id == 10
+    request = accounting_requests[0]
+    assert request["domain"] == [["company_id", "=", 1]]
+    if major == 18:
+        assert request["keywords"]["limit"] == 2
+        assert request["keywords"]["offset"] == 0
+        assert request["keywords"]["order"] == "id asc"
+        assert request["keywords"]["context"] == {"allowed_company_ids": [1]}
+    else:
+        assert request["limit"] == 2
+        assert request["offset"] == 0
+        assert request["order"] == "id asc"
+        assert request["context"] == {"allowed_company_ids": [1]}
+
+
+@pytest.mark.parametrize("major", [18, 19])
+async def test_accounting_acl_denial_is_safe_and_specific(
+    connection: OdooConnectionSettings,
+    major: int,
+) -> None:
+    marker = "raw-odoo-permission-synthetic-secret"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/web/webclient/version_info":
+            return _version_response(major)
+        body: dict[str, Any] = __import__("json").loads(request.content)
+        if major == 18:
+            args = body["params"]["args"]
+            if body["params"]["service"] == "common":
+                return httpx.Response(200, json={"result": 7})
+            if args[3] == "res.company":
+                return httpx.Response(
+                    200,
+                    json={
+                        "result": [
+                            {"id": 1, "name": "Alpha"},
+                            {"id": 2, "name": "Beta"},
+                        ]
+                    },
+                )
+            return httpx.Response(
+                200,
+                json={
+                    "error": {
+                        "message": marker,
+                        "data": {
+                            "name": "odoo.exceptions.AccessError",
+                            "debug": marker,
+                        },
+                    }
+                },
+            )
+        if request.url.path == "/json/2/res.users/context_get":
+            return httpx.Response(200, json={"uid": 7})
+        if request.url.path == "/json/2/res.company/search_read":
+            return httpx.Response(
+                200,
+                json=[{"id": 1, "name": "Alpha"}, {"id": 2, "name": "Beta"}],
+            )
+        return httpx.Response(403, json={"message": marker})
+
+    adapter = await OdooClient.connect(
+        connection,
+        http_transport=httpx.MockTransport(handler),
+    )
+    try:
+        await adapter.get_companies()
+        with pytest.raises(OdooMcpError) as caught:
+            await adapter.get_account_moves(1, ReadFilters(), PageRequest(limit=1))
+    finally:
+        await adapter.close()
+
+    assert caught.value.code is ErrorCode.ODOO_PERMISSION_DENIED
+    assert marker not in str(caught.value)
+
+
+def _account_move_row() -> dict[str, object]:
+    return {
+        "id": 10,
+        "name": "MVE/10",
+        "move_type": "entry",
+        "state": "posted",
+        "date": "2026-09-01",
+        "invoice_date": False,
+        "invoice_date_due": False,
+        "partner_id": False,
+        "journal_id": [30, "Synthetic Journal"],
+        "company_id": [1, "Alpha"],
+        "currency_id": [40, "Synthetic Currency"],
+        "amount_total": 1.0,
+        "amount_residual": 0.0,
+        "payment_state": False,
+        "ref": False,
+    }

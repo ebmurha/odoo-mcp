@@ -4,6 +4,12 @@
 foundation release exposes one read-only discovery tool,
 `get_erp_capabilities`. Accounting workflows are not implemented yet.
 
+The internal accounting adapter provides bounded, typed, company-scoped read
+primitives for later workflow tools. It enforces fixed model/action allowlists,
+strips denied fields, normalizes dates, decimals, relations, and cursor pages,
+and translates Odoo authentication, permission, and transport failures into
+safe errors. It does not expose generic CRUD or an Odoo configuration surface.
+
 Supported connection targets are Odoo.sh and self-hosted Odoo Enterprise:
 
 - Odoo 18 through external JSON-RPC

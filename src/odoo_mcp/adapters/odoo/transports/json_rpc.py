@@ -42,7 +42,7 @@ class JsonRpcTransport:
                 "Odoo could not complete the request.",
                 "Check Odoo availability and retry.",
             ) from exc
-        if not isinstance(body, dict) or "error" in body or "result" not in body:
+        if not isinstance(body, dict):
             raise OdooMcpError(
                 rejection_code,
                 "Odoo authentication failed."
@@ -51,6 +51,33 @@ class JsonRpcTransport:
                 "Check the database, username, API key, and technical-user access."
                 if rejection_code is ErrorCode.ODOO_AUTH_FAILED
                 else "Check the technical user's access and Odoo configuration.",
+            )
+        if "error" in body:
+            error = body.get("error")
+            data = error.get("data") if isinstance(error, dict) else None
+            name = data.get("name") if isinstance(data, dict) else None
+            code = rejection_code
+            if rejection_code is not ErrorCode.ODOO_AUTH_FAILED and isinstance(name, str):
+                if name.endswith(("AccessError", "AccessDenied")):
+                    code = ErrorCode.ODOO_PERMISSION_DENIED
+            raise OdooMcpError(
+                code,
+                "Odoo authentication failed."
+                if code is ErrorCode.ODOO_AUTH_FAILED
+                else "Odoo denied the requested operation."
+                if code is ErrorCode.ODOO_PERMISSION_DENIED
+                else "Odoo rejected the request.",
+                "Check the database, username, API key, and technical-user access."
+                if code is ErrorCode.ODOO_AUTH_FAILED
+                else "Grant the required least-privilege Odoo access and retry."
+                if code is ErrorCode.ODOO_PERMISSION_DENIED
+                else "Check the technical user's access and Odoo configuration.",
+            )
+        if "result" not in body:
+            raise OdooMcpError(
+                ErrorCode.ODOO_API_ERROR,
+                "Odoo returned an invalid response.",
+                "Check Odoo compatibility and retry.",
             )
         return body["result"]
 
@@ -156,8 +183,19 @@ class JsonRpcTransport:
             ],
         )
 
-    async def search_count(self, model: str, domain: list[Any]) -> int:
-        result = await self._execute_kw(model, "search_count", [domain])
+    async def search_count(
+        self,
+        model: str,
+        domain: list[Any],
+        *,
+        company_ids: tuple[int, ...],
+    ) -> int:
+        result = await self._execute_kw(
+            model,
+            "search_count",
+            [domain],
+            {"context": {"allowed_company_ids": list(company_ids)}},
+        )
         if not isinstance(result, int) or isinstance(result, bool):
             raise OdooMcpError(
                 ErrorCode.ODOO_API_ERROR,
@@ -173,12 +211,21 @@ class JsonRpcTransport:
         fields: list[str],
         *,
         limit: int,
+        offset: int = 0,
+        order: str = "id",
+        company_ids: tuple[int, ...],
     ) -> list[dict[str, Any]]:
         result = await self._execute_kw(
             model,
             "search_read",
             [domain],
-            {"fields": fields, "limit": limit},
+            {
+                "fields": fields,
+                "limit": limit,
+                "offset": offset,
+                "order": order,
+                "context": {"allowed_company_ids": list(company_ids)},
+            },
         )
         if not isinstance(result, list) or not all(isinstance(row, dict) for row in result):
             raise OdooMcpError(

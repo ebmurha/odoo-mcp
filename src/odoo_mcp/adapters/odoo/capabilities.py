@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+from odoo_mcp.adapters.odoo.policy import ensure_probe_allowed
 from odoo_mcp.adapters.odoo.transports.base import OdooTransport
 
 CAPABILITY_PROBES: dict[str, str] = {
     "base": "res.company",
     "account": "account.move",
-    "account_accountant": "account.bank.statement",
+    "account_accountant": "account.bank.statement.line",
     "hr_payroll": "hr.payslip.run",
     "project": "project.project",
     "hr_timesheet": "account.analytic.line",
@@ -32,6 +33,7 @@ async def detect_capabilities(
 
     detected: dict[str, bool] = {}
     for capability, model in CAPABILITY_PROBES.items():
+        ensure_probe_allowed(capability, model)
         detected[capability] = await transport.probe_model(
             model,
             company_ids=company_ids,

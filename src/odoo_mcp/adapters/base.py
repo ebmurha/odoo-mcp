@@ -6,6 +6,25 @@ from typing import Protocol
 
 from pydantic import BaseModel, ConfigDict
 
+from odoo_mcp.adapters.accounting import (
+    DEFAULT_PAGE_REQUEST,
+    Account,
+    AccountMove,
+    AccountMoveLine,
+    AnalyticAccount,
+    BankStatementLine,
+    DatePeriod,
+    Journal,
+    PageRequest,
+    PartialReconciliation,
+    Partner,
+    PaymentMethodLine,
+    PaymentTerm,
+    Product,
+    ReadFilters,
+    RecordPage,
+)
+
 
 class Company(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -29,3 +48,72 @@ class OdooAdapter(Protocol):
     async def get_capabilities(self) -> CapabilitySnapshot: ...
 
     async def get_companies(self) -> list[Company]: ...
+
+    async def get_account_moves(
+        self, company_id: int, filters: ReadFilters, page: PageRequest
+    ) -> RecordPage[AccountMove]: ...
+
+    async def get_account_move_lines(
+        self, company_id: int, filters: ReadFilters, page: PageRequest
+    ) -> RecordPage[AccountMoveLine]: ...
+
+    async def get_partial_reconciliations(
+        self, company_id: int, filters: ReadFilters, page: PageRequest
+    ) -> RecordPage[PartialReconciliation]: ...
+
+    async def get_journals(
+        self, company_id: int, *, page: PageRequest = DEFAULT_PAGE_REQUEST
+    ) -> RecordPage[Journal]: ...
+
+    async def get_bank_statement_lines(
+        self,
+        company_id: int,
+        period: DatePeriod,
+        journal_id: int | None,
+        *,
+        page: PageRequest = DEFAULT_PAGE_REQUEST,
+    ) -> RecordPage[BankStatementLine]: ...
+
+    async def get_payment_terms(
+        self, company_id: int, *, page: PageRequest = DEFAULT_PAGE_REQUEST
+    ) -> RecordPage[PaymentTerm]: ...
+
+    async def get_payment_method_lines(
+        self,
+        company_id: int,
+        journal_ids: tuple[int, ...],
+        *,
+        page: PageRequest = DEFAULT_PAGE_REQUEST,
+    ) -> RecordPage[PaymentMethodLine]: ...
+
+    async def get_partners(
+        self,
+        company_id: int,
+        filters: ReadFilters,
+        *,
+        page: PageRequest = DEFAULT_PAGE_REQUEST,
+    ) -> RecordPage[Partner]: ...
+
+    async def get_products(
+        self,
+        company_id: int,
+        filters: ReadFilters,
+        *,
+        page: PageRequest = DEFAULT_PAGE_REQUEST,
+    ) -> RecordPage[Product]: ...
+
+    async def get_account_accounts(
+        self,
+        company_id: int,
+        filters: ReadFilters,
+        *,
+        page: PageRequest = DEFAULT_PAGE_REQUEST,
+    ) -> RecordPage[Account]: ...
+
+    async def get_analytic_accounts(
+        self,
+        company_id: int,
+        filters: ReadFilters,
+        *,
+        page: PageRequest = DEFAULT_PAGE_REQUEST,
+    ) -> RecordPage[AnalyticAccount]: ...
