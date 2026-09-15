@@ -54,7 +54,7 @@ class JsonRpcTransport:
             )
         return body["result"]
 
-    async def probe_model(self, model: str) -> bool:
+    async def probe_model(self, model: str, *, company_ids: tuple[int, ...]) -> bool:
         if self._uid is None:
             raise OdooMcpError(
                 ErrorCode.ODOO_AUTH_FAILED,
@@ -74,7 +74,7 @@ class JsonRpcTransport:
                     model,
                     "search_count",
                     [[]],
-                    {},
+                    {"context": {"allowed_company_ids": list(company_ids)}},
                 ],
             },
             "id": 1,

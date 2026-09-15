@@ -23,10 +23,17 @@ CAPABILITY_PROBES: dict[str, str] = {
 }
 
 
-async def detect_capabilities(transport: OdooTransport) -> dict[str, bool]:
+async def detect_capabilities(
+    transport: OdooTransport,
+    *,
+    company_ids: tuple[int, ...],
+) -> dict[str, bool]:
     """Probe model availability without returning raw model errors."""
 
     detected: dict[str, bool] = {}
     for capability, model in CAPABILITY_PROBES.items():
-        detected[capability] = await transport.probe_model(model)
+        detected[capability] = await transport.probe_model(
+            model,
+            company_ids=company_ids,
+        )
     return detected

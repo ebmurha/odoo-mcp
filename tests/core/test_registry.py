@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from pathlib import Path
 
+import pytest
 from mcp import Client
 
 from odoo_mcp.adapters.base import CapabilitySnapshot, Company, OdooAdapter
@@ -142,6 +144,35 @@ async def test_permission_denial_happens_before_adapter_creation(
     assert result.structured_content is not None
     assert result.structured_content["status"] == "failed"
     assert result.structured_content["error_code"] == "ODOO_AUTH_FAILED"
+
+
+async def test_adapter_close_failure_is_structured_and_secret_safe(
+    connection: OdooConnectionSettings,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    marker = "raw-close-synthetic-secret"
+
+    class CloseFailureAdapter(FakeAdapter):
+        async def close(self) -> None:
+            raise RuntimeError(marker)
+
+    async def factory(_connection: object) -> OdooAdapter:
+        return CloseFailureAdapter()
+
+    server = create_mcp_server(
+        Resolver(_binding(DeploymentProfile.LOCAL, connection)),
+        adapter_factory=factory,
+    )
+    with caplog.at_level(logging.DEBUG):
+        async with Client(server) as client:
+            result = await client.call_tool("get_erp_capabilities", {})
+
+    assert result.structured_content is not None
+    assert result.structured_content["status"] == "failed"
+    assert result.structured_content["error_code"] == "UNKNOWN_ERROR"
+    assert marker not in str(result.structured_content)
+    assert marker not in caplog.text
+    assert "Traceback" not in caplog.text
 
 
 def test_public_permission_example_matches_registry() -> None:

@@ -9,6 +9,7 @@ from odoo_mcp.adapters.odoo.capabilities import CAPABILITY_PROBES
 from odoo_mcp.adapters.odoo.client import OdooClient
 from odoo_mcp.app.settings import OdooConnectionSettings
 from odoo_mcp.mcp.error_codes import ErrorCode, OdooMcpError
+from odoo_mcp.workflows.core.capabilities import get_erp_capabilities
 
 
 def _version_response(major: int) -> httpx.Response:
@@ -41,6 +42,7 @@ async def test_connect_selects_version_transport_and_discovers_authorized_scope(
                 return httpx.Response(200, json={"result": 7})
             model, method = args[3], args[4]
             if method == "search_count":
+                assert args[6] == {"context": {"allowed_company_ids": [1, 2]}}
                 if model in {"res.company", "account.move"}:
                     return httpx.Response(200, json={"result": 1})
                 return httpx.Response(
@@ -63,6 +65,7 @@ async def test_connect_selects_version_transport_and_discovers_authorized_scope(
         if request.url.path == "/json/2/res.users/context_get":
             return httpx.Response(200, json={"uid": 7})
         if request.url.path.endswith("/search_count"):
+            assert body["context"] == {"allowed_company_ids": [1, 2]}
             available = request.url.path in {
                 "/json/2/res.company/search_count",
                 "/json/2/account.move/search_count",
@@ -77,8 +80,8 @@ async def test_connect_selects_version_transport_and_discovers_authorized_scope(
 
     adapter = await OdooClient.connect(connection, http_transport=httpx.MockTransport(handler))
     try:
-        capabilities = await adapter.get_capabilities()
         companies = await adapter.get_companies()
+        capabilities = await adapter.get_capabilities()
     finally:
         await adapter.close()
 
@@ -133,10 +136,16 @@ async def test_transport_failure_is_safe_and_not_a_false_empty_result(
             return _version_response(19)
         if request.url.path == "/json/2/res.users/context_get":
             return httpx.Response(200, json={"uid": 7})
+        if request.url.path == "/json/2/res.company/search_read":
+            return httpx.Response(
+                200,
+                json=[{"id": 1, "name": "Alpha"}, {"id": 2, "name": "Beta"}],
+            )
         raise httpx.ReadTimeout("contains synthetic-secret", request=request)
 
     adapter = await OdooClient.connect(connection, http_transport=httpx.MockTransport(handler))
     try:
+        await adapter.get_companies()
         with pytest.raises(OdooMcpError) as caught:
             await adapter.get_capabilities()
     finally:
@@ -158,14 +167,56 @@ async def test_missing_authorized_company_fails_explicitly(
             return httpx.Response(200, json=[{"id": 1, "name": "Alpha"}])
         return httpx.Response(200, json=1)
 
-    adapter = await OdooClient.connect(connection, http_transport=httpx.MockTransport(handler))
+    requests: list[httpx.Request] = []
+
+    def recording_handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return handler(request)
+
+    adapter = await OdooClient.connect(
+        connection,
+        http_transport=httpx.MockTransport(recording_handler),
+    )
     try:
         with pytest.raises(OdooMcpError) as caught:
-            await adapter.get_companies()
+            await get_erp_capabilities(
+                adapter,
+                permissions=frozenset({"core_read"}),
+                default_company_id=connection.default_company_id,
+                tools=(),
+            )
     finally:
         await adapter.close()
 
     assert caught.value.code is ErrorCode.COMPANY_NOT_FOUND
+    assert not any(request.url.path.endswith("/search_count") for request in requests)
+
+
+async def test_capability_probes_require_validated_companies(
+    connection: OdooConnectionSettings,
+) -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.url.path == "/web/webclient/version_info":
+            return _version_response(19)
+        if request.url.path == "/json/2/res.users/context_get":
+            return httpx.Response(200, json={"uid": 7})
+        pytest.fail("A capability probe ran before company validation")
+
+    adapter = await OdooClient.connect(
+        connection,
+        http_transport=httpx.MockTransport(handler),
+    )
+    try:
+        with pytest.raises(OdooMcpError) as caught:
+            await adapter.get_capabilities()
+    finally:
+        await adapter.close()
+
+    assert caught.value.code is ErrorCode.ODOO_AUTH_FAILED
+    assert not any(request.url.path.endswith("/search_count") for request in requests)
 
 
 @pytest.mark.parametrize("major", [18, 19])

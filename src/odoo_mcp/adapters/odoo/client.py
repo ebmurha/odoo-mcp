@@ -28,6 +28,7 @@ class OdooClient:
         self._connection = connection
         self._version = version
         self._transport = transport
+        self._validated_company_ids: tuple[int, ...] | None = None
 
     @classmethod
     async def connect(
@@ -57,7 +58,16 @@ class OdooClient:
         return cls(connection, version, selected)
 
     async def get_capabilities(self) -> CapabilitySnapshot:
-        modules = await detect_capabilities(self._transport)
+        if self._validated_company_ids is None:
+            raise OdooMcpError(
+                ErrorCode.ODOO_AUTH_FAILED,
+                "Allowed companies must be validated before capability discovery.",
+                "Validate the configured company access and retry.",
+            )
+        modules = await detect_capabilities(
+            self._transport,
+            company_ids=self._validated_company_ids,
+        )
         if not modules.get("base"):
             raise OdooMcpError(
                 ErrorCode.ODOO_AUTH_FAILED,
@@ -72,6 +82,7 @@ class OdooClient:
         )
 
     async def get_companies(self) -> list[Company]:
+        self._validated_company_ids = None
         allowed = self._connection.allowed_company_ids
         rows = await self._transport.search_read(
             "res.company",
@@ -96,6 +107,7 @@ class OdooClient:
                 "One or more allowed companies are unavailable to the technical user.",
                 "Check allowed company IDs and Odoo company access, then retry.",
             )
+        self._validated_company_ids = allowed
         return sorted(companies, key=lambda company: company.id)
 
     async def close(self) -> None:

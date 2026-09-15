@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import inspect
+import logging
 from collections.abc import Awaitable, Callable
 from uuid import uuid4
 
@@ -17,6 +18,7 @@ from odoo_mcp.mcp.schemas import CapabilitiesToolResponse
 from odoo_mcp.workflows.core.capabilities import get_erp_capabilities
 
 AdapterFactory = Callable[[object], Awaitable[OdooAdapter]]
+LOGGER = logging.getLogger(__name__)
 
 
 async def _default_adapter_factory(connection: object) -> OdooAdapter:
@@ -57,7 +59,7 @@ def create_mcp_server(
                     "Reconnect with core discovery permission and retry.",
                 )
             adapter = await adapter_factory(binding.connection)
-            return CapabilitiesToolResponse.from_success(
+            response = CapabilitiesToolResponse.from_success(
                 await get_erp_capabilities(
                     adapter,
                     permissions=binding.permissions,
@@ -67,9 +69,9 @@ def create_mcp_server(
                 )
             )
         except OdooMcpError as exc:
-            return CapabilitiesToolResponse.from_error(exc.as_response(request_id))
+            response = CapabilitiesToolResponse.from_error(exc.as_response(request_id))
         except Exception:
-            return CapabilitiesToolResponse.from_error(
+            response = CapabilitiesToolResponse.from_error(
                 ErrorResponse(
                     error_code=ErrorCode.UNKNOWN_ERROR,
                     error_message="The capability request failed unexpectedly.",
@@ -77,9 +79,21 @@ def create_mcp_server(
                     request_id=request_id,
                 )
             )
-        finally:
-            if adapter is not None:
+        if adapter is not None:
+            try:
                 await _close_adapter(adapter)
+            except Exception:
+                LOGGER.warning("Odoo adapter cleanup failed; details were suppressed.")
+                if response.status == "ok":
+                    response = CapabilitiesToolResponse.from_error(
+                        ErrorResponse(
+                            error_code=ErrorCode.UNKNOWN_ERROR,
+                            error_message="The capability request failed unexpectedly.",
+                            remediation_hint=("Retry the request or contact the service operator."),
+                            request_id=request_id,
+                        )
+                    )
+        return response
 
     server.add_tool(
         capabilities_tool,

@@ -49,7 +49,8 @@ operator responsibilities and are not supplied by this foundation.
 The supported Odoo settings are documented in `.env.example`. Do not configure
 an Odoo version: the adapter detects it and fails explicitly for unsupported or
 malformed responses. `config/config.example.yaml` is the safe MCP permission-map
-example.
+example. A tool is authorized only when it is listed under its registry-defined
+permission; unknown or mismatched entries prevent startup.
 
 Use a dedicated non-production Odoo technical user with only the required
 company and module access. Company IDs are an additional MCP authorization

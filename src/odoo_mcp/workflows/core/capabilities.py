@@ -31,8 +31,8 @@ async def get_erp_capabilities(
 ) -> CapabilitiesResponse:
     """Return deterministic, authorized discovery data."""
 
-    snapshot = await adapter.get_capabilities()
     companies = await adapter.get_companies()
+    snapshot = await adapter.get_capabilities()
     available_tools = sorted(
         tool.name
         for tool in tools

@@ -5,6 +5,7 @@ from typing import Any
 import pytest
 
 from odoo_mcp.app import main as main_module
+from odoo_mcp.app.settings import PermissionConfig, SettingsError
 
 
 class FakeServer:
@@ -59,3 +60,25 @@ def test_profile_selects_approved_transport(
 def test_profile_rejects_unapproved_transport(arguments: list[str]) -> None:
     with pytest.raises(SystemExit):
         main_module.main(arguments)
+
+
+def test_empty_permission_mapping_grants_no_permissions() -> None:
+    config = PermissionConfig(permissions={"core_read": ()})
+
+    assert main_module._permissions(config) == frozenset()
+
+
+@pytest.mark.parametrize(
+    "permissions",
+    [
+        {"core_read": ("unknown_tool",)},
+        {"unknown_permission": ("get_erp_capabilities",)},
+    ],
+)
+def test_permission_mapping_rejects_registry_drift(
+    permissions: dict[str, tuple[str, ...]],
+) -> None:
+    config = PermissionConfig(permissions=permissions)
+
+    with pytest.raises(SettingsError, match="does not match the tool registry"):
+        main_module._permissions(config)

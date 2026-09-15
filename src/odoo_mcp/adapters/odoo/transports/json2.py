@@ -63,12 +63,15 @@ class Json2Transport:
                 "Check the database, API key, and technical-user access.",
             )
 
-    async def probe_model(self, model: str) -> bool:
+    async def probe_model(self, model: str, *, company_ids: tuple[int, ...]) -> bool:
         try:
             response = await self._client.post(
                 f"/json/2/{model}/search_count",
                 headers=self._headers,
-                json={"domain": []},
+                json={
+                    "domain": [],
+                    "context": {"allowed_company_ids": list(company_ids)},
+                },
             )
             if response.status_code == 401:
                 raise OdooMcpError(

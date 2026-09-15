@@ -22,6 +22,7 @@ from odoo_mcp.app.settings import (
     load_permission_config,
     load_settings,
 )
+from odoo_mcp.mcp.registry import TOOL_REGISTRY
 from odoo_mcp.mcp.server import create_mcp_server
 
 
@@ -52,7 +53,24 @@ def _fail(parser: argparse.ArgumentParser, message: str) -> NoReturn:
 
 
 def _permissions(config: PermissionConfig | None) -> frozenset[str]:
-    return frozenset((config.permissions if config else {"core_read": ()}).keys())
+    if config is None:
+        return frozenset({"core_read"})
+
+    definitions = {tool.name: tool for tool in TOOL_REGISTRY}
+    known_permissions = {tool.required_permission for tool in TOOL_REGISTRY}
+    for permission, tool_names in config.permissions.items():
+        if permission not in known_permissions:
+            raise SettingsError("Permission configuration does not match the tool registry")
+        for tool_name in tool_names:
+            definition = definitions.get(tool_name)
+            if definition is None or definition.required_permission != permission:
+                raise SettingsError("Permission configuration does not match the tool registry")
+
+    return frozenset(
+        definition.required_permission
+        for definition in TOOL_REGISTRY
+        if definition.name in config.permissions.get(definition.required_permission, ())
+    )
 
 
 def build_resolver(
