@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from uuid import uuid4
 
 from odoo_mcp.adapters.base import OdooAdapter
+from odoo_mcp.mcp.request_ids import new_request_id
 from odoo_mcp.mcp.schemas import (
     AuthorizedCompany,
     CapabilitiesResponse,
@@ -43,7 +43,7 @@ async def get_erp_capabilities(
         )
     )
     return CapabilitiesResponse(
-        request_id=request_id or f"req_{uuid4().hex}",
+        request_id=request_id or new_request_id(),
         odoo=OdooRuntimeInfo(
             edition=snapshot.edition,
             major_version=snapshot.version,

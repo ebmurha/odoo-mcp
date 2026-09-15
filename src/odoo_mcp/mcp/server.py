@@ -5,7 +5,6 @@ from __future__ import annotations
 import inspect
 import logging
 from collections.abc import Awaitable, Callable
-from uuid import uuid4
 
 from mcp.server import MCPServer
 
@@ -14,6 +13,7 @@ from odoo_mcp.adapters.odoo.client import OdooClient
 from odoo_mcp.adapters.odoo.connections import ConnectionResolver
 from odoo_mcp.mcp.error_codes import ErrorCode, ErrorResponse, OdooMcpError
 from odoo_mcp.mcp.registry import TOOL_REGISTRY
+from odoo_mcp.mcp.request_ids import new_request_id
 from odoo_mcp.mcp.schemas import CapabilitiesToolResponse
 from odoo_mcp.workflows.core.capabilities import get_erp_capabilities
 
@@ -48,7 +48,7 @@ def create_mcp_server(
     definition = TOOL_REGISTRY[0]
 
     async def capabilities_tool() -> CapabilitiesToolResponse:
-        request_id = f"req_{uuid4().hex}"
+        request_id = new_request_id()
         adapter: OdooAdapter | None = None
         try:
             binding = await resolver.resolve()

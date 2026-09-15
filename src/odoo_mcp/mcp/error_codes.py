@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 from enum import StrEnum
-from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict
+
+from odoo_mcp.mcp.request_ids import new_request_id
 
 
 class ErrorCode(StrEnum):
@@ -16,6 +17,10 @@ class ErrorCode(StrEnum):
     ODOO_PERMISSION_DENIED = "ODOO_PERMISSION_DENIED"
     COMPANY_NOT_FOUND = "COMPANY_NOT_FOUND"
     CAPABILITY_NOT_AVAILABLE = "CAPABILITY_NOT_AVAILABLE"
+    EXECUTION_NOT_EXPLICIT = "EXECUTION_NOT_EXPLICIT"
+    ODOO_STATE_CONFLICT = "ODOO_STATE_CONFLICT"
+    CONCURRENT_OPERATION_IN_PROGRESS = "CONCURRENT_OPERATION_IN_PROGRESS"
+    IDEMPOTENCY_KEY_PAYLOAD_MISMATCH = "IDEMPOTENCY_KEY_PAYLOAD_MISMATCH"
     INVALID_INPUT = "INVALID_INPUT"
     MODEL_NOT_ALLOWED = "MODEL_NOT_ALLOWED"
     FIELD_DENIED = "FIELD_DENIED"
@@ -46,5 +51,5 @@ class OdooMcpError(RuntimeError):
             error_code=self.code,
             error_message=self.safe_message,
             remediation_hint=self.remediation_hint,
-            request_id=request_id or f"req_{uuid4().hex}",
+            request_id=request_id or new_request_id(),
         )

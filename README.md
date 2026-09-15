@@ -46,9 +46,26 @@ uv run odoo-mcp --profile shared --host 127.0.0.1 --port 8000
 Dedicated Remote reads its single Odoo connection from the process environment;
 it never loads `.env.local`. Shared Hosted requires an authenticated connector
 context and an encrypted connection repository supplied by the hosting layer.
-Until that storage integration is configured, discovery fails closed. TLS,
-public ingress, connector identity issuance, and production deployment are
-operator responsibilities and are not supplied by this foundation.
+The package supplies a SQLite repository for that integration, but the hosting
+layer must inject its 256-bit encryption keys from a separate operator-controlled
+secret store. Missing keys, invalid ciphertext, or an unauthorized tenant and
+connection binding fail closed. TLS, public ingress, connector identity issuance,
+and production deployment remain operator responsibilities.
+
+## Durable state
+
+`odoo_mcp.storage.Storage` provides ordered SQLite migrations and tenant-scoped
+repositories for audit records, proposals, artifacts, idempotency reservations,
+capability snapshots, and encrypted Shared Hosted connections. Audit rows are
+append-only and SHA-256 hash-chained per tenant. Idempotency reservations bind
+the tenant, company, tool, key, and request payload for 24-hour replay, while
+in-progress and unknown outcomes remain blocked for explicit recovery.
+
+SQLite backups use a consistent snapshot. Restore writes to a new destination
+and is accepted only after database integrity, migrations, tenant audit chains,
+idempotency state, capability data, and encrypted connections verify. Encryption
+keys must be backed up and restored separately. PostgreSQL is not supported or
+claimed by this release.
 
 ## Configuration
 
