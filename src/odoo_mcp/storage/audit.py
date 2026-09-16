@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import sqlite3
 
+from odoo_mcp.mcp.error_codes import ErrorCode
 from odoo_mcp.storage.database import SQLiteDatabase
 from odoo_mcp.storage.errors import AuditIntegrityError
 from odoo_mcp.storage.json_support import (
@@ -20,11 +21,35 @@ from odoo_mcp.storage.models import AuditEvent, AuditRecord, AuditVerification
 GENESIS_HASH = "0" * 64
 
 
+def _safe_error_fields(
+    error_code: str | None,
+    error_message: str | None,
+) -> tuple[str | None, str | None]:
+    if error_code is None and error_message is None:
+        return None, None
+    try:
+        safe_code = ErrorCode(error_code) if error_code is not None else ErrorCode.UNKNOWN_ERROR
+    except ValueError:
+        safe_code = ErrorCode.UNKNOWN_ERROR
+    return safe_code.value, f"Operation failed with {safe_code.value}."
+
+
 def _hash_payload(values: dict[str, object]) -> str:
     return hashlib.sha256(canonical_json(values).encode()).hexdigest()
 
 
-def _event_values(event: AuditEvent, previous_hash: str, created_at: str) -> dict[str, object]:
+def _event_values(
+    event: AuditEvent,
+    previous_hash: str,
+    created_at: str,
+    *,
+    normalize_error: bool = True,
+) -> dict[str, object]:
+    error_code, error_message = (
+        _safe_error_fields(event.error_code, event.error_message)
+        if normalize_error
+        else (event.error_code, event.error_message)
+    )
     return {
         "request_id": event.request_id,
         "tenant_id": event.tenant_id,
@@ -43,8 +68,8 @@ def _event_values(event: AuditEvent, previous_hash: str, created_at: str) -> dic
         "proposed_action": redact_sensitive(event.proposed_action),
         "actual_result": redact_sensitive(event.actual_result),
         "affected_odoo_records": list(event.affected_odoo_records),
-        "error_code": event.error_code,
-        "error_message": event.error_message,
+        "error_code": error_code,
+        "error_message": error_message,
         "final_status": event.final_status,
         "previous_hash": previous_hash,
         "created_at": created_at,
@@ -151,8 +176,8 @@ class AuditRepository:
                 if values["actual_result"] is None
                 else canonical_json(values["actual_result"]),
                 canonical_json(values["affected_odoo_records"]),
-                event.error_code,
-                event.error_message,
+                values["error_code"],
+                values["error_message"],
                 event.final_status,
                 previous_hash,
                 entry_hash,
@@ -190,7 +215,12 @@ class AuditRepository:
         expected_previous = GENESIS_HASH
         for record in records:
             created_at = timestamp(record.created_at)
-            values = _event_values(record, record.previous_hash, created_at)
+            values = _event_values(
+                record,
+                record.previous_hash,
+                created_at,
+                normalize_error=False,
+            )
             if (
                 record.previous_hash != expected_previous
                 or _hash_payload(values) != record.entry_hash

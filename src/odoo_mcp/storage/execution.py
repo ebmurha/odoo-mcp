@@ -63,6 +63,7 @@ class ExecutionJournal:
             self._idempotency.finish_in_transaction(
                 connection,
                 event.tenant_id,
+                event.company_id,
                 event.tool_name,
                 idempotency_key,
                 event.request_id,

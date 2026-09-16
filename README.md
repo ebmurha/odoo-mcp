@@ -59,7 +59,10 @@ repositories for audit records, proposals, artifacts, idempotency reservations,
 capability snapshots, and encrypted Shared Hosted connections. Audit rows are
 append-only and SHA-256 hash-chained per tenant. Idempotency reservations bind
 the tenant, company, tool, key, and request payload for 24-hour replay, while
-in-progress and unknown outcomes remain blocked for explicit recovery.
+in-progress and unknown outcomes remain blocked for explicit recovery. Final
+outcomes must retain a replayable response and match the reserving company.
+Audit failure text is derived from registered error codes; free-form upstream
+error text is not persisted.
 
 SQLite backups use a consistent snapshot. Restore writes to a new destination
 and is accepted only after database integrity, migrations, tenant audit chains,

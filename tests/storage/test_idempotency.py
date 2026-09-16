@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from datetime import UTC, datetime
 
 import pytest
@@ -56,6 +57,7 @@ def test_idempotency_replay_mismatch_and_owner_binding_survive_restart(tmp_path)
 
     storage.idempotency.finish(
         tenant_id="tenant-a",
+        company_id=1,
         tool_name="create_invoice",
         idempotency_key="key-1",
         owner_request_id="req_1",
@@ -97,6 +99,7 @@ def test_idempotency_replay_mismatch_and_owner_binding_survive_restart(tmp_path)
     with pytest.raises(IdempotencyTransitionError):
         restarted.idempotency.finish(
             tenant_id="tenant-a",
+            company_id=1,
             tool_name="create_invoice",
             idempotency_key="key-1",
             owner_request_id="req_wrong",
@@ -137,6 +140,7 @@ def test_unknown_outcome_is_replayed_not_reserved_again(tmp_path) -> None:
     )
     storage.idempotency.finish(
         tenant_id="tenant-a",
+        company_id=1,
         tool_name="post_entry",
         idempotency_key="unknown-key",
         owner_request_id="req_1",
@@ -162,6 +166,7 @@ def test_expired_unknown_and_in_progress_outcomes_still_block_reexecution(tmp_pa
         storage.idempotency.reserve("tenant-a", 1, "post_entry", key, {"entry_id": 4}, f"req_{key}")
     storage.idempotency.finish(
         "tenant-a",
+        1,
         "post_entry",
         "unknown",
         "req_unknown",
@@ -223,3 +228,46 @@ def test_write_attempt_and_outcome_are_atomic_with_their_audit_events(tmp_path) 
         "attempted",
         "unknown",
     ]
+
+
+def test_write_outcome_cannot_change_the_reserved_company(tmp_path) -> None:
+    storage = Storage.open(tmp_path / "state.sqlite3")
+    storage.execution.begin(_write_event("req_1", "attempted"), "key-company", {"entry_id": 4})
+
+    with pytest.raises(IdempotencyTransitionError):
+        storage.execution.finish(
+            replace(_write_event("req_1", "succeeded"), company_id=2),
+            "key-company",
+            IdempotencyState.SUCCEEDED,
+            {"status": "succeeded"},
+        )
+
+    database = sqlite3.connect(storage.database.path)
+    idempotency_row = database.execute(
+        "SELECT company_id, state FROM idempotency_keys WHERE idempotency_key = ?",
+        ("key-company",),
+    ).fetchone()
+    audit_rows = database.execute(
+        "SELECT company_id, final_status FROM audit_log ORDER BY id"
+    ).fetchall()
+    database.close()
+    assert idempotency_row == (1, "in_progress")
+    assert audit_rows == [(1, "attempted")]
+
+
+def test_final_idempotency_state_requires_a_replayable_response(tmp_path) -> None:
+    storage = Storage.open(tmp_path / "state.sqlite3")
+    storage.idempotency.reserve(
+        "tenant-a", 1, "post_entry", "key-response", {"entry_id": 4}, "req_1"
+    )
+
+    with pytest.raises(IdempotencyTransitionError, match="replayable response"):
+        storage.idempotency.finish(
+            "tenant-a",
+            1,
+            "post_entry",
+            "key-response",
+            "req_1",
+            IdempotencyState.SUCCEEDED,
+            None,
+        )

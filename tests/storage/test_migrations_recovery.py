@@ -12,7 +12,8 @@ from odoo_mcp.storage import (
     StorageCorruptionError,
 )
 from odoo_mcp.storage.database import SQLiteDatabase
-from odoo_mcp.storage.migrations import apply_migrations
+from odoo_mcp.storage.migrations import INITIAL_SCHEMA, apply_migrations
+from odoo_mcp.storage.repositories import IdempotencyRepository
 
 
 def test_migration_failure_rolls_back_and_is_not_recorded(tmp_path) -> None:
@@ -52,12 +53,47 @@ def test_applied_migration_checksum_is_immutable(tmp_path) -> None:
         apply_migrations(database, changed)
 
 
+def test_response_invariant_migration_rejects_invalid_legacy_state(tmp_path) -> None:
+    database = SQLiteDatabase(tmp_path / "legacy.sqlite3")
+    apply_migrations(database, (INITIAL_SCHEMA,))
+    IdempotencyRepository(database).reserve("tenant-a", 1, "tool", "key", {"value": 1}, "req_1")
+    connection = sqlite3.connect(database.path)
+    connection.execute(
+        "UPDATE idempotency_keys SET state = 'succeeded' WHERE idempotency_key = 'key'"
+    )
+    connection.commit()
+    connection.close()
+
+    with pytest.raises(MigrationError, match="0002_idempotency_response_invariant"):
+        apply_migrations(database)
+
+    connection = sqlite3.connect(database.path)
+    applied = connection.execute("SELECT id FROM schema_migrations ORDER BY id").fetchall()
+    connection.close()
+    assert applied == [("0001_initial_storage",)]
+
+
+def test_response_invariant_migration_upgrades_valid_legacy_state(tmp_path) -> None:
+    database = SQLiteDatabase(tmp_path / "legacy.sqlite3")
+    apply_migrations(database, (INITIAL_SCHEMA,))
+    repository = IdempotencyRepository(database)
+    repository.reserve("tenant-a", 1, "tool", "key", {"value": 1}, "req_1")
+
+    apply_migrations(database)
+    repository.finish("tenant-a", 1, "tool", "key", "req_1", response={"status": "succeeded"})
+
+    replay = repository.reserve("tenant-a", 1, "tool", "key", {"value": 1}, "req_2")
+    assert replay.response == {"status": "succeeded"}
+
+
 def test_backup_restore_validates_state_and_preserves_source(tmp_path) -> None:
     keyring = EncryptionKeyring(1, {1: b"a" * 32})
     source = Storage.open(tmp_path / "source.sqlite3", keyring=keyring)
     source.capabilities.put("tenant-a", "connection-a", "19", {"account": True})
     source.idempotency.reserve("tenant-a", 1, "tool", "key", {"value": 1}, "req_1")
-    source.idempotency.finish("tenant-a", "tool", "key", "req_1", response={"status": "succeeded"})
+    source.idempotency.finish(
+        "tenant-a", 1, "tool", "key", "req_1", response={"status": "succeeded"}
+    )
     backup = tmp_path / "backup.sqlite3"
     source.backup(backup)
     before = backup.read_bytes()
@@ -100,6 +136,27 @@ def test_logically_corrupt_server_state_is_rejected_on_restore(tmp_path) -> None
     source.backup(backup)
     database = sqlite3.connect(backup)
     database.execute("UPDATE proposals SET payload_json = '{'")
+    database.commit()
+    database.close()
+
+    with pytest.raises(StorageCorruptionError, match="Restore validation failed"):
+        Storage.restore(backup, tmp_path / "restored.sqlite3")
+
+    assert backup.exists()
+    assert not (tmp_path / "restored.sqlite3").exists()
+
+
+def test_restore_rejects_final_idempotency_state_without_response(tmp_path) -> None:
+    source = Storage.open(tmp_path / "source.sqlite3")
+    source.idempotency.reserve("tenant-a", 1, "tool", "key", {"value": 1}, "req_1")
+    source.idempotency.finish(
+        "tenant-a", 1, "tool", "key", "req_1", response={"status": "succeeded"}
+    )
+    backup = tmp_path / "backup.sqlite3"
+    source.backup(backup)
+    database = sqlite3.connect(backup)
+    database.execute("DROP TRIGGER idempotency_response_invariant_update")
+    database.execute("UPDATE idempotency_keys SET response_json = NULL")
     database.commit()
     database.close()
 

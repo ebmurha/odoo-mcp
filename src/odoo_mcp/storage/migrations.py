@@ -153,7 +153,45 @@ INITIAL_SCHEMA = Migration(
     ),
 )
 
-MIGRATIONS = (INITIAL_SCHEMA,)
+IDEMPOTENCY_RESPONSE_INVARIANT = Migration(
+    "0002_idempotency_response_invariant",
+    (
+        """
+        CREATE TABLE _migration_0002_idempotency_validation (
+            valid INTEGER NOT NULL CHECK (valid = 1)
+        )
+        """,
+        """
+        INSERT INTO _migration_0002_idempotency_validation (valid)
+        SELECT CASE WHEN EXISTS (
+            SELECT 1 FROM idempotency_keys
+            WHERE (state = 'in_progress' AND response_json IS NOT NULL)
+               OR (state != 'in_progress' AND response_json IS NULL)
+        ) THEN 0 ELSE 1 END
+        """,
+        "DROP TABLE _migration_0002_idempotency_validation",
+        """
+        CREATE TRIGGER idempotency_response_invariant_insert
+        BEFORE INSERT ON idempotency_keys
+        WHEN (NEW.state = 'in_progress' AND NEW.response_json IS NOT NULL)
+          OR (NEW.state != 'in_progress' AND NEW.response_json IS NULL)
+        BEGIN
+            SELECT RAISE(ABORT, 'idempotency response invariant failed');
+        END
+        """,
+        """
+        CREATE TRIGGER idempotency_response_invariant_update
+        BEFORE UPDATE OF state, response_json ON idempotency_keys
+        WHEN (NEW.state = 'in_progress' AND NEW.response_json IS NOT NULL)
+          OR (NEW.state != 'in_progress' AND NEW.response_json IS NULL)
+        BEGIN
+            SELECT RAISE(ABORT, 'idempotency response invariant failed');
+        END
+        """,
+    ),
+)
+
+MIGRATIONS = (INITIAL_SCHEMA, IDEMPOTENCY_RESPONSE_INVARIANT)
 
 
 def _timestamp() -> str:

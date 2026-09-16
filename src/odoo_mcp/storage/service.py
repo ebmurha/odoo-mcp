@@ -93,9 +93,12 @@ class Storage:
                 char not in "0123456789abcdef" for char in request_hash
             ):
                 raise StorageCorruptionError("Stored idempotency state is invalid")
-            IdempotencyState(str(row["state"]))
-            if row["response_json"] is not None:
-                parse_mapping(str(row["response_json"]))
+            state = IdempotencyState(str(row["state"]))
+            response = (
+                None if row["response_json"] is None else parse_mapping(str(row["response_json"]))
+            )
+            if (state is IdempotencyState.IN_PROGRESS) != (response is None):
+                raise StorageCorruptionError("Stored idempotency replay state is invalid")
             parse_timestamp(str(row["expires_at"]))
             parse_timestamp(str(row["created_at"]))
             parse_timestamp(str(row["updated_at"]))

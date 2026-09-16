@@ -357,11 +357,22 @@ class IdempotencyRepository:
             """,
             (tenant_id, tool_name, idempotency_key),
         ).fetchone()
-        if row is not None and parse_timestamp(str(row["expires_at"])) <= now:
+        existing_state: IdempotencyState | None = None
+        existing_response: dict[str, object] | None = None
+        if row is not None:
             existing_state = IdempotencyState(str(row["state"]))
-            if existing_state in {IdempotencyState.SUCCEEDED, IdempotencyState.FAILED}:
-                connection.execute("DELETE FROM idempotency_keys WHERE id = ?", (row["id"],))
-                row = None
+            existing_response = (
+                None if row["response_json"] is None else parse_mapping(str(row["response_json"]))
+            )
+            if (existing_state is IdempotencyState.IN_PROGRESS) != (existing_response is None):
+                raise IdempotencyTransitionError("Stored idempotency replay state is invalid")
+        if (
+            row is not None
+            and parse_timestamp(str(row["expires_at"])) <= now
+            and existing_state in {IdempotencyState.SUCCEEDED, IdempotencyState.FAILED}
+        ):
+            connection.execute("DELETE FROM idempotency_keys WHERE id = ?", (row["id"],))
+            row = None
         if row is None:
             connection.execute(
                 """
@@ -394,25 +405,24 @@ class IdempotencyRepository:
             raise IdempotencyPayloadMismatch(
                 "The idempotency key was already used for a different request"
             )
-        state = IdempotencyState(str(row["state"]))
-        response = (
-            None if row["response_json"] is None else parse_mapping(str(row["response_json"]))
-        )
+        if existing_state is None:
+            raise IdempotencyTransitionError("Stored idempotency replay state is invalid")
         return IdempotencyDecision(
             disposition=(
                 IdempotencyDisposition.IN_PROGRESS
-                if state is IdempotencyState.IN_PROGRESS
+                if existing_state is IdempotencyState.IN_PROGRESS
                 else IdempotencyDisposition.REPLAY
             ),
-            state=state,
+            state=existing_state,
             owner_request_id=str(row["owner_request_id"]),
-            response=response,
+            response=existing_response,
             expires_at=parse_timestamp(str(row["expires_at"])),
         )
 
     def finish(
         self,
         tenant_id: str,
+        company_id: int,
         tool_name: str,
         idempotency_key: str,
         owner_request_id: str,
@@ -423,6 +433,7 @@ class IdempotencyRepository:
             self.finish_in_transaction(
                 connection,
                 tenant_id,
+                company_id,
                 tool_name,
                 idempotency_key,
                 owner_request_id,
@@ -434,6 +445,7 @@ class IdempotencyRepository:
         self,
         connection: sqlite3.Connection,
         tenant_id: str,
+        company_id: int,
         tool_name: str,
         idempotency_key: str,
         owner_request_id: str,
@@ -441,25 +453,31 @@ class IdempotencyRepository:
         response: Mapping[str, object] | None = None,
     ) -> None:
         _required(tenant_id, "tenant_id")
+        _company(company_id)
         _required(tool_name, "tool_name")
         _required(idempotency_key, "idempotency_key")
         _required(owner_request_id, "owner_request_id")
         if state is IdempotencyState.IN_PROGRESS:
             raise IdempotencyTransitionError("An idempotency outcome must be final")
+        if response is None:
+            raise IdempotencyTransitionError(
+                "A final idempotency state requires a replayable response"
+            )
         cursor = connection.execute(
             """
             UPDATE idempotency_keys
             SET state = ?, response_json = ?, updated_at = ?
             WHERE tenant_id = ? AND tool_name = ? AND idempotency_key = ?
-              AND owner_request_id = ? AND state = 'in_progress'
+              AND company_id = ? AND owner_request_id = ? AND state = 'in_progress'
             """,
             (
                 state.value,
-                None if response is None else canonical_json(response),
+                canonical_json(response),
                 timestamp(),
                 tenant_id,
                 tool_name,
                 idempotency_key,
+                company_id,
                 owner_request_id,
             ),
         )

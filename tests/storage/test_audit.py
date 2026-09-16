@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 
 import pytest
 
@@ -78,3 +79,22 @@ def test_concurrent_audit_appends_form_one_valid_chain(tmp_path) -> None:
         list(pool.map(lambda value: storage.audit.append(_event(f"req_{value}")), range(12)))
 
     assert storage.audit.verify_chain("tenant-a").entry_count == 12
+
+
+def test_audit_error_text_cannot_persist_a_secret_marker(tmp_path) -> None:
+    storage = Storage.open(tmp_path / "state.sqlite3")
+    marker = "synthetic-secret-marker-that-must-not-persist"
+
+    record = storage.audit.append(
+        replace(
+            _event("req_failed"),
+            actual_result=None,
+            error_code="ODOO_API_ERROR",
+            error_message=f"upstream failure contained {marker}",
+            final_status="failed",
+        )
+    )
+
+    assert record.error_message == "Operation failed with ODOO_API_ERROR."
+    assert marker not in (tmp_path / "state.sqlite3").read_bytes().decode("utf-8", errors="ignore")
+    assert storage.audit.verify_chain("tenant-a").entry_count == 1
