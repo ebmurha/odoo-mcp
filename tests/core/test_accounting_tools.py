@@ -74,7 +74,23 @@ class AccountingAdapter:
                     residual_currency=Decimal("0"),
                     reconciled=True,
                     analytic_distribution={},
-                )
+                ),
+                AccountMoveLine(
+                    id=5,
+                    move=RelatedRecord(id=6, name="MVE/1"),
+                    account=RelatedRecord(id=7, name="Revenue"),
+                    journal=RelatedRecord(id=4, name="General"),
+                    company_id=company_id,
+                    date=date(2026, 1, 15),
+                    debit=Decimal("0"),
+                    credit=Decimal("10"),
+                    balance=Decimal("-10"),
+                    amount_currency=Decimal("-10"),
+                    residual=Decimal("0"),
+                    residual_currency=Decimal("0"),
+                    reconciled=True,
+                    analytic_distribution={},
+                ),
             ]
         )
 
@@ -94,7 +110,15 @@ class AccountingAdapter:
                     account_type="asset_cash",
                     company_ids=(company_id,),
                     reconcile=False,
-                )
+                ),
+                Account(
+                    id=7,
+                    code="4000",
+                    name="Revenue",
+                    account_type="income",
+                    company_ids=(company_id,),
+                    reconcile=False,
+                ),
             ]
         )
 
@@ -370,3 +394,40 @@ async def test_invalid_report_period_returns_structured_input_error(
     assert result.structured_content is not None
     assert result.structured_content["status"] == "failed"
     assert result.structured_content["error_code"] == "INVALID_INPUT"
+    assert storage.audit.list_for_tenant("tenant-accounting")[0].error_code == "INVALID_INPUT"
+
+
+async def test_invalid_aging_filter_is_audited_without_adapter_creation(
+    connection: OdooConnectionSettings,
+    tmp_path,
+) -> None:
+    storage = Storage.open(tmp_path / "invalid-aging.sqlite3")
+    called = False
+
+    async def factory(_connection: object) -> OdooAdapter:
+        nonlocal called
+        called = True
+        return AccountingAdapter()
+
+    server = create_mcp_server(
+        Resolver(_binding(connection)),
+        adapter_factory=factory,
+        storage=storage,
+    )
+    async with Client(server) as client:
+        result = await client.call_tool(
+            "get_aged_receivables",
+            {
+                "as_of_date": "2026-03-31",
+                "company_id": 1,
+                "partner_ids": [-1],
+            },
+        )
+
+    assert called is False
+    assert result.structured_content is not None
+    assert result.structured_content["error_code"] == "INVALID_INPUT"
+    audit = storage.audit.list_for_tenant("tenant-accounting")[0]
+    assert audit.tool_name == "get_aged_receivables"
+    assert audit.company_id == 1
+    assert audit.error_code == "INVALID_INPUT"

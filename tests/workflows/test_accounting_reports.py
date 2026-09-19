@@ -3,6 +3,8 @@ from __future__ import annotations
 from datetime import date
 from decimal import Decimal
 
+import pytest
+
 from odoo_mcp.adapters.accounting import (
     Account,
     AccountMoveLine,
@@ -12,6 +14,7 @@ from odoo_mcp.adapters.accounting import (
     RecordPage,
     RelatedRecord,
 )
+from odoo_mcp.mcp.error_codes import ErrorCode, OdooMcpError
 from odoo_mcp.mcp.schemas import AgingInput, TrialBalanceInput
 from odoo_mcp.workflows.accounting.reports import get_aged_balance, get_trial_balance
 
@@ -120,6 +123,13 @@ async def test_trial_balance_reconciles_opening_movement_totals_and_pages() -> N
                 line_date=date(2026, 2, 1),
                 credit="25.50",
             ),
+            _line(
+                4,
+                account_id=20,
+                account_name="Revenue",
+                line_date=date(2025, 12, 31),
+                credit="100",
+            ),
         ],
         accounts=[
             Account(
@@ -162,10 +172,13 @@ async def test_trial_balance_reconciles_opening_movement_totals_and_pages() -> N
     assert first.items[0].opening_balance == Decimal("100")
     assert first.items[0].period_debit == Decimal("25.50")
     assert first.summary.period_debit == first.summary.period_credit == Decimal("25.50")
-    assert first.summary.closing_balance == Decimal("100.00")
+    assert first.summary.closing_balance == Decimal("0.00")
     assert first.next_cursor is not None
     assert second.next_cursor is None
     assert "Audit reference: `req_trial`" in first.artifact_markdown
+    assert "Page rows: 1-1 of 2" in first.artifact_markdown
+    assert "Continuation: more rows are available" in first.artifact_markdown
+    assert "Whole-report totals:" in first.artifact_markdown
     assert {clause.field for clause in adapter.filters[0].clauses} >= {
         "move_id.state",
         "date",
@@ -252,6 +265,8 @@ async def test_empty_aging_is_successful_and_compact() -> None:
     assert result.summary.partner_count == 0
     assert result.summary.residual_total == 0
     assert "Aged Payables" in result.artifact_markdown
+    assert "Page rows: 0-0 of 0" in result.artifact_markdown
+    assert "Continuation: complete" in result.artifact_markdown
 
 
 async def test_payables_preserve_odoo_company_currency_sign() -> None:
@@ -312,7 +327,8 @@ async def test_large_trial_balance_is_paginated_without_truncating_totals() -> N
             account_id=identifier,
             account_name=f"Synthetic account {identifier}",
             line_date=date(2026, 1, 1),
-            debit="1",
+            debit="1" if identifier <= 500 else "0",
+            credit="0" if identifier <= 500 else "500",
         )
         for identifier in range(1, 502)
     ]
@@ -332,4 +348,114 @@ async def test_large_trial_balance_is_paginated_without_truncating_totals() -> N
     assert len(result.items) == 500
     assert result.next_cursor is not None
     assert result.summary.account_count == 501
-    assert result.summary.period_debit == Decimal("501")
+    assert result.summary.period_debit == Decimal("500")
+    assert "Page rows: 1-500 of 501" in result.artifact_markdown
+    assert "Whole-report totals:" in result.artifact_markdown
+
+
+async def test_unfiltered_unbalanced_trial_balance_fails_explicitly() -> None:
+    adapter = ReportAdapter(
+        lines=[
+            _line(
+                1,
+                account_id=10,
+                account_name="Cash",
+                line_date=date(2026, 1, 1),
+                debit="10",
+            )
+        ],
+        accounts=[
+            Account(
+                id=10,
+                code="1000",
+                name="Cash",
+                account_type="asset_cash",
+                company_ids=(1,),
+                reconcile=False,
+            )
+        ],
+    )
+
+    with pytest.raises(OdooMcpError) as caught:
+        await get_trial_balance(
+            adapter,
+            TrialBalanceInput(
+                company_id=1,
+                period_start=date(2026, 1, 1),
+                period_end=date(2026, 1, 31),
+            ),
+            company_name="Synthetic Co",
+            request_id="req_unbalanced",
+        )
+
+    assert caught.value.code is ErrorCode.ODOO_API_ERROR
+
+
+async def test_filtered_unbalanced_trial_balance_is_allowed() -> None:
+    adapter = ReportAdapter(
+        lines=[
+            _line(
+                1,
+                account_id=10,
+                account_name="Cash",
+                line_date=date(2026, 1, 1),
+                debit="10",
+            )
+        ],
+        accounts=[
+            Account(
+                id=10,
+                code="1000",
+                name="Cash",
+                account_type="asset_cash",
+                company_ids=(1,),
+                reconcile=False,
+            )
+        ],
+    )
+
+    result = await get_trial_balance(
+        adapter,
+        TrialBalanceInput(
+            company_id=1,
+            period_start=date(2026, 1, 1),
+            period_end=date(2026, 1, 31),
+            account_ids=(10,),
+        ),
+        company_name="Synthetic Co",
+        request_id="req_filtered",
+    )
+
+    assert result.summary.period_debit == Decimal("10")
+
+
+async def test_paginated_aging_artifact_labels_page_and_whole_report_total() -> None:
+    adapter = ReportAdapter(
+        lines=[
+            _line(
+                identifier,
+                account_id=30,
+                account_name="Receivable",
+                line_date=date(2026, 1, 1),
+                debit="10",
+                residual="10",
+                partner_id=identifier,
+                partner_name=f"Partner {identifier}",
+                maturity_date=date(2026, 2, 1),
+            )
+            for identifier in (1, 2)
+        ]
+    )
+
+    result = await get_aged_balance(
+        adapter,
+        AgingInput(company_id=1, as_of_date=date(2026, 3, 1), limit=1),
+        company_name="Synthetic Co",
+        request_id="req_aging_page",
+        payable=False,
+    )
+
+    assert result.next_cursor is not None
+    assert "Page rows: 1-1 of 2" in result.artifact_markdown
+    assert "Continuation: more rows are available" in result.artifact_markdown
+    assert "Whole-report total residual: 20." in result.artifact_markdown

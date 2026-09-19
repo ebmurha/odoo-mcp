@@ -390,6 +390,7 @@ async def test_trial_balance_reconciles_through_both_transport_contracts(
                 company_id=1,
                 period_start=date(2026, 1, 1),
                 period_end=date(2026, 3, 31),
+                account_ids=(3,),
             ),
             company_name="Alpha",
             request_id=f"req_{major}",

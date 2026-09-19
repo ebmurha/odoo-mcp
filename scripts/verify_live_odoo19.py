@@ -102,9 +102,13 @@ async def _qualify() -> None:
             company_name=company_name,
             request_id="req_live_qualification_trial",
         )
-        if trial.summary.closing_balance != (
-            trial.summary.opening_balance + trial.summary.period_debit - trial.summary.period_credit
-        ):
+        if trial.summary.opening_balance != 0:
+            _check_stage = "trial balance opening reconciliation"
+        elif trial.summary.period_debit != trial.summary.period_credit:
+            _check_stage = "trial balance period reconciliation"
+        elif trial.summary.closing_balance != 0:
+            _check_stage = "trial balance closing reconciliation"
+        if _check_stage != "trial balance reconciliation":
             raise OdooMcpError(
                 ErrorCode.ODOO_API_ERROR,
                 "The trial balance did not reconcile.",

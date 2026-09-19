@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import inspect
 import logging
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from datetime import date
 from typing import Annotated, TypeAlias
 
@@ -125,6 +125,60 @@ def create_mcp_server(
         structured_output=True,
     )
 
+    async def invalid_accounting_report(
+        report_definition: ToolDefinition,
+        company_id: int,
+        input_payload: Mapping[str, object],
+    ) -> AccountingToolResponse:
+        request_id = new_request_id()
+        binding: ConnectionBinding | None = None
+        try:
+            binding = await resolver.resolve()
+            if report_definition.required_permission not in binding.permissions:
+                raise OdooMcpError(
+                    ErrorCode.ODOO_AUTH_FAILED,
+                    "The resolved MCP identity is not authorized for this accounting report.",
+                    "Reconnect with accounting read permission and retry.",
+                )
+            if company_id not in binding.connection.allowed_company_ids:
+                raise OdooMcpError(
+                    ErrorCode.COMPANY_NOT_FOUND,
+                    "The requested company is not authorized for this connection.",
+                    "Use an authorized company ID and retry.",
+                )
+            error = ErrorResponse(
+                error_code=ErrorCode.INVALID_INPUT,
+                error_message="The accounting report input is invalid.",
+                remediation_hint="Correct the dates, identifiers, bounds, or cursor and retry.",
+                request_id=request_id,
+            )
+        except OdooMcpError as exc:
+            error = exc.as_response(request_id)
+        except Exception:
+            error = ErrorResponse(
+                error_code=ErrorCode.UNKNOWN_ERROR,
+                error_message="The accounting report failed unexpectedly.",
+                remediation_hint="Retry the request or contact the service operator.",
+                request_id=request_id,
+            )
+        if binding is not None and storage is not None:
+            try:
+                storage.audit.append(
+                    _audit_event(
+                        binding,
+                        report_definition,
+                        company_id,
+                        input_payload,
+                        request_id,
+                        None,
+                        final_status="failed",
+                        error=error,
+                    )
+                )
+            except Exception:
+                LOGGER.warning("Accounting report audit persistence failed; details suppressed.")
+        return AccountingToolResponse.from_error(error)
+
     async def accounting_report(
         report_definition: ToolDefinition,
         request: AccountingReadInput,
@@ -178,7 +232,8 @@ def create_mcp_server(
                 _audit_event(
                     binding,
                     report_definition,
-                    request,
+                    request.company_id,
+                    request.model_dump(mode="json"),
                     request_id,
                     snapshot,
                     final_status="succeeded",
@@ -219,7 +274,8 @@ def create_mcp_server(
                     _audit_event(
                         binding,
                         report_definition,
-                        request,
+                        request.company_id,
+                        request.model_dump(mode="json"),
                         request_id,
                         snapshot,
                         final_status="failed",
@@ -252,7 +308,19 @@ def create_mcp_server(
                 cursor=cursor,
             )
         except ValidationError:
-            return _invalid_input_response()
+            return await invalid_accounting_report(
+                trial_definition,
+                company_id,
+                {
+                    "period_start": period_start.isoformat(),
+                    "period_end": period_end.isoformat(),
+                    "company_id": company_id,
+                    "account_ids": list(account_ids),
+                    "idempotency_key": idempotency_key,
+                    "limit": limit,
+                    "cursor": cursor,
+                },
+            )
 
         async def run(adapter: OdooAdapter, company_name: str, request_id: str) -> ReportResponse:
             return await get_trial_balance(
@@ -295,7 +363,18 @@ def create_mcp_server(
                     cursor=cursor,
                 )
             except ValidationError:
-                return _invalid_input_response()
+                return await invalid_accounting_report(
+                    aging_definition,
+                    company_id,
+                    {
+                        "as_of_date": as_of_date.isoformat(),
+                        "company_id": company_id,
+                        "partner_ids": list(partner_ids),
+                        "idempotency_key": idempotency_key,
+                        "limit": limit,
+                        "cursor": cursor,
+                    },
+                )
 
             async def run(
                 adapter: OdooAdapter,
@@ -330,7 +409,8 @@ def create_mcp_server(
 def _audit_event(
     binding: ConnectionBinding,
     definition: ToolDefinition,
-    request: AccountingReadInput,
+    company_id: int,
+    input_payload: Mapping[str, object],
     request_id: str,
     snapshot: CapabilitySnapshot | None,
     *,
@@ -341,7 +421,7 @@ def _audit_event(
     return AuditEvent(
         request_id=request_id,
         tenant_id=binding.tenant_id,
-        company_id=request.company_id,
+        company_id=company_id,
         tool_name=definition.name,
         tool_version=definition.version,
         module="accounting",
@@ -351,7 +431,7 @@ def _audit_event(
         odoo_user=binding.connection.username,
         odoo_version=None if snapshot is None else str(snapshot.version),
         odoo_transport=None if snapshot is None else snapshot.transport,
-        input_payload=request.model_dump(mode="json"),
+        input_payload=input_payload,
         dry_run=False,
         proposed_action=None,
         actual_result=actual_result,
@@ -359,15 +439,4 @@ def _audit_event(
         error_code=None if error is None else error.error_code.value,
         error_message=None if error is None else error.error_message,
         final_status=final_status,
-    )
-
-
-def _invalid_input_response() -> AccountingToolResponse:
-    return AccountingToolResponse.from_error(
-        ErrorResponse(
-            error_code=ErrorCode.INVALID_INPUT,
-            error_message="The accounting report input is invalid.",
-            remediation_hint="Correct the dates, identifiers, bounds, or cursor and retry.",
-            request_id=new_request_id(),
-        )
     )

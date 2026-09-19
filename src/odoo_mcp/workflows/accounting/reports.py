@@ -173,13 +173,22 @@ def _trial_artifact(
     items: Iterable[TrialBalanceItem],
     summary: TrialBalanceSummary,
     request_id: str,
+    page_offset: int,
+    page_count: int,
+    has_more: bool,
 ) -> str:
+    first_row = page_offset + 1 if page_count else 0
+    last_row = page_offset + page_count if page_count else 0
     rows = [
         "# Trial Balance",
         "",
         f"- Period: {request.period_start.isoformat()} to {request.period_end.isoformat()}",
         f"- Company: {_markdown_text(company_name)} ({request.company_id})",
         f"- Audit reference: `{request_id}`",
+        f"- Page rows: {first_row}-{last_row} of {summary.account_count}",
+        "- Continuation: more rows are available through `next_cursor`"
+        if has_more
+        else "- Continuation: complete",
         "",
         "| Code | Account | Opening | Debit | Credit | Closing |",
         "|---|---|---:|---:|---:|---:|",
@@ -193,7 +202,8 @@ def _trial_artifact(
     rows.extend(
         [
             "",
-            f"Totals: opening {summary.opening_balance}; debit {summary.period_debit}; "
+            f"Whole-report totals: opening {summary.opening_balance}; "
+            f"debit {summary.period_debit}; "
             f"credit {summary.period_credit}; closing {summary.closing_balance}.",
         ]
     )
@@ -258,8 +268,28 @@ async def get_trial_balance(
         period_credit=sum((item.period_credit for item in all_items), _ZERO),
         closing_balance=sum((item.closing_balance for item in all_items), _ZERO),
     )
+    if not request.account_ids and (
+        summary.opening_balance != _ZERO
+        or summary.period_debit != summary.period_credit
+        or summary.closing_balance != _ZERO
+    ):
+        raise OdooMcpError(
+            ErrorCode.ODOO_API_ERROR,
+            "The full-company trial balance did not reconcile.",
+            "Check Odoo record access and accounting data, then retry.",
+        )
+    page_offset = _cursor_offset(request.cursor)
     selected, next_cursor = _page(all_items, request.limit, request.cursor)
-    artifact = _trial_artifact(request, company_name, selected, summary, request_id)
+    artifact = _trial_artifact(
+        request,
+        company_name,
+        selected,
+        summary,
+        request_id,
+        page_offset,
+        len(selected),
+        next_cursor is not None,
+    )
     return TrialBalanceResponse(
         request_id=request_id,
         company_id=request.company_id,
@@ -302,13 +332,22 @@ def _aging_artifact(
     items: Iterable[AgingItem],
     summary: AgingSummary,
     request_id: str,
+    page_offset: int,
+    page_count: int,
+    has_more: bool,
 ) -> str:
+    first_row = page_offset + 1 if page_count else 0
+    last_row = page_offset + page_count if page_count else 0
     rows = [
         f"# {title}",
         "",
         f"- As of: {request.as_of_date.isoformat()}",
         f"- Company: {_markdown_text(company_name)} ({request.company_id})",
         f"- Audit reference: `{request_id}`",
+        f"- Page rows: {first_row}-{last_row} of {summary.partner_count}",
+        "- Continuation: more rows are available through `next_cursor`"
+        if has_more
+        else "- Continuation: complete",
         "",
         "| Partner | Total | Not yet due | 1-30 | 31-60 | 61-90 | 90+ | Oldest due |",
         "|---|---:|---:|---:|---:|---:|---:|---|",
@@ -320,7 +359,7 @@ def _aging_artifact(
         f"{item.buckets.days_90_plus} | {item.oldest_due_date.isoformat()} |"
         for item in items
     )
-    rows.extend(["", f"Total residual: {summary.residual_total}."])
+    rows.extend(["", f"Whole-report total residual: {summary.residual_total}."])
     return "\n".join(rows)
 
 
@@ -407,6 +446,7 @@ async def get_aged_balance(
         residual_total=sum((item.residual_total for item in all_items), _ZERO),
         buckets=AgingBuckets(**total_buckets),
     )
+    page_offset = _cursor_offset(request.cursor)
     selected, next_cursor = _page(all_items, request.limit, request.cursor)
     artifact = _aging_artifact(
         "Aged Payables" if payable else "Aged Receivables",
@@ -415,6 +455,9 @@ async def get_aged_balance(
         selected,
         summary,
         request_id,
+        page_offset,
+        len(selected),
+        next_cursor is not None,
     )
     return AgingResponse(
         request_id=request_id,

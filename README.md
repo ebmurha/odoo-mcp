@@ -100,7 +100,8 @@ boundary and never expand the technical user's Odoo permissions.
 Report results are deterministically ordered and cursor-paginated with a default
 limit of 100 and maximum of 500. Empty data is a successful empty report;
 upstream denial, timeout, malformed data, or partial retrieval is a structured
-failure rather than an empty result.
+failure rather than an empty result. Paginated Markdown artifacts label the row
+range, continuation state, and whole-report totals explicitly.
 
 ## Verification
 
