@@ -76,6 +76,27 @@ reports atomically persist their Markdown artifact and a compact audit outcome;
 failed and denied report calls persist a secret-safe failure audit when an
 isolation identity has been resolved.
 
+## Write safety
+
+`odoo_mcp.policy.WriteSafetyCoordinator` is the required boundary for
+write-capable workflows. It enforces registry risk metadata, resolved identity,
+permission, company, and capability gates before workflow preparation. Calls
+default to preview-only behavior. Execution requires explicit `dry_run: false`
+and a non-empty idempotency key, then reserves that key and appends the attempt
+audit before fresh-state validation and the Odoo mutation.
+
+Successful, rejected, conflicting, replayed, known-failed, and unknown outcomes
+remain distinct and replay-safe across restart. An uncertain mutation is never
+automatically retried; if outcome persistence fails after a possible mutation,
+the in-progress reservation continues to block duplicate execution. Odoo
+permission denials that prove no mutation occurred remain structured known
+failures. Audit and response text suppress raw exception details.
+
+Human confirmation belongs to the MCP client host. The server does not issue
+approval tokens, provide an approval UI, or automatically turn a preview into
+execution. No write-capable business tool is registered in the current public
+tool set; subsequent accounting workflows use this shared safety boundary.
+
 ## Configuration
 
 The supported Odoo settings are documented in `.env.example`. Do not configure

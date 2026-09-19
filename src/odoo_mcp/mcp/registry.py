@@ -23,6 +23,22 @@ class ToolDefinition:
     required_capability: str | None
     annotations: ToolAnnotations
 
+    def __post_init__(self) -> None:
+        if self.risk_level == "read":
+            valid = (
+                self.annotations.read_only_hint is True
+                and self.annotations.destructive_hint is False
+                and self.annotations.idempotent_hint is True
+            )
+        else:
+            valid = (
+                self.annotations.read_only_hint is False
+                and self.annotations.idempotent_hint is True
+                and self.annotations.open_world_hint is True
+            )
+        if not valid:
+            raise ValueError("Tool annotations do not match the declared risk level")
+
     def availability(self) -> ToolAvailability:
         return ToolAvailability(
             name=self.name,
