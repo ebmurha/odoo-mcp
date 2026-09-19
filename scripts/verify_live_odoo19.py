@@ -10,15 +10,22 @@ from odoo_mcp.adapters.accounting import DatePeriod, FilterClause, PageRequest, 
 from odoo_mcp.adapters.odoo.client import OdooClient
 from odoo_mcp.app.settings import DeploymentProfile, SettingsError, load_settings
 from odoo_mcp.mcp.error_codes import ErrorCode, OdooMcpError
+from odoo_mcp.mcp.schemas import AgingInput, TrialBalanceInput
+from odoo_mcp.workflows.accounting.reports import get_aged_balance, get_trial_balance
+
+_check_stage = "startup"
 
 
 async def _qualify() -> None:
+    global _check_stage
     settings = load_settings(DeploymentProfile.LOCAL)
     if settings.connection is None:
         raise SettingsError("The local Odoo connection is unavailable")
     connection = settings.connection
+    _check_stage = "connection"
     adapter = await OdooClient.connect(connection)
     try:
+        _check_stage = "company and capability discovery"
         companies = await adapter.get_companies()
         capabilities = await adapter.get_capabilities()
         if capabilities.version != 19 or capabilities.transport != "json2":
@@ -45,6 +52,7 @@ async def _qualify() -> None:
         today = date.today()
         month = DatePeriod(start=today.replace(day=1), end=today)
 
+        _check_stage = "adapter accounting reads"
         await adapter.get_account_moves(
             company_id,
             ReadFilters(clauses=(FilterClause(field="state", operator="=", value="posted"),)),
@@ -80,16 +88,82 @@ async def _qualify() -> None:
         await adapter.get_products(company_id, ReadFilters(), page=page)
         await adapter.get_account_accounts(company_id, ReadFilters(), page=page)
         await adapter.get_analytic_accounts(company_id, ReadFilters(), page=page)
+
+        company_name = next(company.name for company in companies if company.id == company_id)
+        _check_stage = "trial balance reconciliation"
+        trial = await get_trial_balance(
+            adapter,
+            TrialBalanceInput(
+                company_id=company_id,
+                period_start=month.start,
+                period_end=month.end,
+                limit=500,
+            ),
+            company_name=company_name,
+            request_id="req_live_qualification_trial",
+        )
+        if trial.summary.closing_balance != (
+            trial.summary.opening_balance + trial.summary.period_debit - trial.summary.period_credit
+        ):
+            raise OdooMcpError(
+                ErrorCode.ODOO_API_ERROR,
+                "The trial balance did not reconcile.",
+                "Check the authorized accounting source data and retry.",
+            )
+        for payable in (False, True):
+            _check_stage = (
+                "payable aging reconciliation" if payable else "receivable aging reconciliation"
+            )
+            aging = await get_aged_balance(
+                adapter,
+                AgingInput(company_id=company_id, as_of_date=today, limit=500),
+                company_name=company_name,
+                request_id="req_live_qualification_aging",
+                payable=payable,
+            )
+            bucket_total = sum(aging.summary.buckets.model_dump().values())
+            if aging.summary.residual_total != bucket_total:
+                raise OdooMcpError(
+                    ErrorCode.ODOO_API_ERROR,
+                    "The aging report did not reconcile.",
+                    "Check the authorized accounting source data and retry.",
+                )
     finally:
         await adapter.close()
 
 
 def main() -> None:
+    global _check_stage
     try:
         asyncio.run(_qualify())
     except OdooMcpError as exc:
+        for field in (
+            "id",
+            "move_id",
+            "account_id",
+            "journal_id",
+            "partner_id",
+            "company_id",
+            "currency_id",
+            "date",
+            "date_maturity",
+            "name",
+            "debit",
+            "credit",
+            "balance",
+            "amount_currency",
+            "amount_residual",
+            "amount_residual_currency",
+            "reconciled",
+            "analytic_distribution",
+        ):
+            if exc.safe_message == f"Odoo returned an invalid account.move.line field: {field}.":
+                _check_stage = f"account move-line field {field}"
+                break
         print(
-            f"Live Odoo 19 read-only qualification failed safely: {exc.code.value}", file=sys.stderr
+            f"Live Odoo 19 read-only qualification failed safely during {_check_stage}: "
+            f"{exc.code.value}",
+            file=sys.stderr,
         )
         raise SystemExit(1) from None
     except SettingsError:

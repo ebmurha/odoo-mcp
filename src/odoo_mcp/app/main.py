@@ -24,6 +24,7 @@ from odoo_mcp.app.settings import (
 )
 from odoo_mcp.mcp.registry import TOOL_REGISTRY
 from odoo_mcp.mcp.server import create_mcp_server
+from odoo_mcp.storage import Storage
 
 
 class _UnavailableSharedRepository:
@@ -45,6 +46,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--config", type=Path)
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8000)
+    parser.add_argument("--storage", type=Path, default=Path(".odoo-mcp/state.sqlite3"))
     return parser
 
 
@@ -115,7 +117,7 @@ def main(argv: list[str] | None = None) -> None:
         resolver = build_resolver(profile, config=config)
     except SettingsError as exc:
         _fail(parser, str(exc))
-    server = create_mcp_server(resolver)
+    server = create_mcp_server(resolver, storage=Storage.open(args.storage))
     if transport == "stdio":
         server.run(transport="stdio")
     else:

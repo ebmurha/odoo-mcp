@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import date
+from decimal import Decimal
 from typing import Any
 
 import httpx
@@ -10,6 +12,8 @@ from odoo_mcp.adapters.odoo.capabilities import CAPABILITY_PROBES
 from odoo_mcp.adapters.odoo.client import OdooClient
 from odoo_mcp.app.settings import OdooConnectionSettings
 from odoo_mcp.mcp.error_codes import ErrorCode, OdooMcpError
+from odoo_mcp.mcp.schemas import TrialBalanceInput
+from odoo_mcp.workflows.accounting.reports import get_trial_balance
 from odoo_mcp.workflows.core.capabilities import get_erp_capabilities
 
 
@@ -335,6 +339,71 @@ async def test_accounting_read_uses_the_selected_transport_contract(
 
 
 @pytest.mark.parametrize("major", [18, 19])
+async def test_trial_balance_reconciles_through_both_transport_contracts(
+    connection: OdooConnectionSettings,
+    major: int,
+) -> None:
+    def result_for(model: str) -> list[dict[str, object]]:
+        if model == "res.company":
+            return [{"id": 1, "name": "Alpha"}, {"id": 2, "name": "Beta"}]
+        if model == "account.move.line":
+            opening = _account_move_line_row()
+            opening.update(
+                {
+                    "id": 1,
+                    "date": "2025-12-31",
+                    "debit": "100",
+                    "balance": "100",
+                    "amount_currency": "100",
+                }
+            )
+            movement = _account_move_line_row()
+            movement["id"] = 2
+            return [opening, movement]
+        if model == "account.account":
+            return [_account_row()]
+        pytest.fail(f"Unexpected model: {model}")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/web/webclient/version_info":
+            return _version_response(major)
+        body: dict[str, Any] = __import__("json").loads(request.content)
+        if major == 18:
+            args = body["params"]["args"]
+            if body["params"]["service"] == "common":
+                return httpx.Response(200, json={"result": 7})
+            return httpx.Response(200, json={"result": result_for(args[3])})
+        if request.url.path == "/json/2/res.users/context_get":
+            return httpx.Response(200, json={"uid": 7})
+        model = request.url.path.split("/")[3]
+        return httpx.Response(200, json=result_for(model))
+
+    adapter = await OdooClient.connect(
+        connection,
+        http_transport=httpx.MockTransport(handler),
+    )
+    try:
+        await adapter.get_companies()
+        result = await get_trial_balance(
+            adapter,
+            TrialBalanceInput(
+                company_id=1,
+                period_start=date(2026, 1, 1),
+                period_end=date(2026, 3, 31),
+            ),
+            company_name="Alpha",
+            request_id=f"req_{major}",
+        )
+    finally:
+        await adapter.close()
+
+    assert result.summary.period_debit == Decimal("25.50")
+    assert result.summary.period_credit == Decimal("0")
+    assert result.summary.closing_balance == Decimal("125.50")
+    assert result.items[0].opening_balance == Decimal("100")
+
+
+@pytest.mark.parametrize("major", [18, 19])
 async def test_accounting_acl_denial_is_safe_and_specific(
     connection: OdooConnectionSettings,
     major: int,
@@ -412,4 +481,39 @@ def _account_move_row() -> dict[str, object]:
         "amount_residual": 0.0,
         "payment_state": False,
         "ref": False,
+    }
+
+
+def _account_move_line_row() -> dict[str, object]:
+    return {
+        "id": 1,
+        "move_id": [2, "MVE/2"],
+        "account_id": [3, "Cash"],
+        "journal_id": [4, "General"],
+        "partner_id": False,
+        "company_id": [1, "Alpha"],
+        "currency_id": False,
+        "date": "2026-01-15",
+        "date_maturity": False,
+        "name": "Synthetic line",
+        "debit": "25.50",
+        "credit": "0",
+        "balance": "25.50",
+        "amount_currency": "25.50",
+        "amount_residual": "0",
+        "amount_residual_currency": "0",
+        "reconciled": True,
+        "analytic_distribution": {},
+    }
+
+
+def _account_row() -> dict[str, object]:
+    return {
+        "id": 3,
+        "code": "1000",
+        "name": "Cash",
+        "account_type": "asset_cash",
+        "company_ids": [1],
+        "currency_id": False,
+        "reconcile": False,
     }

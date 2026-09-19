@@ -35,7 +35,7 @@ def test_profile_selects_approved_transport(
     }.items():
         monkeypatch.setenv(key, value)
     fake = FakeServer()
-    monkeypatch.setattr(main_module, "create_mcp_server", lambda _resolver: fake)
+    monkeypatch.setattr(main_module, "create_mcp_server", lambda _resolver, **_kwargs: fake)
 
     main_module.main(["--profile", profile])
 

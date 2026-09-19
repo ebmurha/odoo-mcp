@@ -1,3 +1,7 @@
 permissions:
   core_read:
     - get_erp_capabilities
+  accounting_read:
+    - get_trial_balance
+    - get_aged_receivables
+    - get_aged_payables

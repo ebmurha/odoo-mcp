@@ -184,6 +184,31 @@ class ArtifactRepository:
         artifact_format: str,
         content: str,
     ) -> ArtifactRecord:
+        with self._database.transaction(write=True) as connection:
+            return self.create_in_transaction(
+                connection,
+                request_id,
+                tenant_id,
+                company_id,
+                tool_name,
+                module,
+                artifact_type,
+                artifact_format,
+                content,
+            )
+
+    def create_in_transaction(
+        self,
+        connection: sqlite3.Connection,
+        request_id: str,
+        tenant_id: str,
+        company_id: int,
+        tool_name: str,
+        module: str,
+        artifact_type: str,
+        artifact_format: str,
+        content: str,
+    ) -> ArtifactRecord:
         _required(request_id, "request_id")
         _required(tenant_id, "tenant_id")
         _company(company_id)
@@ -192,30 +217,29 @@ class ArtifactRepository:
         _required(artifact_type, "artifact_type")
         _required(artifact_format, "artifact_format")
         created_at = timestamp()
-        with self._database.transaction(write=True) as connection:
-            cursor = connection.execute(
-                """
-                INSERT INTO artifacts (
-                    request_id, tenant_id, company_id, tool_name, module,
-                    artifact_type, artifact_format, content, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    request_id,
-                    tenant_id,
-                    company_id,
-                    tool_name,
-                    module,
-                    artifact_type,
-                    artifact_format,
-                    content,
-                    created_at,
-                ),
-            )
-            row = connection.execute(
-                "SELECT * FROM artifacts WHERE tenant_id = ? AND id = ?",
-                (tenant_id, cursor.lastrowid),
-            ).fetchone()
+        cursor = connection.execute(
+            """
+            INSERT INTO artifacts (
+                request_id, tenant_id, company_id, tool_name, module,
+                artifact_type, artifact_format, content, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                request_id,
+                tenant_id,
+                company_id,
+                tool_name,
+                module,
+                artifact_type,
+                artifact_format,
+                content,
+                created_at,
+            ),
+        )
+        row = connection.execute(
+            "SELECT * FROM artifacts WHERE tenant_id = ? AND id = ?",
+            (tenant_id, cursor.lastrowid),
+        ).fetchone()
         if row is None:
             raise RuntimeError("Artifact creation failed")
         return self._from_row(row)

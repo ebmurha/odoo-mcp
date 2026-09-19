@@ -1,11 +1,11 @@
 # Odoo MCP
 
-`odoo-mcp` is a workflow-native MCP server for Odoo Enterprise. The current
-foundation release exposes one read-only discovery tool,
-`get_erp_capabilities`. Accounting workflows are not implemented yet.
+`odoo-mcp` is a workflow-native MCP server for Odoo Enterprise. It exposes
+read-only capability discovery, trial-balance reporting, and aged receivables
+and payables reporting.
 
 The internal accounting adapter provides bounded, typed, company-scoped read
-primitives for later workflow tools. It enforces fixed model/action allowlists,
+primitives for the reporting workflows. It enforces fixed model/action allowlists,
 strips denied fields, normalizes dates, decimals, relations, and cursor pages,
 and translates Odoo authentication, permission, and transport failures into
 safe errors. It does not expose generic CRUD or an Odoo configuration surface.
@@ -27,7 +27,7 @@ Requires Python 3.11 or newer and [uv](https://docs.astral.sh/uv/).
 Copy-Item .env.example .env.local
 # Replace the placeholders in .env.local, then:
 uv sync --locked --all-extras
-uv run odoo-mcp --profile local
+uv run odoo-mcp --profile local --config config/config.example.yaml
 ```
 
 Local Development uses stdio. Process-environment settings take precedence over
@@ -70,17 +70,37 @@ idempotency state, capability data, and encrypted connections verify. Encryption
 keys must be backed up and restored separately. PostgreSQL is not supported or
 claimed by this release.
 
+The server stores local durable state at `.odoo-mcp/state.sqlite3` by default.
+Use `--storage <path>` to select a different SQLite file. Successful accounting
+reports atomically persist their Markdown artifact and a compact audit outcome;
+failed and denied report calls persist a secret-safe failure audit when an
+isolation identity has been resolved.
+
 ## Configuration
 
 The supported Odoo settings are documented in `.env.example`. Do not configure
 an Odoo version: the adapter detects it and fails explicitly for unsupported or
 malformed responses. `config/config.example.yaml` is the safe MCP permission-map
-example. A tool is authorized only when it is listed under its registry-defined
+example and enables the current read tools. A tool is authorized only when it is
+listed under its registry-defined
 permission; unknown or mismatched entries prevent startup.
 
 Use a dedicated non-production Odoo technical user with only the required
 company and module access. Company IDs are an additional MCP authorization
 boundary and never expand the technical user's Odoo permissions.
+
+## Accounting reports
+
+- `get_trial_balance` returns posted opening balances, inclusive-period debit
+  and credit movement, closing balances, totals, and a Markdown artifact.
+- `get_aged_receivables` and `get_aged_payables` reconstruct posted residuals
+  as of a date, including later partial reconciliations, and group them into
+  not-yet-due, 1–30, 31–60, 61–90, and 90+ day buckets.
+
+Report results are deterministically ordered and cursor-paginated with a default
+limit of 100 and maximum of 500. Empty data is a successful empty report;
+upstream denial, timeout, malformed data, or partial retrieval is a structured
+failure rather than an empty result.
 
 ## Verification
 

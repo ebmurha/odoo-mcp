@@ -90,7 +90,12 @@ def test_streamable_http_lists_the_shared_registry(
 
     assert initialize.status_code == 200
     assert listed.status_code == 200
-    assert [tool["name"] for tool in listed.json()["result"]["tools"]] == ["get_erp_capabilities"]
+    assert [tool["name"] for tool in listed.json()["result"]["tools"]] == [
+        "get_erp_capabilities",
+        "get_trial_balance",
+        "get_aged_receivables",
+        "get_aged_payables",
+    ]
     assert called.status_code == 200
     assert called.json()["result"]["structuredContent"]["status"] == "ok"
 
@@ -113,4 +118,9 @@ async def test_stdio_profile_lists_the_shared_registry() -> None:
     async with Client(parameters) as client:
         listed = await client.list_tools()
 
-    assert [tool.name for tool in listed.tools] == ["get_erp_capabilities"]
+    assert [tool.name for tool in listed.tools] == [
+        "get_erp_capabilities",
+        "get_trial_balance",
+        "get_aged_receivables",
+        "get_aged_payables",
+    ]

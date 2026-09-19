@@ -86,7 +86,12 @@ async def test_all_profiles_expose_identical_registry_and_discovery(
             outputs.append(result.structured_content)
 
     assert contracts[0] == contracts[1] == contracts[2]
-    assert [tool["name"] for tool in contracts[0]] == ["get_erp_capabilities"]
+    assert [tool["name"] for tool in contracts[0]] == [
+        "get_erp_capabilities",
+        "get_trial_balance",
+        "get_aged_receivables",
+        "get_aged_payables",
+    ]
     for output in outputs:
         output.pop("request_id")
     assert outputs[0] == outputs[1] == outputs[2]
@@ -103,24 +108,25 @@ async def test_registry_metadata_and_schemas_match_the_contract(
     server = create_mcp_server(Resolver(_binding(DeploymentProfile.LOCAL, connection)))
     tools = await server.list_tools()
 
-    assert len(TOOL_REGISTRY) == 1
-    assert len(tools) == 1
-    tool = tools[0]
-    assert tool.name == "get_erp_capabilities"
-    assert tool.input_schema["type"] == "object"
-    assert tool.input_schema.get("properties") == {}
-    assert tool.output_schema is not None
-    assert tool.annotations is not None
-    assert tool.annotations.read_only_hint is True
-    assert tool.annotations.destructive_hint is False
-    assert tool.annotations.idempotent_hint is True
-    assert tool.annotations.open_world_hint is True
-    assert tool.meta == {
-        "toolVersion": "1.0.0",
-        "riskLevel": "read",
-        "requiredPermission": "core_read",
-        "requiredCapability": None,
+    assert len(TOOL_REGISTRY) == 4
+    assert len(tools) == 4
+    assert [tool.name for tool in tools] == [definition.name for definition in TOOL_REGISTRY]
+    for tool, definition in zip(tools, TOOL_REGISTRY, strict=True):
+        assert tool.input_schema["type"] == "object"
+        assert tool.output_schema is not None
+        assert tool.annotations is not None
+        assert tool.annotations.read_only_hint is True
+        assert tool.annotations.destructive_hint is False
+        assert tool.annotations.idempotent_hint is True
+        assert tool.annotations.open_world_hint is True
+        assert tool.meta == definition.protocol_meta()
+    assert tools[0].input_schema.get("properties") == {}
+    assert set(tools[1].input_schema["required"]) == {
+        "period_start",
+        "period_end",
+        "company_id",
     }
+    assert set(tools[2].input_schema["required"]) == {"as_of_date", "company_id"}
 
 
 async def test_permission_denial_happens_before_adapter_creation(
@@ -179,4 +185,11 @@ def test_public_permission_example_matches_registry() -> None:
     config = load_permission_config(ROOT / "config" / "config.example.yaml")
     mapped = {permission: set(tool_names) for permission, tool_names in config.permissions.items()}
 
-    assert mapped == {"core_read": {"get_erp_capabilities"}}
+    assert mapped == {
+        "core_read": {"get_erp_capabilities"},
+        "accounting_read": {
+            "get_trial_balance",
+            "get_aged_receivables",
+            "get_aged_payables",
+        },
+    }

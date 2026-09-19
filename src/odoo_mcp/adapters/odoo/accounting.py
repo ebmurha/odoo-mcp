@@ -39,6 +39,7 @@ from odoo_mcp.mcp.error_codes import ErrorCode, OdooMcpError
 
 RawRecord: TypeAlias = Mapping[str, object]
 RecordT = TypeVar("RecordT", bound=AdapterValue)
+ParsedT = TypeVar("ParsedT")
 RowValidator = Callable[[list[RawRecord], int], Awaitable[None]]
 
 _ACCOUNT_MOVE_FIELDS = [
@@ -168,6 +169,22 @@ def _invalid_response() -> OdooMcpError:
         "Odoo returned an invalid accounting response.",
         "Check Odoo compatibility and retry.",
     )
+
+
+def _read_field(
+    raw: RawRecord,
+    model: str,
+    field: str,
+    parser: Callable[[object], ParsedT],
+) -> ParsedT:
+    try:
+        return parser(raw.get(field))
+    except OdooMcpError:
+        raise OdooMcpError(
+            ErrorCode.ODOO_API_ERROR,
+            f"Odoo returned an invalid {model} field: {field}.",
+            "Check Odoo compatibility and data integrity, then retry.",
+        ) from None
 
 
 def _invalid_input(message: str, remediation: str) -> OdooMcpError:
@@ -300,24 +317,31 @@ def _normalize_account_move(raw: RawRecord) -> AccountMove:
 
 def _normalize_account_move_line(raw: RawRecord) -> AccountMoveLine:
     return AccountMoveLine(
-        id=_positive_int(raw.get("id")),
-        move=_relation(raw.get("move_id")),
-        account=_relation(raw.get("account_id")),
-        journal=_relation(raw.get("journal_id")),
-        partner=_optional_relation(raw.get("partner_id")),
-        company_id=_company_id(raw.get("company_id")),
-        currency=_optional_relation(raw.get("currency_id")),
-        date=_date(raw.get("date")),
-        maturity_date=_optional_date(raw.get("date_maturity")),
-        label=_optional_text(raw.get("name")),
-        debit=_decimal(raw.get("debit")),
-        credit=_decimal(raw.get("credit")),
-        balance=_decimal(raw.get("balance")),
-        amount_currency=_decimal(raw.get("amount_currency")),
-        residual=_decimal(raw.get("amount_residual")),
-        residual_currency=_decimal(raw.get("amount_residual_currency")),
-        reconciled=_boolean(raw.get("reconciled")),
-        analytic_distribution=_analytic_distribution(raw.get("analytic_distribution")),
+        id=_read_field(raw, "account.move.line", "id", _positive_int),
+        move=_read_field(raw, "account.move.line", "move_id", _relation),
+        account=_read_field(raw, "account.move.line", "account_id", _relation),
+        journal=_read_field(raw, "account.move.line", "journal_id", _relation),
+        partner=_read_field(raw, "account.move.line", "partner_id", _optional_relation),
+        company_id=_read_field(raw, "account.move.line", "company_id", _company_id),
+        currency=_read_field(raw, "account.move.line", "currency_id", _optional_relation),
+        date=_read_field(raw, "account.move.line", "date", _date),
+        maturity_date=_read_field(raw, "account.move.line", "date_maturity", _optional_date),
+        label=_read_field(raw, "account.move.line", "name", _optional_text),
+        debit=_read_field(raw, "account.move.line", "debit", _decimal),
+        credit=_read_field(raw, "account.move.line", "credit", _decimal),
+        balance=_read_field(raw, "account.move.line", "balance", _decimal),
+        amount_currency=_read_field(raw, "account.move.line", "amount_currency", _decimal),
+        residual=_read_field(raw, "account.move.line", "amount_residual", _decimal),
+        residual_currency=_read_field(
+            raw, "account.move.line", "amount_residual_currency", _decimal
+        ),
+        reconciled=_read_field(raw, "account.move.line", "reconciled", _boolean),
+        analytic_distribution=_read_field(
+            raw,
+            "account.move.line",
+            "analytic_distribution",
+            _analytic_distribution,
+        ),
     )
 
 

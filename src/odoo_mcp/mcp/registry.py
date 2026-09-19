@@ -58,6 +58,58 @@ TOOL_REGISTRY: tuple[ToolDefinition, ...] = (
             open_world_hint=True,
         ),
     ),
+    ToolDefinition(
+        name="get_trial_balance",
+        version="1.0.0",
+        title="Get trial balance",
+        description=(
+            "Return opening balances, posted period movements, closing balances, "
+            "company-currency totals, and a Markdown artifact."
+        ),
+        risk_level="read",
+        required_permission="accounting_read",
+        required_capability="account",
+        annotations=ToolAnnotations(
+            read_only_hint=True,
+            destructive_hint=False,
+            idempotent_hint=True,
+            open_world_hint=True,
+        ),
+    ),
+    ToolDefinition(
+        name="get_aged_receivables",
+        version="1.0.0",
+        title="Get aged receivables",
+        description=(
+            "Return posted receivable residuals by partner and due-date bucket as of a date."
+        ),
+        risk_level="read",
+        required_permission="accounting_read",
+        required_capability="account",
+        annotations=ToolAnnotations(
+            read_only_hint=True,
+            destructive_hint=False,
+            idempotent_hint=True,
+            open_world_hint=True,
+        ),
+    ),
+    ToolDefinition(
+        name="get_aged_payables",
+        version="1.0.0",
+        title="Get aged payables",
+        description=(
+            "Return posted payable residuals by partner and due-date bucket as of a date."
+        ),
+        risk_level="read",
+        required_permission="accounting_read",
+        required_capability="account",
+        annotations=ToolAnnotations(
+            read_only_hint=True,
+            destructive_hint=False,
+            idempotent_hint=True,
+            open_world_hint=True,
+        ),
+    ),
 )
 
 
