@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
@@ -104,8 +105,10 @@ def validate_write_tool_definition(definition: ToolDefinition) -> None:
     annotations = definition.annotations
     if definition.risk_level == "read":
         raise ValueError("Write safety requires a write-capable risk level")
+    expected_destructive = definition.risk_level == "confirm_write"
     if (
         annotations.read_only_hint is not False
+        or annotations.destructive_hint is not expected_destructive
         or annotations.idempotent_hint is not True
         or annotations.open_world_hint is not True
     ):
@@ -409,6 +412,30 @@ class WriteSafetyCoordinator:
 
         try:
             applied = await execute()
+            if not isinstance(applied, AppliedWrite):
+                raise TypeError("Write callback returned an invalid result")
+            response = WriteSafetyResponse(
+                status="succeeded",
+                outcome="known",
+                request_id=selected_request_id,
+                company_id=command.company_id,
+                proposed_action=dict(prepared.proposed_action),
+                material_effects=dict(applied.material_effects),
+                record_refs=applied.record_refs,
+                artifact_markdown=applied.artifact_markdown or prepared.artifact_markdown,
+            )
+        except asyncio.CancelledError:
+            self._finalize_unknown(
+                binding,
+                definition,
+                module,
+                snapshot,
+                command,
+                selected_request_id,
+                idempotency_key,
+                prepared,
+            )
+            raise
         except KnownWriteFailure as exc:
             return self._finish_known_write_failure(
                 binding,
@@ -422,45 +449,16 @@ class WriteSafetyCoordinator:
                 prepared,
             )
         except Exception:
-            response = self._failure(
-                OdooMcpError(
-                    ErrorCode.UNKNOWN_ERROR,
-                    "The Odoo write outcome is unknown and requires recovery.",
-                    "Do not retry with a new key; inspect Odoo and recover this request.",
-                ),
+            return self._finalize_unknown(
+                binding,
+                definition,
+                module,
+                snapshot,
+                command,
                 selected_request_id,
-                command.company_id,
-                outcome="unknown",
-                prepared=prepared,
+                idempotency_key,
+                prepared,
             )
-            try:
-                self._finish_after_attempt(
-                    binding,
-                    definition,
-                    module,
-                    snapshot,
-                    command,
-                    selected_request_id,
-                    idempotency_key,
-                    IdempotencyState.UNKNOWN,
-                    "unknown",
-                    response,
-                    prepared,
-                )
-            except Exception:
-                LOGGER.warning("Unknown write outcome persistence failed; details suppressed.")
-            return response
-
-        response = WriteSafetyResponse(
-            status="succeeded",
-            outcome="known",
-            request_id=selected_request_id,
-            company_id=command.company_id,
-            proposed_action=dict(prepared.proposed_action),
-            material_effects=dict(applied.material_effects),
-            record_refs=applied.record_refs,
-            artifact_markdown=applied.artifact_markdown or prepared.artifact_markdown,
-        )
         try:
             self._storage.execution.finish(
                 self._event(
@@ -492,6 +490,46 @@ class WriteSafetyCoordinator:
                 outcome="unknown",
                 prepared=prepared,
             )
+        return response
+
+    def _finalize_unknown(
+        self,
+        binding: ConnectionBinding,
+        definition: ToolDefinition,
+        module: str,
+        snapshot: CapabilitySnapshot,
+        command: WriteCommand,
+        request_id: str,
+        idempotency_key: str,
+        prepared: PreparedWrite,
+    ) -> WriteSafetyResponse:
+        response = self._failure(
+            OdooMcpError(
+                ErrorCode.UNKNOWN_ERROR,
+                "The Odoo write outcome is unknown and requires recovery.",
+                "Do not retry with a new key; inspect Odoo and recover this request.",
+            ),
+            request_id,
+            command.company_id,
+            outcome="unknown",
+            prepared=prepared,
+        )
+        try:
+            self._finish_after_attempt(
+                binding,
+                definition,
+                module,
+                snapshot,
+                command,
+                request_id,
+                idempotency_key,
+                IdempotencyState.UNKNOWN,
+                "unknown",
+                response,
+                prepared,
+            )
+        except Exception:
+            LOGGER.warning("Unknown write outcome persistence failed; details suppressed.")
         return response
 
     def _finish_known_write_failure(
@@ -538,6 +576,13 @@ class WriteSafetyCoordinator:
         snapshot: CapabilitySnapshot,
         command: WriteCommand,
     ) -> OdooMcpError | None:
+        reserved_keys = {"company_id", "dry_run", "idempotency_key"}
+        if reserved_keys.intersection(command.request_payload):
+            return OdooMcpError(
+                ErrorCode.INVALID_INPUT,
+                "The business payload contains a reserved write-control field.",
+                "Remove company_id, dry_run, and idempotency_key from the business payload.",
+            )
         if command.company_id <= 0:
             return OdooMcpError(
                 ErrorCode.INVALID_INPUT,
@@ -739,10 +784,10 @@ class WriteSafetyCoordinator:
             odoo_version=str(snapshot.version),
             odoo_transport=snapshot.transport,
             input_payload={
+                **command.request_payload,
                 "company_id": command.company_id,
                 "dry_run": command.dry_run,
                 "idempotency_key": command.idempotency_key,
-                **command.request_payload,
             },
             dry_run=command.dry_run,
             proposed_action=proposed_action,

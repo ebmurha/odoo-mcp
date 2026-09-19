@@ -31,8 +31,10 @@ class ToolDefinition:
                 and self.annotations.idempotent_hint is True
             )
         else:
+            expected_destructive = self.risk_level == "confirm_write"
             valid = (
                 self.annotations.read_only_hint is False
+                and self.annotations.destructive_hint is expected_destructive
                 and self.annotations.idempotent_hint is True
                 and self.annotations.open_world_hint is True
             )

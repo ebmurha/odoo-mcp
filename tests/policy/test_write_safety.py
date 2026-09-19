@@ -122,6 +122,53 @@ def test_write_metadata_must_match_write_safety_contract() -> None:
         )
 
 
+@pytest.mark.parametrize("destructive_hint", [False, None])
+def test_confirm_write_requires_destructive_hint_true(
+    destructive_hint: bool | None,
+) -> None:
+    with pytest.raises(ValueError, match="annotations"):
+        ToolDefinition(
+            name="synthetic_confirm",
+            version="1.0.0",
+            title="Synthetic confirm",
+            description="Confirm a synthetic record.",
+            risk_level="confirm_write",
+            required_permission="accounting_propose",
+            required_capability="account",
+            annotations=ToolAnnotations(
+                read_only_hint=False,
+                destructive_hint=destructive_hint,
+                idempotent_hint=True,
+                open_world_hint=True,
+            ),
+        )
+
+    bypassed = _definition()
+    object.__setattr__(bypassed, "risk_level", "confirm_write")
+    with pytest.raises(ValueError, match="annotations"):
+        validate_write_tool_definition(bypassed)
+
+
+def test_confirm_write_accepts_explicit_destructive_hint_true() -> None:
+    definition = ToolDefinition(
+        name="synthetic_confirm",
+        version="1.0.0",
+        title="Synthetic confirm",
+        description="Confirm a synthetic record.",
+        risk_level="confirm_write",
+        required_permission="accounting_propose",
+        required_capability="account",
+        annotations=ToolAnnotations(
+            read_only_hint=False,
+            destructive_hint=True,
+            idempotent_hint=True,
+            open_world_hint=True,
+        ),
+    )
+
+    validate_write_tool_definition(definition)
+
+
 async def test_dry_run_defaults_to_preview_and_never_checks_or_executes(
     tmp_path, connection: OdooConnectionSettings
 ) -> None:
@@ -199,6 +246,48 @@ async def test_all_authorization_gates_precede_workflow(
     assert result.status == "failed"
     assert result.error_code is expected_code
     assert storage.audit.list_for_tenant("tenant-a")[-1].final_status == "rejected"
+
+
+@pytest.mark.parametrize(
+    ("reserved_key", "spoofed_value", "authoritative_value"),
+    [
+        ("company_id", 999, 1),
+        ("dry_run", False, True),
+        ("idempotency_key", "spoofed", None),
+    ],
+)
+async def test_business_payload_cannot_overwrite_authoritative_audit_controls(
+    tmp_path,
+    connection: OdooConnectionSettings,
+    reserved_key: str,
+    spoofed_value: object,
+    authoritative_value: object,
+) -> None:
+    storage = Storage.open(tmp_path / "state.sqlite3")
+    called = False
+
+    async def prepare() -> PreparedWrite:
+        nonlocal called
+        called = True
+        return await _prepared()
+
+    result = await _run(
+        WriteSafetyCoordinator(storage),
+        _binding(connection),
+        WriteCommand(
+            company_id=1,
+            request_payload={reserved_key: spoofed_value, "amount": "10.00"},
+        ),
+        prepare=prepare,
+    )
+
+    assert called is False
+    assert result.error_code is ErrorCode.INVALID_INPUT
+    record = storage.audit.list_for_tenant("tenant-a")[-1]
+    assert record.final_status == "rejected"
+    assert record.input_payload[reserved_key] == authoritative_value
+    assert record.company_id == 1
+    assert record.dry_run is True
 
 
 async def test_execution_requires_explicit_false_and_non_empty_key(
@@ -457,6 +546,79 @@ async def test_mutation_uncertainty_is_explicit_and_never_retried(
     assert "synthetic-secret" not in str(first.model_dump())
     assert replay == first
     assert storage.audit.list_for_tenant("tenant-a")[1].final_status == "unknown"
+
+
+async def test_malformed_post_mutation_result_is_finalized_unknown(
+    tmp_path, connection: OdooConnectionSettings
+) -> None:
+    storage = Storage.open(tmp_path / "state.sqlite3")
+    committed: list[str] = []
+
+    async def execute() -> object:
+        committed.append("account.move:41")
+        return object()
+
+    result = await _run(
+        WriteSafetyCoordinator(storage),
+        _binding(connection),
+        WriteCommand(
+            company_id=1,
+            dry_run=False,
+            idempotency_key="malformed-result",
+            request_payload={"amount": "10.00"},
+        ),
+        execute=execute,  # type: ignore[arg-type]
+    )
+
+    assert committed == ["account.move:41"]
+    assert result.outcome == "unknown"
+    assert result.error_code is ErrorCode.UNKNOWN_ERROR
+    records = storage.audit.list_for_tenant("tenant-a")
+    assert [record.final_status for record in records] == ["attempted", "unknown"]
+    with storage.database.transaction() as database:
+        row = database.execute(
+            "SELECT state, response_json FROM idempotency_keys WHERE idempotency_key = ?",
+            ("malformed-result",),
+        ).fetchone()
+    assert row is not None
+    assert row[0] == "unknown"
+    assert '"outcome":"unknown"' in row[1]
+
+
+async def test_cancellation_after_possible_mutation_finalizes_unknown_then_propagates(
+    tmp_path, connection: OdooConnectionSettings
+) -> None:
+    storage = Storage.open(tmp_path / "state.sqlite3")
+    committed: list[str] = []
+
+    async def execute() -> AppliedWrite:
+        committed.append("account.move:41")
+        raise asyncio.CancelledError
+
+    with pytest.raises(asyncio.CancelledError):
+        await _run(
+            WriteSafetyCoordinator(storage),
+            _binding(connection),
+            WriteCommand(
+                company_id=1,
+                dry_run=False,
+                idempotency_key="cancelled-result",
+                request_payload={"amount": "10.00"},
+            ),
+            execute=execute,
+        )
+
+    assert committed == ["account.move:41"]
+    records = storage.audit.list_for_tenant("tenant-a")
+    assert [record.final_status for record in records] == ["attempted", "unknown"]
+    with storage.database.transaction() as database:
+        row = database.execute(
+            "SELECT state, response_json FROM idempotency_keys WHERE idempotency_key = ?",
+            ("cancelled-result",),
+        ).fetchone()
+    assert row is not None
+    assert row[0] == "unknown"
+    assert '"outcome":"unknown"' in row[1]
 
 
 async def test_audit_failure_before_write_prevents_mutation(
