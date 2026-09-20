@@ -171,6 +171,31 @@ async def test_create_rejects_unbalanced_entry() -> None:
     assert raised.value.code is ErrorCode.JOURNAL_ENTRY_UNBALANCED
 
 
+@pytest.mark.parametrize(
+    ("method_name", "expected_code"),
+    [
+        ("get_journals", ErrorCode.JOURNAL_NOT_FOUND),
+        ("get_account_accounts", ErrorCode.ACCOUNT_NOT_FOUND),
+        ("get_partners", ErrorCode.INVALID_INPUT),
+        ("get_analytic_accounts", ErrorCode.INVALID_INPUT),
+        ("get_currencies", ErrorCode.ODOO_API_ERROR),
+    ],
+)
+async def test_create_rejects_unavailable_scoped_references(
+    method_name: str, expected_code: ErrorCode
+) -> None:
+    adapter = JournalAdapter()
+
+    async def unavailable(*_args: object, **_kwargs: object) -> RecordPage[object]:
+        return RecordPage(items=[])
+
+    setattr(adapter, method_name, unavailable)
+    with pytest.raises(OdooMcpError) as raised:
+        await prepare_journal_entry_draft(adapter, _create_request())
+
+    assert raised.value.code is expected_code
+
+
 def test_line_requires_exactly_one_positive_side() -> None:
     with pytest.raises(ValidationError):
         JournalEntryLineInput(account_id=10, debit=Decimal("1"), credit=Decimal("1"))

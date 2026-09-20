@@ -202,3 +202,23 @@ async def test_create_and_post_remain_separate_and_replay_safe(
     assert posted.structured_content["status"] == "succeeded"
     assert state.create_count == 1
     assert state.post_count == 1
+
+
+async def test_journal_execution_requires_an_idempotency_key(
+    connection: OdooConnectionSettings, tmp_path
+) -> None:
+    state = JournalState()
+
+    async def factory(_connection: object) -> OdooAdapter:
+        return JournalAdapter(state)
+
+    server = create_mcp_server(
+        Resolver(_binding(connection)),
+        adapter_factory=factory,
+        storage=Storage.open(tmp_path / "journal-key.sqlite3"),
+    )
+    async with Client(server) as client:
+        result = await client.call_tool("create_journal_entry", _create_args(dry_run=False))
+
+    assert result.structured_content["error_code"] == "EXECUTION_NOT_EXPLICIT"
+    assert state.create_count == 0
