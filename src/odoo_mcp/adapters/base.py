@@ -23,6 +23,7 @@ from odoo_mcp.adapters.accounting import (
     Product,
     ReadFilters,
     RecordPage,
+    RelatedRecord,
 )
 
 
@@ -31,6 +32,7 @@ class Company(BaseModel):
 
     id: int
     name: str
+    currency: RelatedRecord | None = None
 
 
 class CapabilitySnapshot(BaseModel):

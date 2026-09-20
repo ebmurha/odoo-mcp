@@ -18,6 +18,7 @@ from odoo_mcp.adapters.accounting import (
     Journal,
     PageRequest,
     ReadFilters,
+    RelatedRecord,
 )
 from odoo_mcp.adapters.base import OdooAdapter
 from odoo_mcp.mcp.error_codes import ErrorCode, OdooMcpError
@@ -169,15 +170,19 @@ def _candidate(
     statement: BankStatementLine,
     line: AccountMoveLine,
     journal: Journal,
+    company_currency: RelatedRecord,
 ) -> _Candidate | None:
+    effective_currency = journal.currency or company_currency
+    if statement.foreign_currency is not None and (
+        statement.foreign_currency.id != effective_currency.id
+    ):
+        return None
+    if line.currency is None or line.currency.id != effective_currency.id:
+        return None
     if journal.currency is None:
         amounts_match = statement.amount == -line.residual
     else:
-        amounts_match = (
-            line.currency is not None
-            and line.currency.id == journal.currency.id
-            and statement.amount == -line.residual_currency
-        )
+        amounts_match = statement.amount == -line.residual_currency
     if line.reconciled or not amounts_match:
         return None
     if statement.move is not None and statement.move.id == line.move.id:
@@ -206,6 +211,7 @@ def _decisions(
     candidates: list[AccountMoveLine],
     threshold: Decimal,
     journals: dict[int, Journal],
+    company_currency: RelatedRecord,
 ) -> list[_Decision]:
     company_candidates: dict[Decimal, list[AccountMoveLine]] = {}
     currency_candidates: dict[tuple[int, Decimal], list[AccountMoveLine]] = {}
@@ -227,7 +233,7 @@ def _decisions(
         scored = [
             candidate
             for line in eligible_amounts
-            if (candidate := _candidate(statement, line, journal)) is not None
+            if (candidate := _candidate(statement, line, journal, company_currency)) is not None
         ]
         scored.sort(key=lambda item: (-item.score, item.line.id))
         if not scored:
@@ -257,7 +263,11 @@ def _decisions(
     ]
 
 
-def _unmatched(decision: _Decision, journal: Journal) -> UnmatchedStatementLineItem:
+def _unmatched(
+    decision: _Decision,
+    journal: Journal,
+    company_currency: RelatedRecord,
+) -> UnmatchedStatementLineItem:
     statement = decision.statement
     if decision.reason is None:
         raise AssertionError("matched decisions cannot become unmatched items")
@@ -265,8 +275,8 @@ def _unmatched(decision: _Decision, journal: Journal) -> UnmatchedStatementLineI
         statement_line_id=statement.id,
         date=statement.date,
         amount=statement.amount,
-        currency_id=None if journal.currency is None else journal.currency.id,
-        currency_name="Company currency" if journal.currency is None else journal.currency.name,
+        currency_id=(journal.currency or company_currency).id,
+        currency_name=(journal.currency or company_currency).name,
         partner_id=None if statement.partner is None else statement.partner.id,
         partner_name=None if statement.partner is None else statement.partner.name,
         reference=statement.payment_reference,
@@ -351,6 +361,7 @@ async def build_reconciliation_proposal(
     adapter: OdooAdapter,
     request: ReconciliationInput,
     *,
+    company_currency: RelatedRecord,
     company_name: str,
     request_id: str,
 ) -> ReconciliationProposal:
@@ -388,14 +399,15 @@ async def build_reconciliation_proposal(
         await _candidate_lines(adapter, request.company_id),
         request.match_confidence_threshold,
         journals,
+        company_currency,
     )
     matches = [
         ReconciliationMatch(
             statement_line_id=decision.statement.id,
             move_line_id=decision.candidate.line.id,
             amount=decision.statement.amount,
-            currency_id=None if journal.currency is None else journal.currency.id,
-            currency_name="Company currency" if journal.currency is None else journal.currency.name,
+            currency_id=(journal.currency or company_currency).id,
+            currency_name=(journal.currency or company_currency).name,
             confidence=decision.candidate.score,
             score_components=decision.candidate.components,
         )
@@ -403,14 +415,16 @@ async def build_reconciliation_proposal(
         if decision.candidate is not None
     ]
     unmatched = [
-        _unmatched(decision, journal) for decision in decisions if decision.candidate is None
+        _unmatched(decision, journal, company_currency)
+        for decision in decisions
+        if decision.candidate is None
     ]
     summary = ReconciliationSummary(
         statement_line_count=len(selected),
         matched_count=len(matches),
         unmatched_count=len(unmatched),
-        currency_id=None if journal.currency is None else journal.currency.id,
-        currency_name="Company currency" if journal.currency is None else journal.currency.name,
+        currency_id=(journal.currency or company_currency).id,
+        currency_name=(journal.currency or company_currency).name,
         matched_amount=sum(
             (decision.statement.amount for decision in decisions if decision.candidate is not None),
             _ZERO,
@@ -467,6 +481,7 @@ async def flag_unmatched_statement_lines(
     adapter: OdooAdapter,
     request: UnmatchedStatementLinesInput,
     *,
+    company_currency: RelatedRecord,
     company_name: str,
     request_id: str,
 ) -> UnmatchedStatementLinesResponse:
@@ -486,9 +501,10 @@ async def flag_unmatched_statement_lines(
         await _candidate_lines(adapter, request.company_id),
         request.match_confidence_threshold,
         journals,
+        company_currency,
     )
     all_items = [
-        _unmatched(item, journals[item.statement.journal.id])
+        _unmatched(item, journals[item.statement.journal.id], company_currency)
         for item in decisions
         if item.candidate is None
     ]

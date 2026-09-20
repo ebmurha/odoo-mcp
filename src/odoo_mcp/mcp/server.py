@@ -12,7 +12,8 @@ from typing import Annotated, TypeAlias
 from mcp.server import MCPServer
 from pydantic import Field, ValidationError
 
-from odoo_mcp.adapters.base import CapabilitySnapshot, OdooAdapter
+from odoo_mcp.adapters.accounting import RelatedRecord
+from odoo_mcp.adapters.base import CapabilitySnapshot, Company, OdooAdapter
 from odoo_mcp.adapters.odoo.client import OdooClient
 from odoo_mcp.adapters.odoo.connections import ConnectionBinding, ConnectionResolver
 from odoo_mcp.mcp.error_codes import ErrorCode, ErrorResponse, OdooMcpError
@@ -53,7 +54,7 @@ AdapterFactory = Callable[[object], Awaitable[OdooAdapter]]
 ReportResponse: TypeAlias = (
     TrialBalanceResponse | AgingResponse | CashbookResponse | UnmatchedStatementLinesResponse
 )
-ReportOperation = Callable[[OdooAdapter, str, str], Awaitable[ReportResponse]]
+ReportOperation = Callable[[OdooAdapter, Company, str], Awaitable[ReportResponse]]
 LOGGER = logging.getLogger(__name__)
 PositiveCompanyId: TypeAlias = Annotated[int, Field(gt=0)]
 ReportLimit: TypeAlias = Annotated[int, Field(ge=1, le=500)]
@@ -71,6 +72,16 @@ async def _default_adapter_factory(connection: object) -> OdooAdapter:
     if not isinstance(connection, OdooConnectionSettings):
         raise TypeError("Expected normalized Odoo connection settings")
     return await OdooClient.connect(connection)
+
+
+def _require_company_currency(company: Company) -> RelatedRecord:
+    if company.currency is None:
+        raise OdooMcpError(
+            ErrorCode.ODOO_API_ERROR,
+            "Odoo did not return the authorized company's currency.",
+            "Check Odoo compatibility and company access, then retry.",
+        )
+    return company.currency
 
 
 async def _close_adapter(adapter: OdooAdapter) -> None:
@@ -247,7 +258,7 @@ def create_mcp_server(
                     "The Accounting application is unavailable to the technical user.",
                     "Install Accounting or grant the required least-privilege access.",
                 )
-            result = await operation(adapter, company.name, request_id)
+            result = await operation(adapter, company, request_id)
             await _close_adapter(adapter)
             adapter = None
             if storage is None:
@@ -347,11 +358,11 @@ def create_mcp_server(
                 },
             )
 
-        async def run(adapter: OdooAdapter, company_name: str, request_id: str) -> ReportResponse:
+        async def run(adapter: OdooAdapter, company: Company, request_id: str) -> ReportResponse:
             return await get_trial_balance(
                 adapter,
                 request,
-                company_name=company_name,
+                company_name=company.name,
                 request_id=request_id,
             )
 
@@ -403,13 +414,13 @@ def create_mcp_server(
 
             async def run(
                 adapter: OdooAdapter,
-                company_name: str,
+                company: Company,
                 request_id: str,
             ) -> ReportResponse:
                 return await get_aged_balance(
                     adapter,
                     request,
-                    company_name=company_name,
+                    company_name=company.name,
                     request_id=request_id,
                     payable=payable,
                 )
@@ -467,13 +478,13 @@ def create_mcp_server(
 
         async def run(
             adapter: OdooAdapter,
-            company_name: str,
+            company: Company,
             request_id: str,
         ) -> ReportResponse:
             return await get_cashbook(
                 adapter,
                 request,
-                company_name=company_name,
+                company_name=company.name,
                 request_id=request_id,
             )
 
@@ -527,13 +538,14 @@ def create_mcp_server(
 
         async def run(
             adapter: OdooAdapter,
-            company_name: str,
+            company: Company,
             request_id: str,
         ) -> ReportResponse:
             return await flag_unmatched_statement_lines(
                 adapter,
                 request,
-                company_name=company_name,
+                company_currency=_require_company_currency(company),
+                company_name=company.name,
                 request_id=request_id,
             )
 
@@ -705,6 +717,7 @@ def create_mcp_server(
                     return await build_reconciliation_proposal(
                         adapter,
                         request,
+                        company_currency=_require_company_currency(company),
                         company_name=company.name,
                         request_id=request_id,
                     )

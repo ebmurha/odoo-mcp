@@ -63,9 +63,15 @@ async def test_connect_selects_version_transport_and_discovers_authorized_scope(
                 )
             assert model == "res.company"
             assert args[5] == [[["id", "in", [1, 2]]]]
+            assert args[6]["fields"] == ["id", "name", "currency_id"]
             return httpx.Response(
                 200,
-                json={"result": [{"id": 2, "name": "Beta"}, {"id": 1, "name": "Alpha"}]},
+                json={
+                    "result": [
+                        {"id": 2, "name": "Beta", "currency_id": [2, "USD"]},
+                        {"id": 1, "name": "Alpha", "currency_id": [1, "KES"]},
+                    ]
+                },
             )
         assert request.headers["authorization"] == "bearer synthetic-secret"
         assert request.headers["x-odoo-database"] == "synthetic-db"
@@ -81,9 +87,13 @@ async def test_connect_selects_version_transport_and_discovers_authorized_scope(
             return httpx.Response(200 if available else 404, json=1 if available else {})
         assert request.url.path == "/json/2/res.company/search_read"
         assert body["domain"] == [["id", "in", [1, 2]]]
+        assert body["fields"] == ["id", "name", "currency_id"]
         return httpx.Response(
             200,
-            json=[{"id": 2, "name": "Beta"}, {"id": 1, "name": "Alpha"}],
+            json=[
+                {"id": 2, "name": "Beta", "currency_id": [2, "USD"]},
+                {"id": 1, "name": "Alpha", "currency_id": [1, "KES"]},
+            ],
         )
 
     adapter = await OdooClient.connect(connection, http_transport=httpx.MockTransport(handler))
@@ -120,6 +130,12 @@ async def test_connect_selects_version_transport_and_discovers_authorized_scope(
         "base",
     ]
     assert [(company.id, company.name) for company in companies] == [(1, "Alpha"), (2, "Beta")]
+    assert [
+        (company.currency.id, company.currency.name) for company in companies if company.currency
+    ] == [
+        (1, "KES"),
+        (2, "USD"),
+    ]
     assert requests[0].url.path == "/web/webclient/version_info"
 
 

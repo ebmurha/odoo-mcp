@@ -183,6 +183,11 @@ class ReconciliationInput(BaseModel):
 
     @model_validator(mode="after")
     def validate_statement_lines(self) -> ReconciliationInput:
+        year, month = (int(part) for part in self.period.split("-", 1))
+        try:
+            date(year, month, 1)
+        except ValueError as exc:
+            raise ValueError("period must be a valid calendar month") from exc
         if any(identifier <= 0 for identifier in self.statement_line_ids):
             raise ValueError("statement_line_ids must contain positive integers")
         if len(set(self.statement_line_ids)) != len(self.statement_line_ids):

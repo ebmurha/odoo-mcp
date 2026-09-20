@@ -201,6 +201,7 @@ async def get_cashbook(
             FilterClause(field="move_id.state", operator="=", value="posted"),
             FilterClause(field="date", operator="<=", value=request.period_end),
             FilterClause(field="journal_id", operator="in", value=journal_ids),
+            FilterClause(field="account_id.account_type", operator="=", value="asset_cash"),
         ]
         if request.partner_ids:
             clauses.append(

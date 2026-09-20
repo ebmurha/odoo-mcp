@@ -45,7 +45,13 @@ class BankAdapter:
 
     async def get_companies(self) -> list[Company]:
         self.read_calls.append("companies")
-        return [Company(id=1, name="Synthetic Company")]
+        return [
+            Company(
+                id=1,
+                name="Synthetic Company",
+                currency=RelatedRecord(id=1, name="KES"),
+            )
+        ]
 
     async def get_capabilities(self) -> CapabilitySnapshot:
         self.read_calls.append("capabilities")
@@ -116,6 +122,7 @@ class BankAdapter:
                     ),
                     partner=RelatedRecord(id=7, name="Synthetic Partner"),
                     company_id=company_id,
+                    currency=RelatedRecord(id=1, name="KES"),
                     date=date(2026, 4, 10),
                     label="invoice 42",
                     debit=max(value, Decimal("0")),

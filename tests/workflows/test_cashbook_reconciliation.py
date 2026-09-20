@@ -27,6 +27,8 @@ from odoo_mcp.workflows.accounting.reconcile_bank import (
     flag_unmatched_statement_lines,
 )
 
+COMPANY_CURRENCY = RelatedRecord(id=1, name="KES")
+
 
 def _move_line(
     identifier: int,
@@ -37,12 +39,15 @@ def _move_line(
     label: str | None = None,
     move_id: int | None = None,
     journal_id: int = 20,
+    account_id: int = 400,
+    account_name: str = "Clearing",
+    currency: RelatedRecord | None = COMPANY_CURRENCY,
 ) -> AccountMoveLine:
     value = Decimal(amount)
     return AccountMoveLine(
         id=identifier,
         move=RelatedRecord(id=move_id or 1000 + identifier, name=f"MVE/{identifier}"),
-        account=RelatedRecord(id=400, name="Clearing"),
+        account=RelatedRecord(id=account_id, name=account_name),
         journal=RelatedRecord(id=journal_id, name="General"),
         partner=(
             None
@@ -50,6 +55,7 @@ def _move_line(
             else RelatedRecord(id=partner_id, name=f"Partner {partner_id}")
         ),
         company_id=1,
+        currency=currency,
         date=line_date,
         label=label,
         debit=max(value, Decimal("0")),
@@ -71,12 +77,16 @@ def _statement(
     partner_id: int | None = 7,
     reference: str | None = " Invoice  42 ",
     move_id: int | None = None,
+    amount_currency: str | None = None,
+    foreign_currency: RelatedRecord | None = None,
 ) -> BankStatementLine:
     return BankStatementLine(
         id=identifier,
         date=line_date,
         payment_reference=reference,
         amount=Decimal(amount),
+        amount_currency=(None if amount_currency is None else Decimal(amount_currency)),
+        foreign_currency=foreign_currency,
         partner=(
             None
             if partner_id is None
@@ -161,6 +171,64 @@ async def test_cashbook_uses_only_cash_bank_journals_and_reconciles_summary() ->
     clauses = adapter.move_line_filters[0].clauses
     assert any(clause.field == "move_id.state" and clause.value == "posted" for clause in clauses)
     assert any(clause.field == "journal_id" and clause.value == (10, 11) for clause in clauses)
+    assert any(
+        clause.field == "account_id.account_type"
+        and clause.operator == "="
+        and clause.value == "asset_cash"
+        for clause in clauses
+    )
+
+
+async def test_cashbook_reads_only_the_liquidity_side_of_balanced_bank_moves() -> None:
+    liquidity = _move_line(
+        10,
+        amount="100",
+        line_date=date(2026, 4, 2),
+        journal_id=10,
+        move_id=900,
+        account_id=101,
+        account_name="Bank",
+    )
+    counterpart = _move_line(
+        11,
+        amount="-100",
+        line_date=date(2026, 4, 2),
+        journal_id=10,
+        move_id=900,
+        account_id=400,
+        account_name="Receivable",
+    )
+
+    class LiquidityFilteringAdapter(CashAdapter):
+        async def get_account_move_lines(
+            self, company_id: int, filters: ReadFilters, page: PageRequest
+        ) -> RecordPage[AccountMoveLine]:
+            self.move_line_filters.append(filters)
+            has_liquidity_scope = any(
+                clause.field == "account_id.account_type"
+                and clause.operator == "="
+                and clause.value == "asset_cash"
+                for clause in filters.clauses
+            )
+            return RecordPage(
+                items=[liquidity] if has_liquidity_scope else [liquidity, counterpart]
+            )
+
+    result = await get_cashbook(
+        LiquidityFilteringAdapter(),
+        CashbookInput(
+            company_id=1,
+            period_start=date(2026, 4, 1),
+            period_end=date(2026, 4, 30),
+        ),
+        company_name="Synthetic Co",
+        request_id="req_liquidity",
+    )
+
+    assert [item.line_id for item in result.items] == [10]
+    assert result.summary.total_debit == Decimal("100")
+    assert result.summary.total_credit == Decimal("0")
+    assert result.summary.closing_balance == Decimal("100")
 
 
 async def test_reconciliation_scores_exact_match_and_never_calls_a_mutation() -> None:
@@ -185,6 +253,7 @@ async def test_reconciliation_scores_exact_match_and_never_calls_a_mutation() ->
             bank_journal_id=10,
             statement_line_ids=(1001,),
         ),
+        company_currency=COMPANY_CURRENCY,
         company_name="Synthetic Co",
         request_id="req_match",
     )
@@ -231,6 +300,7 @@ async def test_best_score_tie_is_ambiguous_and_flagged_unmatched() -> None:
             period_start=date(2026, 4, 1),
             period_end=date(2026, 4, 30),
         ),
+        company_currency=COMPANY_CURRENCY,
         company_name="Synthetic Co",
         request_id="req_tie",
     )
@@ -265,6 +335,7 @@ async def test_threshold_rejects_but_does_not_relax_candidate_eligibility() -> N
             statement_line_ids=(1001,),
             match_confidence_threshold=Decimal("0.70"),
         ),
+        company_currency=COMPANY_CURRENCY,
         company_name="Synthetic Co",
         request_id="req_threshold",
     )
@@ -315,6 +386,7 @@ async def test_reconciliation_requires_the_bank_journal_currency() -> None:
             bank_journal_id=10,
             statement_line_ids=(1001,),
         ),
+        company_currency=COMPANY_CURRENCY,
         company_name="Synthetic Co",
         request_id="req_currency",
     )
@@ -322,6 +394,57 @@ async def test_reconciliation_requires_the_bank_journal_currency() -> None:
     assert result.matches[0].move_line_id == 2002
     assert result.matches[0].currency_id == 2
     assert result.summary.currency_name == "USD"
+
+
+async def test_company_currency_journal_rejects_foreign_exchange_candidates() -> None:
+    usd = RelatedRecord(id=2, name="USD")
+    adapter = CashAdapter(
+        statements=[
+            _statement(
+                1001,
+                amount="100",
+                amount_currency="10",
+                foreign_currency=usd,
+            )
+        ],
+        lines=[
+            _move_line(
+                2001,
+                amount="-100",
+                line_date=date(2026, 4, 10),
+                partner_id=7,
+                label="invoice 42",
+                currency=usd,
+            )
+        ],
+    )
+
+    result = await build_reconciliation_proposal(
+        adapter,
+        ReconciliationInput(
+            company_id=1,
+            period="2026-04",
+            bank_journal_id=10,
+            statement_line_ids=(1001,),
+        ),
+        company_currency=COMPANY_CURRENCY,
+        company_name="Synthetic Co",
+        request_id="req_fx_excluded",
+    )
+
+    assert result.matches == []
+    assert result.unmatched[0].reason_code == "no_eligible_candidate"
+    assert result.summary.currency_id == COMPANY_CURRENCY.id
+
+
+def test_reconciliation_period_rejects_year_zero() -> None:
+    with pytest.raises(ValueError, match="valid calendar month"):
+        ReconciliationInput(
+            company_id=1,
+            period="0000-01",
+            bank_journal_id=10,
+            statement_line_ids=(1001,),
+        )
 
 
 async def test_one_move_line_cannot_be_proposed_for_two_statement_lines() -> None:
@@ -346,6 +469,7 @@ async def test_one_move_line_cannot_be_proposed_for_two_statement_lines() -> Non
             bank_journal_id=10,
             statement_line_ids=(1001, 1002),
         ),
+        company_currency=COMPANY_CURRENCY,
         company_name="Synthetic Co",
         request_id="req_collision",
     )
@@ -371,6 +495,7 @@ async def test_unmatched_output_pages_without_hiding_whole_report_totals() -> No
             period_end=date(2026, 4, 30),
             limit=1,
         ),
+        company_currency=COMPANY_CURRENCY,
         company_name="Synthetic Co",
         request_id="req_page",
     )
@@ -405,6 +530,7 @@ async def test_cross_company_candidate_fails_instead_of_becoming_a_match() -> No
                 bank_journal_id=10,
                 statement_line_ids=(1001,),
             ),
+            company_currency=COMPANY_CURRENCY,
             company_name="Synthetic Co",
             request_id="req_cross_company",
         )
@@ -432,6 +558,7 @@ async def test_repeated_upstream_cursor_fails_explicitly() -> None:
                 period_start=date(2026, 4, 1),
                 period_end=date(2026, 4, 30),
             ),
+            company_currency=COMPANY_CURRENCY,
             company_name="Synthetic Co",
             request_id="req_partial",
         )
@@ -476,6 +603,7 @@ async def test_large_unmatched_report_pages_without_truncating_summary() -> None
             period_end=date(2026, 4, 30),
             limit=500,
         ),
+        company_currency=COMPANY_CURRENCY,
         company_name="Synthetic Co",
         request_id="req_large",
     )

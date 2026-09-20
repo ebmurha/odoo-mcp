@@ -23,6 +23,7 @@ from odoo_mcp.adapters.accounting import (
     Product,
     ReadFilters,
     RecordPage,
+    RelatedRecord,
 )
 from odoo_mcp.adapters.base import CapabilitySnapshot, Company
 from odoo_mcp.adapters.odoo.accounting import AccountingReader
@@ -112,7 +113,7 @@ class OdooClient:
         rows = await self._transport.search_read(
             "res.company",
             [["id", "in", list(allowed)]],
-            ["id", "name"],
+            ["id", "name", "currency_id"],
             limit=len(allowed),
             offset=0,
             order="id asc",
@@ -122,12 +123,23 @@ class OdooClient:
         for row in rows:
             identifier = row.get("id")
             name = row.get("name")
+            raw_currency = row.get("currency_id")
+            currency = (
+                RelatedRecord(id=raw_currency[0], name=raw_currency[1])
+                if isinstance(raw_currency, (list, tuple))
+                and len(raw_currency) == 2
+                and isinstance(raw_currency[0], int)
+                and not isinstance(raw_currency[0], bool)
+                and raw_currency[0] > 0
+                and isinstance(raw_currency[1], str)
+                else None
+            )
             if (
                 isinstance(identifier, int)
                 and not isinstance(identifier, bool)
                 and isinstance(name, str)
             ):
-                companies.append(Company(id=identifier, name=name))
+                companies.append(Company(id=identifier, name=name, currency=currency))
         found = {company.id for company in companies}
         if found != set(allowed):
             raise OdooMcpError(
