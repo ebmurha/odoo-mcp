@@ -32,4 +32,15 @@ class OdooTransport(Protocol):
         company_ids: tuple[int, ...],
     ) -> list[dict[str, Any]]: ...
 
+    async def execute_method(
+        self,
+        model: str,
+        method: str,
+        *,
+        ids: tuple[int, ...] = (),
+        positional: list[Any] | None = None,
+        named: dict[str, Any] | None = None,
+        company_ids: tuple[int, ...],
+    ) -> Any: ...
+
     async def close(self) -> None: ...

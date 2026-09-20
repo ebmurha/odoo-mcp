@@ -16,6 +16,8 @@ from odoo_mcp.adapters.accounting import (
     Currency,
     DatePeriod,
     FilterClause,
+    InvoiceDraft,
+    InvoiceDraftLine,
     Journal,
     PageRequest,
     PartialReconciliation,
@@ -36,6 +38,7 @@ class FakeTransport:
     def __init__(self, rows: dict[str, list[dict[str, Any]]]) -> None:
         self.rows = rows
         self.calls: list[dict[str, Any]] = []
+        self.executions: list[dict[str, Any]] = []
 
     async def authenticate(self) -> None:
         return None
@@ -82,6 +85,30 @@ class FakeTransport:
         selected = [row for row in rows if row.get("id", 0) > cursor_id]
         return selected[offset : offset + limit]
 
+    async def execute_method(
+        self,
+        model: str,
+        method: str,
+        *,
+        ids: tuple[int, ...] = (),
+        positional: list[Any] | None = None,
+        named: dict[str, Any] | None = None,
+        company_ids: tuple[int, ...],
+    ) -> Any:
+        self.executions.append(
+            {
+                "model": model,
+                "method": method,
+                "ids": ids,
+                "positional": positional,
+                "named": named,
+                "company_ids": company_ids,
+            }
+        )
+        if model == "account.move" and method == "create":
+            return 901
+        return True
+
     async def close(self) -> None:
         return None
 
@@ -119,6 +146,118 @@ async def _validated_client(
     await client.get_companies()
     transport.calls.clear()
     return client
+
+
+def _invoice_effect_row(identifier: int = 901) -> dict[str, Any]:
+    return {
+        "id": identifier,
+        "name": "INV/901",
+        "move_type": "out_invoice",
+        "state": "draft",
+        "company_id": [1, "Synthetic Company"],
+        "partner_id": [20, "Synthetic Customer"],
+        "invoice_date": "2026-09-20",
+        "invoice_date_due": "2026-10-20",
+        "journal_id": [30, "Sales"],
+        "fiscal_position_id": [31, "Domestic"],
+        "currency_id": [40, "USD"],
+        "invoice_payment_term_id": [41, "30 Days"],
+        "amount_untaxed": "20.00",
+        "amount_tax": "3.20",
+        "amount_total": "23.20",
+        "amount_residual": "23.20",
+        "payment_state": "not_paid",
+    }
+
+
+async def test_draft_invoice_creation_uses_allowlisted_create_and_reads_back_effects(
+    connection: OdooConnectionSettings,
+) -> None:
+    transport = FakeTransport(
+        {
+            "account.move": [_invoice_effect_row()],
+            "account.move.line": [
+                {
+                    "id": 1001,
+                    "move_id": [901, "INV/901"],
+                    "company_id": [1, "Synthetic Company"],
+                    "display_type": "product",
+                    "name": "Consulting",
+                    "quantity": "2",
+                    "price_unit": "10",
+                    "price_subtotal": "20",
+                    "price_total": "23.20",
+                    "tax_line_id": False,
+                    "balance": "-20",
+                    "analytic_distribution": {"77": 100},
+                    "date_maturity": False,
+                    "amount_residual": "0",
+                },
+                {
+                    "id": 1002,
+                    "move_id": [901, "INV/901"],
+                    "company_id": [1, "Synthetic Company"],
+                    "display_type": "tax",
+                    "name": "Tax",
+                    "quantity": "0",
+                    "price_unit": "0",
+                    "price_subtotal": "0",
+                    "price_total": "0",
+                    "tax_line_id": [55, "VAT"],
+                    "balance": "-3.20",
+                    "analytic_distribution": {},
+                    "date_maturity": False,
+                    "amount_residual": "0",
+                },
+                {
+                    "id": 1003,
+                    "move_id": [901, "INV/901"],
+                    "company_id": [1, "Synthetic Company"],
+                    "display_type": "payment_term",
+                    "name": "Due",
+                    "quantity": "0",
+                    "price_unit": "0",
+                    "price_subtotal": "0",
+                    "price_total": "0",
+                    "tax_line_id": False,
+                    "balance": "23.20",
+                    "analytic_distribution": {},
+                    "date_maturity": "2026-10-20",
+                    "amount_residual": "23.20",
+                },
+            ],
+        }
+    )
+    client = await _validated_client(connection, transport)
+
+    effect = await client.create_draft_invoice(
+        InvoiceDraft(
+            company_id=1,
+            move_type="out_invoice",
+            partner_id=20,
+            invoice_date=date(2026, 9, 20),
+            lines=(
+                InvoiceDraftLine(
+                    description="Consulting",
+                    quantity=Decimal("2"),
+                    unit_price=Decimal("10"),
+                    account_id=70,
+                    analytic_account_id=77,
+                ),
+            ),
+        )
+    )
+
+    assert [(call["model"], call["method"]) for call in transport.executions] == [
+        ("account.move", "create")
+    ]
+    assert transport.executions[0]["company_ids"] == (1,)
+    assert effect.state == "draft"
+    assert effect.journal.id == 30
+    assert effect.fiscal_position is not None and effect.fiscal_position.id == 31
+    assert effect.taxes[0].amount == Decimal("3.20")
+    assert effect.lines[0].total == Decimal("23.20")
+    assert effect.payment_schedule[0].amount == Decimal("23.20")
 
 
 async def test_account_moves_are_typed_scoped_and_cursor_paginated(

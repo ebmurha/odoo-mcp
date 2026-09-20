@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import date as Date
 from typing import Protocol
 
 from pydantic import BaseModel, ConfigDict
@@ -15,11 +16,15 @@ from odoo_mcp.adapters.accounting import (
     BankStatementLine,
     Currency,
     DatePeriod,
+    InvoiceDraft,
+    InvoiceEffect,
     Journal,
     PageRequest,
     PartialReconciliation,
     Partner,
     PaymentMethodLine,
+    PaymentRegistration,
+    PaymentRoute,
     PaymentTerm,
     Product,
     ReadFilters,
@@ -128,3 +133,23 @@ class OdooAdapter(Protocol):
         *,
         page: PageRequest = DEFAULT_PAGE_REQUEST,
     ) -> RecordPage[AnalyticAccount]: ...
+
+    async def get_invoice_effect(self, company_id: int, move_id: int) -> InvoiceEffect: ...
+
+    async def create_draft_invoice(self, draft: InvoiceDraft) -> InvoiceEffect: ...
+
+    async def post_invoice(self, company_id: int, move_id: int) -> InvoiceEffect: ...
+
+    async def create_credit_note(
+        self,
+        company_id: int,
+        original_move_id: int,
+        credit_date: Date,
+        reason: str,
+    ) -> InvoiceEffect: ...
+
+    async def get_payment_routes(
+        self, company_id: int, invoice_id: int
+    ) -> tuple[PaymentRoute, ...]: ...
+
+    async def register_payment(self, registration: PaymentRegistration) -> InvoiceEffect: ...

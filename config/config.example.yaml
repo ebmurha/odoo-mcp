@@ -7,5 +7,12 @@ permissions:
     - get_aged_payables
     - get_cashbook
     - flag_unmatched_statement_lines
+    - list_open_invoices
+    - list_open_bills
   accounting_propose:
     - reconcile_bank_statement_lines
+    - create_customer_invoice
+    - create_supplier_bill
+    - create_credit_note
+    - validate_invoice
+    - register_payment

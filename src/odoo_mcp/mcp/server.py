@@ -12,7 +12,12 @@ from typing import Annotated, TypeAlias
 from mcp.server import MCPServer
 from pydantic import Field, ValidationError
 
-from odoo_mcp.adapters.accounting import RelatedRecord
+from odoo_mcp.adapters.accounting import (
+    InvoiceDraft,
+    InvoiceEffect,
+    PaymentRegistration,
+    RelatedRecord,
+)
 from odoo_mcp.adapters.base import CapabilitySnapshot, Company, OdooAdapter
 from odoo_mcp.adapters.odoo.client import OdooClient
 from odoo_mcp.adapters.odoo.connections import ConnectionBinding, ConnectionResolver
@@ -27,15 +32,23 @@ from odoo_mcp.mcp.schemas import (
     CapabilitiesToolResponse,
     CashbookInput,
     CashbookResponse,
+    CreateInvoiceInput,
+    CreditNoteInput,
+    InvoiceLineInput,
+    OpenDocumentsInput,
+    OpenDocumentsResponse,
     ReconciliationInput,
     ReconciliationProposal,
+    RegisterPaymentInput,
     TrialBalanceInput,
     TrialBalanceResponse,
     UnmatchedStatementLinesInput,
     UnmatchedStatementLinesResponse,
+    ValidateInvoiceInput,
 )
 from odoo_mcp.policy.write_safety import (
     AppliedWrite,
+    KnownWriteFailure,
     PreparedWrite,
     WriteCommand,
     WriteSafetyCoordinator,
@@ -43,6 +56,14 @@ from odoo_mcp.policy.write_safety import (
 )
 from odoo_mcp.storage import AuditEvent, Storage
 from odoo_mcp.workflows.accounting.cashbook import get_cashbook
+from odoo_mcp.workflows.accounting.invoicing import (
+    execute_invoice_draft,
+    list_open_documents,
+    prepare_credit_note,
+    prepare_invoice_draft,
+    prepare_payment,
+    prepare_validation,
+)
 from odoo_mcp.workflows.accounting.reconcile_bank import (
     build_reconciliation_proposal,
     flag_unmatched_statement_lines,
@@ -52,7 +73,11 @@ from odoo_mcp.workflows.core.capabilities import get_erp_capabilities
 
 AdapterFactory = Callable[[object], Awaitable[OdooAdapter]]
 ReportResponse: TypeAlias = (
-    TrialBalanceResponse | AgingResponse | CashbookResponse | UnmatchedStatementLinesResponse
+    TrialBalanceResponse
+    | AgingResponse
+    | CashbookResponse
+    | UnmatchedStatementLinesResponse
+    | OpenDocumentsResponse
 )
 ReportOperation = Callable[[OdooAdapter, Company, str], Awaitable[ReportResponse]]
 LOGGER = logging.getLogger(__name__)
@@ -321,6 +346,133 @@ def create_mcp_server(
             except Exception:
                 LOGGER.warning("Accounting report audit persistence failed; details suppressed.")
         return AccountingToolResponse.from_error(error)
+
+    async def accounting_write(
+        definition: ToolDefinition,
+        command: WriteCommand,
+        prepare_operation: Callable[[OdooAdapter], Awaitable[tuple[object, PreparedWrite]]],
+        validate_operation: Callable[[OdooAdapter, object], Awaitable[None]],
+        execute_operation: Callable[[OdooAdapter, object], Awaitable[AppliedWrite]],
+    ) -> WriteSafetyResponse:
+        request_id = new_request_id()
+        binding: ConnectionBinding | None = None
+        snapshot: CapabilitySnapshot | None = None
+        initial_adapter: OdooAdapter | None = None
+        try:
+            binding = await resolver.resolve()
+            if definition.required_permission not in binding.permissions:
+                raise OdooMcpError(
+                    ErrorCode.ODOO_AUTH_FAILED,
+                    "The resolved MCP identity is not authorized for this accounting write.",
+                    "Reconnect with accounting proposal permission and retry.",
+                )
+            if command.company_id not in binding.connection.allowed_company_ids:
+                raise OdooMcpError(
+                    ErrorCode.COMPANY_NOT_FOUND,
+                    "The requested company is not authorized for this connection.",
+                    "Use an authorized company ID and retry.",
+                )
+            initial_adapter = await adapter_factory(binding.connection)
+            companies = await initial_adapter.get_companies()
+            if command.company_id not in {item.id for item in companies}:
+                raise OdooMcpError(
+                    ErrorCode.COMPANY_NOT_FOUND,
+                    "The requested company is unavailable to the technical user.",
+                    "Check company access and retry.",
+                )
+            snapshot = await initial_adapter.get_capabilities()
+            await _close_adapter(initial_adapter)
+            initial_adapter = None
+            if storage is None:
+                raise RuntimeError("Accounting write storage is unavailable")
+        except OdooMcpError as exc:
+            error = exc.as_response(request_id)
+        except Exception:
+            error = ErrorResponse(
+                error_code=ErrorCode.UNKNOWN_ERROR,
+                error_message="The accounting write failed unexpectedly.",
+                remediation_hint="Retry the request or contact the service operator.",
+                request_id=request_id,
+            )
+        else:
+            state: object | None = None
+
+            async def prepare() -> PreparedWrite:
+                nonlocal state
+                adapter = await adapter_factory(binding.connection)
+                try:
+                    state, prepared = await prepare_operation(adapter)
+                    return prepared
+                finally:
+                    await _close_adapter(adapter)
+
+            async def validate_current_state() -> None:
+                if state is None:
+                    raise RuntimeError("Accounting write was not prepared")
+                adapter = await adapter_factory(binding.connection)
+                try:
+                    await validate_operation(adapter, state)
+                finally:
+                    await _close_adapter(adapter)
+
+            async def execute() -> AppliedWrite:
+                if state is None:
+                    raise RuntimeError("Accounting write was not prepared")
+                adapter = await adapter_factory(binding.connection)
+                try:
+                    return await execute_operation(adapter, state)
+                except OdooMcpError as exc:
+                    if exc.code is ErrorCode.ODOO_PERMISSION_DENIED:
+                        raise KnownWriteFailure(exc) from None
+                    raise
+                finally:
+                    await _close_adapter(adapter)
+
+            return await WriteSafetyCoordinator(storage).run(
+                binding=binding,
+                definition=definition,
+                module="accounting",
+                snapshot=snapshot,
+                command=command,
+                prepare=prepare,
+                validate_current_state=validate_current_state,
+                execute=execute,
+                request_id=request_id,
+            )
+
+        if initial_adapter is not None:
+            try:
+                await _close_adapter(initial_adapter)
+            except Exception:
+                LOGGER.warning("Odoo adapter cleanup failed; details were suppressed.")
+        response = WriteSafetyResponse(
+            status="failed",
+            outcome="not_attempted",
+            request_id=request_id,
+            company_id=command.company_id,
+            error_code=error.error_code,
+            error_message=error.error_message,
+            remediation_hint=error.remediation_hint,
+        )
+        if binding is not None and storage is not None:
+            try:
+                storage.audit.append(
+                    _audit_event(
+                        binding,
+                        definition,
+                        command.company_id,
+                        command.request_payload,
+                        request_id,
+                        snapshot,
+                        final_status="failed",
+                        actual_result=response.model_dump(mode="json"),
+                        error=error,
+                        dry_run=command.dry_run,
+                    )
+                )
+            except Exception:
+                LOGGER.warning("Accounting write audit persistence failed; details suppressed.")
+        return response
 
     trial_definition = get_tool_definition("get_trial_balance")
 
@@ -819,6 +971,410 @@ def create_mcp_server(
         description=reconciliation_definition.description,
         annotations=reconciliation_definition.annotations,
         meta=reconciliation_definition.protocol_meta(),
+        structured_output=True,
+    )
+
+    def add_open_documents_tool(name: str, *, bills: bool) -> None:
+        definition = get_tool_definition(name)
+
+        async def tool(
+            as_of_date: date,
+            company_id: PositiveCompanyId,
+            partner_ids: tuple[int, ...] = (),
+            overdue_only: bool = False,
+            limit: ReportLimit = 100,
+            cursor: ReportCursor = None,
+        ) -> AccountingToolResponse:
+            try:
+                request = OpenDocumentsInput(
+                    as_of_date=as_of_date,
+                    company_id=company_id,
+                    partner_ids=partner_ids,
+                    overdue_only=overdue_only,
+                    limit=limit,
+                    cursor=cursor,
+                )
+            except ValidationError:
+                return await invalid_accounting_report(
+                    definition,
+                    company_id,
+                    {
+                        "as_of_date": as_of_date.isoformat(),
+                        "company_id": company_id,
+                        "partner_ids": list(partner_ids),
+                        "overdue_only": overdue_only,
+                        "limit": limit,
+                        "cursor": cursor,
+                    },
+                )
+
+            async def run(
+                adapter: OdooAdapter, company: Company, request_id: str
+            ) -> ReportResponse:
+                return await list_open_documents(
+                    adapter,
+                    request,
+                    bills=bills,
+                    company_name=company.name,
+                    request_id=request_id,
+                )
+
+            return await accounting_report(definition, request, run)
+
+        server.add_tool(
+            tool,
+            name=definition.name,
+            title=definition.title,
+            description=definition.description,
+            annotations=definition.annotations,
+            meta=definition.protocol_meta(),
+            structured_output=True,
+        )
+
+    add_open_documents_tool("list_open_invoices", bills=False)
+    add_open_documents_tool("list_open_bills", bills=True)
+
+    def add_create_invoice_tool(name: str, *, supplier: bool) -> None:
+        definition = get_tool_definition(name)
+
+        async def invoke(
+            company_id: PositiveCompanyId,
+            partner_id: PositiveIdentifier,
+            invoice_date: date,
+            lines: tuple[InvoiceLineInput, ...],
+            currency_id: PositiveIdentifier | None,
+            payment_term_id: PositiveIdentifier | None,
+            analytic_account_id: PositiveIdentifier | None,
+            vendor_reference: str | None,
+            dry_run: bool,
+            idempotency_key: IdempotencyKey,
+        ) -> WriteSafetyResponse:
+            request = CreateInvoiceInput(
+                company_id=company_id,
+                partner_id=partner_id,
+                invoice_date=invoice_date,
+                lines=lines,
+                currency_id=currency_id,
+                payment_term_id=payment_term_id,
+                analytic_account_id=analytic_account_id,
+                vendor_reference=vendor_reference,
+                dry_run=dry_run,
+                idempotency_key=idempotency_key,
+            )
+            payload = request.model_dump(
+                mode="json", exclude={"company_id", "dry_run", "idempotency_key"}
+            )
+
+            async def prepare_op(
+                adapter: OdooAdapter,
+            ) -> tuple[object, PreparedWrite]:
+                return await prepare_invoice_draft(adapter, request, supplier=supplier)
+
+            async def validate_op(adapter: OdooAdapter, state: object) -> None:
+                if not isinstance(state, InvoiceDraft):
+                    raise RuntimeError("Invalid prepared invoice state")
+                refreshed, _ = await prepare_invoice_draft(adapter, request, supplier=supplier)
+                if refreshed != state:
+                    raise OdooMcpError(
+                        ErrorCode.ODOO_STATE_CONFLICT,
+                        "An invoice reference changed before draft creation.",
+                        "Refresh the preview and retry with a new idempotency key.",
+                    )
+
+            async def execute_op(adapter: OdooAdapter, state: object) -> AppliedWrite:
+                if not isinstance(state, InvoiceDraft):
+                    raise RuntimeError("Invalid prepared invoice state")
+                return await execute_invoice_draft(adapter, state)
+
+            return await accounting_write(
+                definition,
+                WriteCommand(
+                    company_id=request.company_id,
+                    request_payload=payload,
+                    dry_run=request.dry_run,
+                    idempotency_key=request.idempotency_key,
+                ),
+                prepare_op,
+                validate_op,
+                execute_op,
+            )
+
+        if supplier:
+
+            async def supplier_tool(
+                company_id: PositiveCompanyId,
+                partner_id: PositiveIdentifier,
+                invoice_date: date,
+                lines: tuple[InvoiceLineInput, ...],
+                currency_id: PositiveIdentifier | None = None,
+                payment_term_id: PositiveIdentifier | None = None,
+                analytic_account_id: PositiveIdentifier | None = None,
+                vendor_reference: str | None = None,
+                dry_run: bool = True,
+                idempotency_key: IdempotencyKey = None,
+            ) -> WriteSafetyResponse:
+                return await invoke(
+                    company_id,
+                    partner_id,
+                    invoice_date,
+                    lines,
+                    currency_id,
+                    payment_term_id,
+                    analytic_account_id,
+                    vendor_reference,
+                    dry_run,
+                    idempotency_key,
+                )
+
+            registered_tool: Callable[..., Awaitable[WriteSafetyResponse]] = supplier_tool
+
+        else:
+
+            async def customer_tool(
+                company_id: PositiveCompanyId,
+                partner_id: PositiveIdentifier,
+                invoice_date: date,
+                lines: tuple[InvoiceLineInput, ...],
+                currency_id: PositiveIdentifier | None = None,
+                payment_term_id: PositiveIdentifier | None = None,
+                analytic_account_id: PositiveIdentifier | None = None,
+                dry_run: bool = True,
+                idempotency_key: IdempotencyKey = None,
+            ) -> WriteSafetyResponse:
+                return await invoke(
+                    company_id,
+                    partner_id,
+                    invoice_date,
+                    lines,
+                    currency_id,
+                    payment_term_id,
+                    analytic_account_id,
+                    None,
+                    dry_run,
+                    idempotency_key,
+                )
+
+            registered_tool = customer_tool
+
+        server.add_tool(
+            registered_tool,
+            name=definition.name,
+            title=definition.title,
+            description=definition.description,
+            annotations=definition.annotations,
+            meta=definition.protocol_meta(),
+            structured_output=True,
+        )
+
+    add_create_invoice_tool("create_customer_invoice", supplier=False)
+    add_create_invoice_tool("create_supplier_bill", supplier=True)
+
+    credit_definition = get_tool_definition("create_credit_note")
+
+    async def create_credit_note_tool(
+        company_id: PositiveCompanyId,
+        original_move_id: PositiveIdentifier,
+        credit_date: date,
+        reason: str,
+        dry_run: bool = True,
+        idempotency_key: IdempotencyKey = None,
+    ) -> WriteSafetyResponse:
+        request = CreditNoteInput(
+            company_id=company_id,
+            original_move_id=original_move_id,
+            credit_date=credit_date,
+            reason=reason,
+            dry_run=dry_run,
+            idempotency_key=idempotency_key,
+        )
+        payload = request.model_dump(
+            mode="json", exclude={"company_id", "dry_run", "idempotency_key"}
+        )
+
+        async def prepare_op(adapter: OdooAdapter) -> tuple[object, PreparedWrite]:
+            return await prepare_credit_note(adapter, request)
+
+        async def validate_op(adapter: OdooAdapter, state: object) -> None:
+            if not isinstance(state, InvoiceEffect):
+                raise RuntimeError("Invalid prepared credit-note state")
+            refreshed, _ = await prepare_credit_note(adapter, request)
+            if refreshed != state:
+                raise OdooMcpError(
+                    ErrorCode.ODOO_STATE_CONFLICT,
+                    "The original invoice changed before credit-note creation.",
+                    "Refresh and retry with a new idempotency key.",
+                )
+
+        async def execute_op(adapter: OdooAdapter, state: object) -> AppliedWrite:
+            if not isinstance(state, InvoiceEffect):
+                raise RuntimeError("Invalid prepared credit-note state")
+            effect = await adapter.create_credit_note(
+                request.company_id,
+                request.original_move_id,
+                request.credit_date,
+                request.reason.strip(),
+            )
+            return AppliedWrite(
+                material_effects=effect.model_dump(mode="json"),
+                record_refs=(f"account.move:{effect.id}",),
+            )
+
+        return await accounting_write(
+            credit_definition,
+            WriteCommand(
+                company_id=request.company_id,
+                request_payload=payload,
+                dry_run=request.dry_run,
+                idempotency_key=request.idempotency_key,
+            ),
+            prepare_op,
+            validate_op,
+            execute_op,
+        )
+
+    server.add_tool(
+        create_credit_note_tool,
+        name=credit_definition.name,
+        title=credit_definition.title,
+        description=credit_definition.description,
+        annotations=credit_definition.annotations,
+        meta=credit_definition.protocol_meta(),
+        structured_output=True,
+    )
+
+    validation_definition = get_tool_definition("validate_invoice")
+
+    async def validate_invoice_tool(
+        invoice_id: PositiveIdentifier,
+        company_id: PositiveCompanyId,
+        dry_run: bool = True,
+        idempotency_key: IdempotencyKey = None,
+    ) -> WriteSafetyResponse:
+        request = ValidateInvoiceInput(
+            invoice_id=invoice_id,
+            company_id=company_id,
+            dry_run=dry_run,
+            idempotency_key=idempotency_key,
+        )
+
+        async def prepare_op(adapter: OdooAdapter) -> tuple[object, PreparedWrite]:
+            return await prepare_validation(adapter, request)
+
+        async def validate_op(adapter: OdooAdapter, state: object) -> None:
+            if not isinstance(state, InvoiceEffect):
+                raise RuntimeError("Invalid prepared validation state")
+            refreshed, _ = await prepare_validation(adapter, request)
+            if refreshed != state:
+                raise OdooMcpError(
+                    ErrorCode.ODOO_STATE_CONFLICT,
+                    "The draft changed before posting.",
+                    "Refresh and retry with a new idempotency key.",
+                )
+
+        async def execute_op(adapter: OdooAdapter, state: object) -> AppliedWrite:
+            if not isinstance(state, InvoiceEffect):
+                raise RuntimeError("Invalid prepared validation state")
+            effect = await adapter.post_invoice(request.company_id, request.invoice_id)
+            return AppliedWrite(
+                material_effects=effect.model_dump(mode="json"),
+                record_refs=(f"account.move:{effect.id}",),
+            )
+
+        return await accounting_write(
+            validation_definition,
+            WriteCommand(
+                company_id=request.company_id,
+                request_payload={"invoice_id": request.invoice_id},
+                dry_run=request.dry_run,
+                idempotency_key=request.idempotency_key,
+            ),
+            prepare_op,
+            validate_op,
+            execute_op,
+        )
+
+    server.add_tool(
+        validate_invoice_tool,
+        name=validation_definition.name,
+        title=validation_definition.title,
+        description=validation_definition.description,
+        annotations=validation_definition.annotations,
+        meta=validation_definition.protocol_meta(),
+        structured_output=True,
+    )
+
+    payment_definition = get_tool_definition("register_payment")
+
+    async def register_payment_tool(
+        invoice_id: PositiveIdentifier,
+        company_id: PositiveCompanyId,
+        payment_date: date,
+        amount: Decimal | None = None,
+        journal_id: PositiveIdentifier | None = None,
+        payment_method_line_id: PositiveIdentifier | None = None,
+        dry_run: bool = True,
+        idempotency_key: IdempotencyKey = None,
+    ) -> WriteSafetyResponse:
+        request = RegisterPaymentInput(
+            invoice_id=invoice_id,
+            company_id=company_id,
+            payment_date=payment_date,
+            amount=amount,
+            journal_id=journal_id,
+            payment_method_line_id=payment_method_line_id,
+            dry_run=dry_run,
+            idempotency_key=idempotency_key,
+        )
+
+        async def prepare_op(adapter: OdooAdapter) -> tuple[object, PreparedWrite]:
+            effect, registration, prepared = await prepare_payment(adapter, request)
+            return (effect, registration), prepared
+
+        async def validate_op(adapter: OdooAdapter, state: object) -> None:
+            if not isinstance(state, tuple) or len(state) != 2:
+                raise RuntimeError("Invalid prepared payment state")
+            effect, registration, _ = await prepare_payment(adapter, request)
+            if (effect, registration) != state:
+                raise OdooMcpError(
+                    ErrorCode.ODOO_STATE_CONFLICT,
+                    "The invoice or payment route changed before registration.",
+                    "Refresh and retry with a new idempotency key.",
+                )
+
+        async def execute_op(adapter: OdooAdapter, state: object) -> AppliedWrite:
+            if not isinstance(state, tuple) or len(state) != 2:
+                raise RuntimeError("Invalid prepared payment state")
+            registration = state[1]
+            if not isinstance(registration, PaymentRegistration):
+                raise RuntimeError("Payment route was not resolved")
+            effect = await adapter.register_payment(registration)
+            return AppliedWrite(
+                material_effects=effect.model_dump(mode="json"),
+                record_refs=(f"account.move:{effect.id}",),
+            )
+
+        return await accounting_write(
+            payment_definition,
+            WriteCommand(
+                company_id=request.company_id,
+                request_payload=request.model_dump(
+                    mode="json", exclude={"company_id", "dry_run", "idempotency_key"}
+                ),
+                dry_run=request.dry_run,
+                idempotency_key=request.idempotency_key,
+            ),
+            prepare_op,
+            validate_op,
+            execute_op,
+        )
+
+    server.add_tool(
+        register_payment_tool,
+        name=payment_definition.name,
+        title=payment_definition.title,
+        description=payment_definition.description,
+        annotations=payment_definition.annotations,
+        meta=payment_definition.protocol_meta(),
         structured_output=True,
     )
     return server

@@ -153,5 +153,31 @@ class Json2Transport:
             )
         return result
 
+    async def execute_method(
+        self,
+        model: str,
+        method: str,
+        *,
+        ids: tuple[int, ...] = (),
+        positional: list[Any] | None = None,
+        named: dict[str, Any] | None = None,
+        company_ids: tuple[int, ...],
+    ) -> Any:
+        if positional:
+            raise OdooMcpError(
+                ErrorCode.ODOO_API_ERROR,
+                "The Odoo operation is incompatible with JSON-2.",
+                "Check Odoo 19 method compatibility and retry.",
+            )
+        payload = dict(named or {})
+        context = payload.pop("context", {})
+        if not isinstance(context, dict):
+            context = {}
+        context["allowed_company_ids"] = list(company_ids)
+        if ids:
+            payload["ids"] = list(ids)
+        payload["context"] = context
+        return await self._call(model, method, payload)
+
     async def close(self) -> None:
         await self._client.aclose()

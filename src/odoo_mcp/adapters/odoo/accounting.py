@@ -19,11 +19,18 @@ from odoo_mcp.adapters.accounting import (
     BankStatementLine,
     Currency,
     DatePeriod,
+    InvoiceDraft,
+    InvoiceEffect,
+    InvoiceLineEffect,
+    InvoiceTax,
     Journal,
     PageRequest,
     PartialReconciliation,
     Partner,
     PaymentMethodLine,
+    PaymentRegistration,
+    PaymentRoute,
+    PaymentScheduleLine,
     PaymentTerm,
     Product,
     ReadFilters,
@@ -32,6 +39,7 @@ from odoo_mcp.adapters.accounting import (
 )
 from odoo_mcp.adapters.odoo.policy import (
     FIELD_DENYLIST,
+    ensure_accounting_action_allowed,
     ensure_model_read_allowed,
     strip_denied_fields,
 )
@@ -58,6 +66,7 @@ _ACCOUNT_MOVE_FIELDS = [
     "currency_id",
     "amount_total",
     "amount_residual",
+    "amount_residual_signed",
     "payment_state",
     "ref",
 ]
@@ -113,7 +122,7 @@ _PAYMENT_METHOD_LINE_FIELDS = [
     "payment_method_id",
     "payment_type",
 ]
-_PARTNER_FIELDS = ["id", "name", "company_id"]
+_PARTNER_FIELDS = ["id", "name", "company_id", "customer_rank", "supplier_rank"]
 _PRODUCT_FIELDS = ["id", "name", "default_code", "company_id", "list_price", "currency_id"]
 _ACCOUNT_FIELDS = [
     "id",
@@ -125,6 +134,41 @@ _ACCOUNT_FIELDS = [
     "reconcile",
 ]
 _ANALYTIC_ACCOUNT_FIELDS = ["id", "name", "code", "company_id", "currency_id"]
+_INVOICE_EFFECT_FIELDS = [
+    "id",
+    "name",
+    "move_type",
+    "state",
+    "company_id",
+    "partner_id",
+    "invoice_date",
+    "invoice_date_due",
+    "journal_id",
+    "fiscal_position_id",
+    "currency_id",
+    "invoice_payment_term_id",
+    "amount_untaxed",
+    "amount_tax",
+    "amount_total",
+    "amount_residual",
+    "payment_state",
+]
+_INVOICE_EFFECT_LINE_FIELDS = [
+    "id",
+    "move_id",
+    "company_id",
+    "display_type",
+    "name",
+    "quantity",
+    "price_unit",
+    "price_subtotal",
+    "price_total",
+    "tax_line_id",
+    "balance",
+    "analytic_distribution",
+    "date_maturity",
+    "amount_residual",
+]
 
 _FILTER_FIELDS: dict[str, frozenset[str]] = {
     "account.move": frozenset(
@@ -205,6 +249,18 @@ def _positive_int(value: object) -> int:
     if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
         raise _invalid_response()
     return value
+
+
+def _positive_or_zero_int(value: object) -> int:
+    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+        raise _invalid_response()
+    return value
+
+
+def _created_id(value: object) -> int:
+    if isinstance(value, list) and len(value) == 1:
+        return _positive_int(value[0])
+    return _positive_int(value)
 
 
 def _text(value: object) -> str:
@@ -320,6 +376,7 @@ def _normalize_account_move(raw: RawRecord) -> AccountMove:
         currency=_relation(raw.get("currency_id")),
         amount_total=_decimal(raw.get("amount_total")),
         amount_residual=_decimal(raw.get("amount_residual")),
+        amount_residual_company=_optional_decimal(raw.get("amount_residual_signed")),
         payment_state=_optional_text(raw.get("payment_state")),
         reference=_optional_text(raw.get("ref")),
     )
@@ -425,6 +482,8 @@ def _normalize_partner(raw: RawRecord) -> Partner:
         id=_positive_int(raw.get("id")),
         name=_text(raw.get("name")),
         company_id=_optional_company_id(raw.get("company_id")),
+        customer_rank=_positive_or_zero_int(raw.get("customer_rank", 0)),
+        supplier_rank=_positive_or_zero_int(raw.get("supplier_rank", 0)),
     )
 
 
@@ -879,3 +938,342 @@ class AccountingReader:
             _ANALYTIC_ACCOUNT_FIELDS,
             _normalize_analytic_account,
         )
+
+    async def get_invoice_effect(self, company_id: int, move_id: int) -> InvoiceEffect:
+        self._require_company(company_id)
+        if not isinstance(move_id, int) or isinstance(move_id, bool) or move_id <= 0:
+            raise _invalid_input("The invoice ID is invalid.", "Use a positive invoice ID.")
+        ensure_model_read_allowed("account.move", module="accounting")
+        rows = await self._transport.search_read(
+            "account.move",
+            [["id", "=", move_id], ["company_id", "=", company_id]],
+            _INVOICE_EFFECT_FIELDS,
+            limit=2,
+            offset=0,
+            order="id asc",
+            company_ids=(company_id,),
+        )
+        if len(rows) != 1:
+            raise OdooMcpError(
+                ErrorCode.INVALID_INPUT,
+                "The requested invoice or bill is unavailable.",
+                "Use an invoice or bill ID from the authorized company.",
+            )
+        raw = _record(rows[0])
+        ensure_model_read_allowed("account.move.line", module="accounting")
+        line_rows = await self._transport.search_read(
+            "account.move.line",
+            [["move_id", "=", move_id], ["company_id", "=", company_id]],
+            _INVOICE_EFFECT_LINE_FIELDS,
+            limit=1001,
+            offset=0,
+            order="id asc",
+            company_ids=(company_id,),
+        )
+        if len(line_rows) > 1000:
+            raise _invalid_response()
+        invoice_lines: list[InvoiceLineEffect] = []
+        tax_totals: dict[int, tuple[str, Decimal]] = {}
+        schedule: list[PaymentScheduleLine] = []
+        for value in line_rows:
+            line = _record(value)
+            if _company_id(line.get("company_id")) != company_id:
+                raise _invalid_response()
+            display_type = _optional_text(line.get("display_type"))
+            tax = _optional_relation(line.get("tax_line_id"))
+            if tax is not None:
+                existing = tax_totals.get(tax.id)
+                if existing is not None and existing[0] != tax.name:
+                    raise _invalid_response()
+                tax_totals[tax.id] = (
+                    tax.name,
+                    (existing[1] if existing is not None else Decimal("0"))
+                    + abs(_decimal(line.get("balance"))),
+                )
+            elif display_type in {None, "product"}:
+                invoice_lines.append(
+                    InvoiceLineEffect(
+                        id=_positive_int(line.get("id")),
+                        description=_text(line.get("name")),
+                        quantity=_decimal(line.get("quantity")),
+                        unit_price=_decimal(line.get("price_unit")),
+                        subtotal=_decimal(line.get("price_subtotal")),
+                        total=_decimal(line.get("price_total")),
+                        analytic_distribution=_analytic_distribution(
+                            line.get("analytic_distribution")
+                        ),
+                    )
+                )
+            elif display_type == "payment_term":
+                maturity = _optional_date(line.get("date_maturity"))
+                if maturity is None:
+                    raise _invalid_response()
+                schedule.append(
+                    PaymentScheduleLine(
+                        due_date=maturity,
+                        amount=abs(_decimal(line.get("amount_residual"))),
+                    )
+                )
+        return InvoiceEffect(
+            id=_positive_int(raw.get("id")),
+            name=_text(raw.get("name")),
+            move_type=_text(raw.get("move_type")),
+            state=_text(raw.get("state")),
+            company_id=_company_id(raw.get("company_id")),
+            partner=_relation(raw.get("partner_id")),
+            invoice_date=_date(raw.get("invoice_date")),
+            due_date=_optional_date(raw.get("invoice_date_due")),
+            journal=_relation(raw.get("journal_id")),
+            fiscal_position=_optional_relation(raw.get("fiscal_position_id")),
+            currency=_relation(raw.get("currency_id")),
+            payment_term=_optional_relation(raw.get("invoice_payment_term_id")),
+            amount_untaxed=_decimal(raw.get("amount_untaxed")),
+            amount_tax=_decimal(raw.get("amount_tax")),
+            amount_total=_decimal(raw.get("amount_total")),
+            amount_residual=_decimal(raw.get("amount_residual")),
+            payment_state=_optional_text(raw.get("payment_state")),
+            taxes=tuple(
+                InvoiceTax(id=identifier, name=value[0], amount=value[1])
+                for identifier, value in sorted(tax_totals.items())
+            ),
+            lines=tuple(invoice_lines),
+            payment_schedule=tuple(schedule),
+        )
+
+    async def create_draft_invoice(self, draft: InvoiceDraft) -> InvoiceEffect:
+        self._require_company(draft.company_id)
+        ensure_accounting_action_allowed("account.move", "create_draft")
+        values: dict[str, object] = {
+            "company_id": draft.company_id,
+            "move_type": draft.move_type,
+            "partner_id": draft.partner_id,
+            "invoice_date": draft.invoice_date.isoformat(),
+            "invoice_line_ids": [
+                [
+                    0,
+                    0,
+                    {
+                        "name": line.description,
+                        "quantity": float(line.quantity),
+                        "price_unit": float(line.unit_price),
+                        "account_id": line.account_id,
+                        **({"product_id": line.product_id} if line.product_id else {}),
+                        **(
+                            {
+                                "analytic_distribution": {
+                                    str(line.analytic_account_id or draft.analytic_account_id): 100
+                                }
+                            }
+                            if line.analytic_account_id or draft.analytic_account_id
+                            else {}
+                        ),
+                    },
+                ]
+                for line in draft.lines
+            ],
+        }
+        if draft.currency_id is not None:
+            values["currency_id"] = draft.currency_id
+        if draft.payment_term_id is not None:
+            values["invoice_payment_term_id"] = draft.payment_term_id
+        if draft.vendor_reference is not None:
+            values["ref"] = draft.vendor_reference
+        result = await self._transport.execute_method(
+            "account.move",
+            "create",
+            named={"vals_list": values},
+            company_ids=(draft.company_id,),
+        )
+        move_id = _created_id(result)
+        effect = await self.get_invoice_effect(draft.company_id, move_id)
+        if effect.state != "draft" or effect.move_type != draft.move_type:
+            raise _invalid_response()
+        return effect
+
+    async def post_invoice(self, company_id: int, move_id: int) -> InvoiceEffect:
+        self._require_company(company_id)
+        ensure_accounting_action_allowed("account.move", "post_existing_draft")
+        await self._transport.execute_method(
+            "account.move",
+            "action_post",
+            ids=(move_id,),
+            company_ids=(company_id,),
+        )
+        effect = await self.get_invoice_effect(company_id, move_id)
+        if effect.state != "posted":
+            raise _invalid_response()
+        return effect
+
+    async def create_credit_note(
+        self,
+        company_id: int,
+        original_move_id: int,
+        credit_date: date,
+        reason: str,
+    ) -> InvoiceEffect:
+        self._require_company(company_id)
+        ensure_accounting_action_allowed("account.move", "reverse_existing_move")
+        ensure_accounting_action_allowed("account.move.reversal", "create_transient")
+        context = {
+            "allowed_company_ids": [company_id],
+            "active_model": "account.move",
+            "active_ids": [original_move_id],
+            "active_id": original_move_id,
+        }
+        existing_rows = await self._transport.search_read(
+            "account.move",
+            [
+                ["reversed_entry_id", "=", original_move_id],
+                ["company_id", "=", company_id],
+            ],
+            ["id"],
+            limit=1001,
+            offset=0,
+            order="id asc",
+            company_ids=(company_id,),
+        )
+        if len(existing_rows) > 1000:
+            raise _invalid_response()
+        existing_ids = {_positive_int(row.get("id")) for row in existing_rows}
+        wizard_id = _created_id(
+            await self._transport.execute_method(
+                "account.move.reversal",
+                "create",
+                named={
+                    "vals_list": {
+                        "move_ids": [[6, 0, [original_move_id]]],
+                        "date": credit_date.isoformat(),
+                        "reason": reason,
+                    },
+                    "context": context,
+                },
+                company_ids=(company_id,),
+            )
+        )
+        ensure_accounting_action_allowed("account.move.reversal", "execute_standard_workflow")
+        result = await self._transport.execute_method(
+            "account.move.reversal",
+            "reverse_moves",
+            ids=(wizard_id,),
+            named={"context": context},
+            company_ids=(company_id,),
+        )
+        action_id: int | None = None
+        if isinstance(result, Mapping):
+            candidate = result.get("res_id")
+            if isinstance(candidate, int) and not isinstance(candidate, bool) and candidate > 0:
+                action_id = candidate
+        rows = await self._transport.search_read(
+            "account.move",
+            [
+                ["reversed_entry_id", "=", original_move_id],
+                ["company_id", "=", company_id],
+                ["state", "=", "draft"],
+            ],
+            ["id"],
+            limit=1001,
+            offset=0,
+            order="id desc",
+            company_ids=(company_id,),
+        )
+        if len(rows) > 1000:
+            raise _invalid_response()
+        new_ids = {_positive_int(row.get("id")) for row in rows} - existing_ids
+        if action_id is not None:
+            if action_id not in new_ids:
+                raise _invalid_response()
+            move_id = action_id
+        elif len(new_ids) == 1:
+            move_id = new_ids.pop()
+        else:
+            raise _invalid_response()
+        return await self.get_invoice_effect(company_id, move_id)
+
+    async def get_payment_routes(
+        self, company_id: int, invoice_id: int
+    ) -> tuple[PaymentRoute, ...]:
+        invoice = await self.get_invoice_effect(company_id, invoice_id)
+        payment_type = "inbound" if invoice.move_type == "out_invoice" else "outbound"
+        journal_items: list[Journal] = []
+        cursor: str | None = None
+        while True:
+            journals = await self.get_journals(
+                company_id, page=PageRequest(limit=500, cursor=cursor)
+            )
+            journal_items.extend(journals.items)
+            if journals.next_cursor is None:
+                break
+            cursor = journals.next_cursor
+        cash_ids = tuple(item.id for item in journal_items if item.journal_type in {"bank", "cash"})
+        if not cash_ids:
+            return ()
+        method_items: list[PaymentMethodLine] = []
+        cursor = None
+        while True:
+            methods = await self.get_payment_method_lines(
+                company_id,
+                cash_ids,
+                page=PageRequest(limit=500, cursor=cursor),
+            )
+            method_items.extend(methods.items)
+            if methods.next_cursor is None:
+                break
+            cursor = methods.next_cursor
+        cash_journals = {item.id: item for item in journal_items if item.id in cash_ids}
+        if any(
+            item.journal.id not in cash_journals
+            or item.journal.name != cash_journals[item.journal.id].name
+            for item in method_items
+        ):
+            raise _invalid_response()
+        route_ids = [(item.journal.id, item.id) for item in method_items]
+        if len(route_ids) != len(set(route_ids)):
+            raise _invalid_response()
+        return tuple(
+            PaymentRoute(
+                journal=item.journal,
+                payment_method_line=RelatedRecord(
+                    id=item.id,
+                    name=item.name,
+                ),
+                payment_type=payment_type,
+                may_initiate_external_effect=item.payment_method.name.casefold() != "manual",
+            )
+            for item in method_items
+            if item.payment_type in {None, payment_type}
+        )
+
+    async def register_payment(self, registration: PaymentRegistration) -> InvoiceEffect:
+        self._require_company(registration.company_id)
+        ensure_accounting_action_allowed("account.payment.register", "create_transient")
+        context = {
+            "allowed_company_ids": [registration.company_id],
+            "active_model": "account.move",
+            "active_ids": [registration.invoice_id],
+            "active_id": registration.invoice_id,
+        }
+        wizard_id = _created_id(
+            await self._transport.execute_method(
+                "account.payment.register",
+                "create",
+                named={
+                    "vals_list": {
+                        "payment_date": registration.payment_date.isoformat(),
+                        "amount": float(registration.amount),
+                        "journal_id": registration.journal_id,
+                        "payment_method_line_id": registration.payment_method_line_id,
+                    },
+                    "context": context,
+                },
+                company_ids=(registration.company_id,),
+            )
+        )
+        ensure_accounting_action_allowed("account.payment.register", "execute_standard_workflow")
+        await self._transport.execute_method(
+            "account.payment.register",
+            "action_create_payments",
+            ids=(wizard_id,),
+            named={"context": context},
+            company_ids=(registration.company_id,),
+        )
+        return await self.get_invoice_effect(registration.company_id, registration.invoice_id)

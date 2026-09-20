@@ -235,5 +235,29 @@ class JsonRpcTransport:
             )
         return result
 
+    async def execute_method(
+        self,
+        model: str,
+        method: str,
+        *,
+        ids: tuple[int, ...] = (),
+        positional: list[Any] | None = None,
+        named: dict[str, Any] | None = None,
+        company_ids: tuple[int, ...],
+    ) -> Any:
+        arguments: list[Any] = []
+        if ids:
+            arguments.append(list(ids))
+        arguments.extend(positional or [])
+        keywords = dict(named or {})
+        if method == "create" and not arguments and "vals_list" in keywords:
+            arguments.append(keywords.pop("vals_list"))
+        context = keywords.pop("context", {})
+        if not isinstance(context, dict):
+            context = {}
+        context["allowed_company_ids"] = list(company_ids)
+        keywords["context"] = context
+        return await self._execute_kw(model, method, arguments, keywords)
+
     async def close(self) -> None:
         await self._client.aclose()

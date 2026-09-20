@@ -10,6 +10,8 @@ import pytest
 from odoo_mcp.adapters.accounting import PageRequest, ReadFilters
 from odoo_mcp.adapters.odoo.capabilities import CAPABILITY_PROBES
 from odoo_mcp.adapters.odoo.client import OdooClient
+from odoo_mcp.adapters.odoo.transports.json2 import Json2Transport
+from odoo_mcp.adapters.odoo.transports.json_rpc import JsonRpcTransport
 from odoo_mcp.app.settings import OdooConnectionSettings
 from odoo_mcp.mcp.error_codes import ErrorCode, OdooMcpError
 from odoo_mcp.mcp.schemas import TrialBalanceInput
@@ -22,6 +24,75 @@ def _version_response(major: int) -> httpx.Response:
         200,
         json={"result": {"server_version_info": [major, 0, 0, "final", 0, "e"]}},
     )
+
+
+async def test_write_method_payloads_match_odoo_18_and_19_contracts(
+    connection: OdooConnectionSettings,
+) -> None:
+    json2_requests: list[dict[str, Any]] = []
+    rpc_requests: list[dict[str, Any]] = []
+
+    def json2_handler(request: httpx.Request) -> httpx.Response:
+        body: dict[str, Any] = __import__("json").loads(request.content)
+        json2_requests.append(body)
+        assert request.url.path in {
+            "/json/2/account.move/action_post",
+            "/json/2/account.move/create",
+        }
+        return httpx.Response(200, json=901 if request.url.path.endswith("/create") else True)
+
+    def rpc_handler(request: httpx.Request) -> httpx.Response:
+        body: dict[str, Any] = __import__("json").loads(request.content)
+        rpc_requests.append(body)
+        if len(rpc_requests) == 1:
+            return httpx.Response(200, json={"result": 7})
+        return httpx.Response(200, json={"result": True})
+
+    json2_client = httpx.AsyncClient(
+        transport=httpx.MockTransport(json2_handler), base_url=str(connection.url)
+    )
+    rpc_client = httpx.AsyncClient(
+        transport=httpx.MockTransport(rpc_handler), base_url=str(connection.url)
+    )
+    json2 = Json2Transport(connection, json2_client)
+    rpc = JsonRpcTransport(connection, rpc_client)
+    try:
+        await json2.execute_method("account.move", "action_post", ids=(101,), company_ids=(1,))
+        await json2.execute_method(
+            "account.move",
+            "create",
+            named={"vals_list": {"move_type": "out_invoice"}},
+            company_ids=(1,),
+        )
+        await rpc.authenticate()
+        await rpc.execute_method("account.move", "action_post", ids=(101,), company_ids=(1,))
+        await rpc.execute_method(
+            "account.move",
+            "create",
+            named={"vals_list": {"move_type": "out_invoice"}},
+            company_ids=(1,),
+        )
+    finally:
+        await json2.close()
+        await rpc.close()
+
+    assert json2_requests == [
+        {"ids": [101], "context": {"allowed_company_ids": [1]}},
+        {
+            "vals_list": {"move_type": "out_invoice"},
+            "context": {"allowed_company_ids": [1]},
+        },
+    ]
+    rpc_args = rpc_requests[1]["params"]["args"]
+    assert rpc_args[3:6] == ["account.move", "action_post", [[101]]]
+    assert rpc_args[6] == {"context": {"allowed_company_ids": [1]}}
+    rpc_create_args = rpc_requests[2]["params"]["args"]
+    assert rpc_create_args[3:6] == [
+        "account.move",
+        "create",
+        [{"move_type": "out_invoice"}],
+    ]
+    assert rpc_create_args[6] == {"context": {"allowed_company_ids": [1]}}
 
 
 @pytest.mark.parametrize(

@@ -128,6 +128,16 @@ boundary and never expand the technical user's Odoo permissions.
   partner, normalized reference, and date proximity. Ties and candidate reuse
   remain explicit unmatched results. The tool can persist a proposal locally;
   it does not perform Odoo reconciliation.
+- `list_open_invoices` and `list_open_bills` reconstruct record- and
+  company-currency residuals as of a date, including later partial
+  reconciliations.
+- `create_customer_invoice` and `create_supplier_bill` provide non-mutating,
+  input-only previews by default. Explicit execution creates one unposted
+  draft and reads back Odoo's effective accounting results.
+- `create_credit_note` creates one linked full draft reversal;
+  `validate_invoice` posts one existing draft; and `register_payment` delegates
+  to Odoo's configured payment-registration workflow. Each defaults to preview,
+  requires an idempotency key for execution, and never changes configuration.
 
 Report results are deterministically ordered and cursor-paginated with a default
 limit of 100 and maximum of 500. Empty data is a successful empty report;

@@ -94,6 +94,7 @@ class AccountMove(AdapterValue):
     currency: RelatedRecord
     amount_total: Decimal
     amount_residual: Decimal
+    amount_residual_company: Decimal | None = None
     payment_state: str | None = None
     reference: str | None = None
 
@@ -170,6 +171,8 @@ class Partner(AdapterValue):
     id: int = Field(gt=0)
     name: str
     company_id: int | None = Field(default=None, gt=0)
+    customer_rank: int = Field(default=0, ge=0)
+    supplier_rank: int = Field(default=0, ge=0)
 
 
 class Product(AdapterValue):
@@ -197,3 +200,85 @@ class AnalyticAccount(AdapterValue):
     code: str | None = None
     company_id: int | None = Field(default=None, gt=0)
     currency: RelatedRecord | None = None
+
+
+class InvoiceTax(AdapterValue):
+    id: int = Field(gt=0)
+    name: str
+    amount: Decimal
+
+
+class InvoiceLineEffect(AdapterValue):
+    id: int = Field(gt=0)
+    description: str
+    quantity: Decimal
+    unit_price: Decimal
+    subtotal: Decimal
+    total: Decimal
+    taxes: tuple[InvoiceTax, ...] = ()
+    analytic_distribution: dict[str, Decimal] = Field(default_factory=dict)
+
+
+class PaymentScheduleLine(AdapterValue):
+    due_date: Date
+    amount: Decimal
+
+
+class InvoiceEffect(AdapterValue):
+    id: int = Field(gt=0)
+    name: str
+    move_type: str
+    state: str
+    company_id: int = Field(gt=0)
+    partner: RelatedRecord
+    invoice_date: Date
+    due_date: Date | None = None
+    journal: RelatedRecord
+    fiscal_position: RelatedRecord | None = None
+    currency: RelatedRecord
+    payment_term: RelatedRecord | None = None
+    amount_untaxed: Decimal
+    amount_tax: Decimal
+    amount_total: Decimal
+    amount_residual: Decimal
+    payment_state: str | None = None
+    taxes: tuple[InvoiceTax, ...] = ()
+    lines: tuple[InvoiceLineEffect, ...] = ()
+    payment_schedule: tuple[PaymentScheduleLine, ...] = ()
+
+
+class InvoiceDraftLine(AdapterValue):
+    description: str
+    quantity: Decimal = Field(gt=0)
+    unit_price: Decimal = Field(ge=0)
+    account_id: int = Field(gt=0)
+    product_id: int | None = Field(default=None, gt=0)
+    analytic_account_id: int | None = Field(default=None, gt=0)
+
+
+class InvoiceDraft(AdapterValue):
+    company_id: int = Field(gt=0)
+    move_type: Literal["out_invoice", "in_invoice"]
+    partner_id: int = Field(gt=0)
+    invoice_date: Date
+    lines: tuple[InvoiceDraftLine, ...] = Field(min_length=1, max_length=500)
+    currency_id: int | None = Field(default=None, gt=0)
+    payment_term_id: int | None = Field(default=None, gt=0)
+    analytic_account_id: int | None = Field(default=None, gt=0)
+    vendor_reference: str | None = None
+
+
+class PaymentRoute(AdapterValue):
+    journal: RelatedRecord
+    payment_method_line: RelatedRecord
+    payment_type: str
+    may_initiate_external_effect: bool
+
+
+class PaymentRegistration(AdapterValue):
+    invoice_id: int = Field(gt=0)
+    company_id: int = Field(gt=0)
+    payment_date: Date
+    amount: Decimal = Field(gt=0)
+    journal_id: int = Field(gt=0)
+    payment_method_line_id: int = Field(gt=0)

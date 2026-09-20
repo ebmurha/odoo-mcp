@@ -94,6 +94,13 @@ async def test_all_profiles_expose_identical_registry_and_discovery(
         "get_cashbook",
         "flag_unmatched_statement_lines",
         "reconcile_bank_statement_lines",
+        "list_open_invoices",
+        "list_open_bills",
+        "create_customer_invoice",
+        "create_supplier_bill",
+        "create_credit_note",
+        "validate_invoice",
+        "register_payment",
     ]
     for output in outputs:
         output.pop("request_id")
@@ -111,15 +118,15 @@ async def test_registry_metadata_and_schemas_match_the_contract(
     server = create_mcp_server(Resolver(_binding(DeploymentProfile.LOCAL, connection)))
     tools = await server.list_tools()
 
-    assert len(TOOL_REGISTRY) == 7
-    assert len(tools) == 7
+    assert len(TOOL_REGISTRY) == 14
+    assert len(tools) == 14
     assert [tool.name for tool in tools] == [definition.name for definition in TOOL_REGISTRY]
     for tool, definition in zip(tools, TOOL_REGISTRY, strict=True):
         assert tool.input_schema["type"] == "object"
         assert tool.output_schema is not None
         assert tool.annotations is not None
         assert tool.annotations.read_only_hint is (definition.risk_level == "read")
-        assert tool.annotations.destructive_hint is False
+        assert tool.annotations.destructive_hint is (definition.risk_level == "confirm_write")
         assert tool.annotations.idempotent_hint is True
         assert tool.annotations.open_world_hint is True
         assert tool.meta == definition.protocol_meta()
@@ -141,6 +148,10 @@ async def test_registry_metadata_and_schemas_match_the_contract(
         "bank_journal_id",
         "statement_line_ids",
     }
+    assert "vendor_reference" not in tools[9].input_schema["properties"]
+    assert "vendor_reference" in tools[10].input_schema["properties"]
+    assert tools[12].annotations.destructive_hint is True
+    assert tools[13].annotations.destructive_hint is True
 
 
 async def test_permission_denial_happens_before_adapter_creation(
@@ -207,6 +218,15 @@ def test_public_permission_example_matches_registry() -> None:
             "get_aged_payables",
             "get_cashbook",
             "flag_unmatched_statement_lines",
+            "list_open_invoices",
+            "list_open_bills",
         },
-        "accounting_propose": {"reconcile_bank_statement_lines"},
+        "accounting_propose": {
+            "reconcile_bank_statement_lines",
+            "create_customer_invoice",
+            "create_supplier_bill",
+            "create_credit_note",
+            "validate_invoice",
+            "register_payment",
+        },
     }

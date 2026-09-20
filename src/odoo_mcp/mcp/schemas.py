@@ -195,6 +195,103 @@ class ReconciliationInput(BaseModel):
         return self
 
 
+class OpenDocumentsInput(AccountingReadInput):
+    as_of_date: date
+    partner_ids: tuple[int, ...] = Field(default=(), max_length=500)
+    overdue_only: bool = False
+
+    @model_validator(mode="after")
+    def validate_partners(self) -> OpenDocumentsInput:
+        if any(identifier <= 0 for identifier in self.partner_ids):
+            raise ValueError("partner_ids must contain positive integers")
+        if len(set(self.partner_ids)) != len(self.partner_ids):
+            raise ValueError("partner_ids must not contain duplicates")
+        return self
+
+
+class InvoiceLineInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    description: str = Field(min_length=1, max_length=500)
+    quantity: Decimal = Field(gt=0)
+    unit_price: Decimal = Field(ge=0)
+    account_id: int = Field(gt=0)
+    product_id: int | None = Field(default=None, gt=0)
+    analytic_account_id: int | None = Field(default=None, gt=0)
+
+    @model_validator(mode="after")
+    def validate_description(self) -> InvoiceLineInput:
+        if not self.description.strip():
+            raise ValueError("description must not be blank")
+        return self
+
+
+class CreateInvoiceInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    company_id: int = Field(gt=0)
+    partner_id: int = Field(gt=0)
+    invoice_date: date
+    lines: tuple[InvoiceLineInput, ...] = Field(min_length=1, max_length=500)
+    currency_id: int | None = Field(default=None, gt=0)
+    payment_term_id: int | None = Field(default=None, gt=0)
+    analytic_account_id: int | None = Field(default=None, gt=0)
+    vendor_reference: str | None = Field(default=None, max_length=500)
+    dry_run: bool = True
+    idempotency_key: str | None = Field(default=None, min_length=1, max_length=128)
+
+    @model_validator(mode="after")
+    def validate_reference(self) -> CreateInvoiceInput:
+        if self.vendor_reference is not None and not self.vendor_reference.strip():
+            raise ValueError("vendor_reference must not be blank")
+        return self
+
+
+class ValidateInvoiceInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    invoice_id: int = Field(gt=0)
+    company_id: int = Field(gt=0)
+    dry_run: bool = True
+    idempotency_key: str | None = Field(default=None, min_length=1, max_length=128)
+
+
+class CreditNoteInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    company_id: int = Field(gt=0)
+    original_move_id: int = Field(gt=0)
+    credit_date: date
+    reason: str = Field(min_length=1, max_length=500)
+    dry_run: bool = True
+    idempotency_key: str | None = Field(default=None, min_length=1, max_length=128)
+
+    @model_validator(mode="after")
+    def validate_reason(self) -> CreditNoteInput:
+        if not self.reason.strip():
+            raise ValueError("reason must not be blank")
+        return self
+
+
+class RegisterPaymentInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    invoice_id: int = Field(gt=0)
+    company_id: int = Field(gt=0)
+    payment_date: date
+    amount: Decimal | None = Field(default=None, gt=0)
+    journal_id: int | None = Field(default=None, gt=0)
+    payment_method_line_id: int | None = Field(default=None, gt=0)
+    dry_run: bool = True
+    idempotency_key: str | None = Field(default=None, min_length=1, max_length=128)
+
+    @model_validator(mode="after")
+    def validate_route(self) -> RegisterPaymentInput:
+        if (self.journal_id is None) is not (self.payment_method_line_id is None):
+            raise ValueError("journal_id and payment_method_line_id must be supplied together")
+        return self
+
+
 class TrialBalanceItem(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -344,6 +441,53 @@ class ReconciliationProposal(BaseModel):
     artifact_markdown: str
 
 
+class OpenDocumentItem(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    move_id: int
+    partner_id: int
+    partner_name: str
+    number: str
+    invoice_date: date
+    due_date: date | None
+    currency_id: int
+    currency_name: str
+    amount_total: Decimal
+    residual_currency: Decimal
+    residual_company: Decimal
+    payment_state: str | None
+    overdue_days: int
+
+
+class CurrencyResidualTotal(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    currency_id: int
+    currency_name: str
+    residual: Decimal
+
+
+class OpenDocumentsSummary(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    document_count: int
+    currency_totals: list[CurrencyResidualTotal]
+    company_currency_residual: Decimal
+
+
+class OpenDocumentsResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["ok"] = "ok"
+    request_id: str
+    company_id: int
+    as_of_date: date
+    items: list[OpenDocumentItem]
+    next_cursor: str | None
+    summary: OpenDocumentsSummary
+    artifact_markdown: str
+
+
 class TrialBalanceResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -410,12 +554,24 @@ class AccountingToolResponse(BaseModel):
     period_start: date | None = None
     period_end: date | None = None
     as_of_date: date | None = None
-    items: list[TrialBalanceItem | AgingItem | CashbookItem | UnmatchedStatementLineItem] | None = (
-        None
-    )
+    items: (
+        list[
+            TrialBalanceItem
+            | AgingItem
+            | CashbookItem
+            | UnmatchedStatementLineItem
+            | OpenDocumentItem
+        ]
+        | None
+    ) = None
     next_cursor: str | None = None
     summary: (
-        TrialBalanceSummary | AgingSummary | CashbookSummary | UnmatchedStatementLinesSummary | None
+        TrialBalanceSummary
+        | AgingSummary
+        | CashbookSummary
+        | UnmatchedStatementLinesSummary
+        | OpenDocumentsSummary
+        | None
     ) = None
     artifact_markdown: str | None = None
     error_code: ErrorCode | None = None
@@ -456,6 +612,7 @@ class AccountingToolResponse(BaseModel):
             | AgingResponse
             | CashbookResponse
             | UnmatchedStatementLinesResponse
+            | OpenDocumentsResponse
         ),
     ) -> AccountingToolResponse:
         return cls(**response.model_dump())

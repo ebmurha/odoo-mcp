@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import date
 from typing import cast
 
 import httpx
@@ -15,11 +16,15 @@ from odoo_mcp.adapters.accounting import (
     BankStatementLine,
     Currency,
     DatePeriod,
+    InvoiceDraft,
+    InvoiceEffect,
     Journal,
     PageRequest,
     PartialReconciliation,
     Partner,
     PaymentMethodLine,
+    PaymentRegistration,
+    PaymentRoute,
     PaymentTerm,
     Product,
     ReadFilters,
@@ -252,6 +257,34 @@ class OdooClient:
         page: PageRequest = DEFAULT_PAGE_REQUEST,
     ) -> RecordPage[AnalyticAccount]:
         return await self._accounting.get_analytic_accounts(company_id, filters, page=page)
+
+    async def get_invoice_effect(self, company_id: int, move_id: int) -> InvoiceEffect:
+        return await self._accounting.get_invoice_effect(company_id, move_id)
+
+    async def create_draft_invoice(self, draft: InvoiceDraft) -> InvoiceEffect:
+        return await self._accounting.create_draft_invoice(draft)
+
+    async def post_invoice(self, company_id: int, move_id: int) -> InvoiceEffect:
+        return await self._accounting.post_invoice(company_id, move_id)
+
+    async def create_credit_note(
+        self,
+        company_id: int,
+        original_move_id: int,
+        credit_date: date,
+        reason: str,
+    ) -> InvoiceEffect:
+        return await self._accounting.create_credit_note(
+            company_id, original_move_id, credit_date, reason
+        )
+
+    async def get_payment_routes(
+        self, company_id: int, invoice_id: int
+    ) -> tuple[PaymentRoute, ...]:
+        return await self._accounting.get_payment_routes(company_id, invoice_id)
+
+    async def register_payment(self, registration: PaymentRegistration) -> InvoiceEffect:
+        return await self._accounting.register_payment(registration)
 
     async def close(self) -> None:
         await self._transport.close()

@@ -98,6 +98,13 @@ def test_streamable_http_lists_the_shared_registry(
         "get_cashbook",
         "flag_unmatched_statement_lines",
         "reconcile_bank_statement_lines",
+        "list_open_invoices",
+        "list_open_bills",
+        "create_customer_invoice",
+        "create_supplier_bill",
+        "create_credit_note",
+        "validate_invoice",
+        "register_payment",
     ]
     assert called.status_code == 200
     assert called.json()["result"]["structuredContent"]["status"] == "ok"
@@ -129,4 +136,11 @@ async def test_stdio_profile_lists_the_shared_registry() -> None:
         "get_cashbook",
         "flag_unmatched_statement_lines",
         "reconcile_bank_statement_lines",
+        "list_open_invoices",
+        "list_open_bills",
+        "create_customer_invoice",
+        "create_supplier_bill",
+        "create_credit_note",
+        "validate_invoice",
+        "register_payment",
     ]
