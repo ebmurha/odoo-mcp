@@ -290,6 +290,31 @@ async def test_malformed_prepared_fields_fail_inside_preview_boundary(
     ]
 
 
+async def test_preview_preparation_cancellation_is_audited_then_propagated(
+    tmp_path, connection: OdooConnectionSettings
+) -> None:
+    storage = Storage.open(tmp_path / "state.sqlite3")
+
+    async def prepare() -> PreparedWrite:
+        raise asyncio.CancelledError
+
+    with pytest.raises(asyncio.CancelledError):
+        await _run(
+            WriteSafetyCoordinator(storage),
+            _binding(connection),
+            WriteCommand(company_id=1, request_payload={"amount": "10.00"}),
+            prepare=prepare,
+        )
+
+    records = storage.audit.list_for_tenant("tenant-a")
+    assert [record.final_status for record in records] == ["failed"]
+    assert records[0].dry_run is True
+    assert records[0].error_code == ErrorCode.UNKNOWN_ERROR.value
+    with storage.database.transaction() as database:
+        assert database.execute("SELECT COUNT(*) FROM idempotency_keys").fetchone()[0] == 0
+    storage.audit.verify_chain("tenant-a")
+
+
 @pytest.mark.parametrize(
     ("binding_permissions", "company_id", "account", "expected_code"),
     [
@@ -465,6 +490,88 @@ async def test_malformed_execution_preparation_finalizes_failed_and_replays(
     assert row is not None
     assert row[0] == "failed"
     assert '"outcome":"not_attempted"' in row[1]
+    storage.audit.verify_chain("tenant-a")
+
+
+@pytest.mark.parametrize("cancel_phase", ["prepare", "state"])
+async def test_pre_mutation_cancellation_finalizes_failed_then_replays(
+    tmp_path,
+    connection: OdooConnectionSettings,
+    cancel_phase: str,
+) -> None:
+    storage = Storage.open(tmp_path / "state.sqlite3")
+    coordinator = WriteSafetyCoordinator(storage)
+    preparations = 0
+    state_checks = 0
+    executions = 0
+
+    async def prepare() -> PreparedWrite:
+        nonlocal preparations
+        preparations += 1
+        if cancel_phase == "prepare":
+            raise asyncio.CancelledError
+        return await _prepared()
+
+    async def state() -> None:
+        nonlocal state_checks
+        state_checks += 1
+        if cancel_phase == "state":
+            raise asyncio.CancelledError
+
+    async def execute() -> AppliedWrite:
+        nonlocal executions
+        executions += 1
+        return await _applied()
+
+    command = WriteCommand(
+        company_id=1,
+        dry_run=False,
+        idempotency_key=f"cancel-{cancel_phase}",
+        request_payload={"amount": "10.00"},
+    )
+    with pytest.raises(asyncio.CancelledError):
+        await _run(
+            coordinator,
+            _binding(connection),
+            command,
+            prepare=prepare,
+            validate_current_state=state,
+            execute=execute,
+        )
+
+    with storage.database.transaction() as database:
+        row = database.execute(
+            "SELECT state, response_json FROM idempotency_keys WHERE idempotency_key = ?",
+            (f"cancel-{cancel_phase}",),
+        ).fetchone()
+    assert row is not None
+    assert row[0] == "failed"
+    assert '"outcome":"not_attempted"' in row[1]
+    assert [record.final_status for record in storage.audit.list_for_tenant("tenant-a")] == [
+        "attempted",
+        "failed",
+    ]
+
+    replay = await _run(
+        coordinator,
+        _binding(connection),
+        command,
+        prepare=prepare,
+        validate_current_state=state,
+        execute=execute,
+    )
+
+    assert replay.status == "failed"
+    assert replay.outcome == "not_attempted"
+    assert replay.error_code is ErrorCode.UNKNOWN_ERROR
+    assert preparations == 1
+    assert state_checks == (1 if cancel_phase == "state" else 0)
+    assert executions == 0
+    assert [record.final_status for record in storage.audit.list_for_tenant("tenant-a")] == [
+        "attempted",
+        "failed",
+        "replayed",
+    ]
     storage.audit.verify_chain("tenant-a")
 
 

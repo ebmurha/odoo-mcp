@@ -168,6 +168,17 @@ class WriteSafetyCoordinator:
                     command.company_id,
                 )
                 response.model_dump(mode="json")
+            except asyncio.CancelledError:
+                self._record_pre_write_failure(
+                    binding,
+                    definition,
+                    module,
+                    snapshot,
+                    command,
+                    selected_request_id,
+                    self._cancelled_pre_write_error(),
+                )
+                raise
             except OdooMcpError as exc:
                 return self._record_pre_write_failure(
                     binding,
@@ -335,6 +346,18 @@ class WriteSafetyCoordinator:
                 command.company_id,
             )
             prepared_response.model_dump(mode="json")
+        except asyncio.CancelledError:
+            self._finish_pre_write_failure(
+                binding,
+                definition,
+                module,
+                snapshot,
+                command,
+                selected_request_id,
+                idempotency_key,
+                self._cancelled_pre_write_error(),
+            )
+            raise
         except OdooMcpError as exc:
             return self._finish_pre_write_failure(
                 binding,
@@ -380,6 +403,19 @@ class WriteSafetyCoordinator:
 
         try:
             await validate_current_state()
+        except asyncio.CancelledError:
+            self._finish_pre_write_failure(
+                binding,
+                definition,
+                module,
+                snapshot,
+                command,
+                selected_request_id,
+                idempotency_key,
+                self._cancelled_pre_write_error(),
+                prepared,
+            )
+            raise
         except OdooMcpError as exc:
             return self._finish_pre_write_failure(
                 binding,
@@ -785,6 +821,14 @@ class WriteSafetyCoordinator:
             ErrorCode.UNKNOWN_ERROR,
             "The write request failed before Odoo was changed.",
             "Correct the request or contact the service operator before retrying.",
+        )
+
+    @staticmethod
+    def _cancelled_pre_write_error() -> OdooMcpError:
+        return OdooMcpError(
+            ErrorCode.UNKNOWN_ERROR,
+            "The write request was cancelled before Odoo was changed.",
+            "Submit a new request with a new idempotency key if execution is still required.",
         )
 
     @staticmethod
