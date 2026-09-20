@@ -596,6 +596,15 @@ async def prepare_payment(
         if request.journal_id in {None, route.journal.id}
         and request.payment_method_line_id in {None, route.payment_method_line.id}
     ]
+    default_route = next(
+        (
+            route
+            for route in routes
+            if route.journal.id == preview.default_journal_id
+            and route.payment_method_line.id == preview.default_payment_method_line_id
+        ),
+        None,
+    )
     choices = [route.model_dump(mode="json") for route in routes]
     if len(selected) != 1:
         return (
@@ -609,8 +618,18 @@ async def prepare_payment(
                     "preparation_state": "odoo_transient_created",
                     "amount": str(preview.amount),
                     "currency": preview.currency.model_dump(),
+                    "default_journal": (
+                        default_route.journal.model_dump(mode="json") if default_route else None
+                    ),
+                    "default_payment_method_line": (
+                        default_route.payment_method_line.model_dump(mode="json")
+                        if default_route
+                        else None
+                    ),
                     "expected_invoice_state": "unknown_until_execution",
-                    "external_effect_status": "unknown",
+                    "external_effect_status": (
+                        default_route.external_effect_status if default_route else "unknown"
+                    ),
                 },
                 needs_input=True,
             ),

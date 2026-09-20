@@ -105,6 +105,8 @@ class InvoiceAdapter:
     def __init__(self) -> None:
         self.mutations = 0
         self.routes: tuple[PaymentRoute, ...] = ()
+        self.default_journal_id: int | None = None
+        self.default_payment_method_line_id: int | None = None
 
     async def get_account_moves(
         self, company_id: int, filters: ReadFilters, page: PageRequest
@@ -180,6 +182,8 @@ class InvoiceAdapter:
             partner_type="customer",
             can_edit_wizard=True,
             routes=self.routes,
+            default_journal_id=self.default_journal_id,
+            default_payment_method_line_id=self.default_payment_method_line_id,
         )
 
 
@@ -247,6 +251,8 @@ async def test_payment_requires_exact_route_when_odoo_has_multiple_choices() -> 
             external_effect_status="unknown",
         ),
     )
+    adapter.default_journal_id = 1
+    adapter.default_payment_method_line_id = 11
     request = RegisterPaymentInput(
         invoice_id=101,
         company_id=1,
@@ -259,6 +265,13 @@ async def test_payment_requires_exact_route_when_odoo_has_multiple_choices() -> 
     assert preview.needs_input is True
     assert preview.material_effects["reason_code"] == "PAYMENT_ROUTE_SELECTION_REQUIRED"
     assert len(preview.material_effects["valid_choices"]) == 2
+    assert preview.material_effects["default_journal"] == {"id": 1, "name": "Bank A"}
+    assert preview.material_effects["default_payment_method_line"] == {
+        "id": 11,
+        "name": "Manual",
+    }
+    assert preview.material_effects["external_effect_status"] == "not_initiated_by_odoo"
+    assert adapter.mutations == 0
 
 
 async def test_invoice_preview_rejects_unavailable_currency_reference() -> None:
