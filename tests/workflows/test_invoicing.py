@@ -3,10 +3,14 @@ from __future__ import annotations
 from datetime import date
 from decimal import Decimal
 
+import pytest
+from pydantic import ValidationError
+
 from odoo_mcp.adapters.accounting import (
     Account,
     AccountMove,
     AccountMoveLine,
+    Currency,
     InvoiceEffect,
     PageRequest,
     PartialReconciliation,
@@ -16,6 +20,7 @@ from odoo_mcp.adapters.accounting import (
     RecordPage,
     RelatedRecord,
 )
+from odoo_mcp.mcp.error_codes import ErrorCode, OdooMcpError
 from odoo_mcp.mcp.schemas import (
     CreateInvoiceInput,
     InvoiceLineInput,
@@ -147,6 +152,15 @@ class InvoiceAdapter:
             ]
         )
 
+    async def get_currencies(
+        self,
+        company_id: int,
+        currency_ids: tuple[int, ...],
+        *,
+        page: PageRequest,
+    ) -> RecordPage[Currency]:
+        return RecordPage(items=[])
+
     async def get_invoice_effect(self, company_id: int, invoice_id: int) -> InvoiceEffect:
         return _effect()
 
@@ -230,3 +244,35 @@ async def test_payment_requires_exact_route_when_odoo_has_multiple_choices() -> 
     assert preview.needs_input is True
     assert preview.material_effects["reason_code"] == "PAYMENT_ROUTE_SELECTION_REQUIRED"
     assert len(preview.material_effects["valid_choices"]) == 2
+
+
+async def test_invoice_preview_rejects_unavailable_currency_reference() -> None:
+    request = CreateInvoiceInput(
+        company_id=1,
+        partner_id=20,
+        invoice_date=date(2026, 3, 1),
+        currency_id=999,
+        lines=(
+            InvoiceLineInput(
+                description="Consulting",
+                quantity=Decimal("1"),
+                unit_price=Decimal("10"),
+                account_id=70,
+            ),
+        ),
+    )
+
+    with pytest.raises(OdooMcpError) as raised:
+        await prepare_invoice_draft(InvoiceAdapter(), request, supplier=False)
+
+    assert raised.value.code is ErrorCode.INVALID_INPUT
+
+
+def test_invoice_lines_reject_nonpositive_quantity_and_negative_amount() -> None:
+    with pytest.raises(ValidationError):
+        InvoiceLineInput(
+            description="Invalid",
+            quantity=Decimal("0"),
+            unit_price=Decimal("-1"),
+            account_id=70,
+        )

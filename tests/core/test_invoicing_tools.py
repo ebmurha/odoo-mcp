@@ -227,6 +227,31 @@ async def test_invoice_capability_denial_prevents_reference_reads_and_mutation(
     assert state.create_count == 0
 
 
+async def test_invoice_company_denial_happens_before_adapter_creation(
+    connection: OdooConnectionSettings, tmp_path
+) -> None:
+    called = False
+
+    async def factory(_connection: object) -> OdooAdapter:
+        nonlocal called
+        called = True
+        return InvoiceAdapter(InvoiceState())
+
+    arguments = _arguments(dry_run=True)
+    arguments["company_id"] = 999
+    server = create_mcp_server(
+        Resolver(_binding(connection)),
+        adapter_factory=factory,
+        storage=Storage.open(tmp_path / "company-denied.sqlite3"),
+    )
+    async with Client(server) as client:
+        result = await client.call_tool("create_customer_invoice", arguments)
+
+    assert result.structured_content is not None
+    assert result.structured_content["error_code"] == "COMPANY_NOT_FOUND"
+    assert called is False
+
+
 async def test_invoice_execution_distinguishes_known_denial_from_unknown_outcome(
     connection: OdooConnectionSettings, tmp_path
 ) -> None:
