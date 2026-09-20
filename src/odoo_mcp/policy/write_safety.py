@@ -161,7 +161,13 @@ class WriteSafetyCoordinator:
 
         if command.dry_run:
             try:
-                prepared = await prepare()
+                prepared = self._normalize_prepared(await prepare())
+                response = self._prepared_response(
+                    prepared,
+                    selected_request_id,
+                    command.company_id,
+                )
+                response.model_dump(mode="json")
             except OdooMcpError as exc:
                 return self._record_pre_write_failure(
                     binding,
@@ -182,15 +188,6 @@ class WriteSafetyCoordinator:
                     selected_request_id,
                     self._unexpected_pre_write_error(),
                 )
-            response = WriteSafetyResponse(
-                status="needs_input" if prepared.needs_input else "preview",
-                outcome="not_attempted",
-                request_id=selected_request_id,
-                company_id=command.company_id,
-                proposed_action=dict(prepared.proposed_action),
-                material_effects=dict(prepared.material_effects),
-                artifact_markdown=prepared.artifact_markdown,
-            )
             return self._append_or_fail(
                 self._event(
                     binding,
@@ -331,7 +328,13 @@ class WriteSafetyCoordinator:
             )
 
         try:
-            prepared = await prepare()
+            prepared = self._normalize_prepared(await prepare())
+            prepared_response = self._prepared_response(
+                prepared,
+                selected_request_id,
+                command.company_id,
+            )
+            prepared_response.model_dump(mode="json")
         except OdooMcpError as exc:
             return self._finish_pre_write_failure(
                 binding,
@@ -356,15 +359,7 @@ class WriteSafetyCoordinator:
             )
 
         if prepared.needs_input:
-            response = WriteSafetyResponse(
-                status="needs_input",
-                outcome="not_attempted",
-                request_id=selected_request_id,
-                company_id=command.company_id,
-                proposed_action=dict(prepared.proposed_action),
-                material_effects=dict(prepared.material_effects),
-                artifact_markdown=prepared.artifact_markdown,
-            )
+            response = prepared_response
             try:
                 self._finish_after_attempt(
                     binding,
@@ -491,6 +486,43 @@ class WriteSafetyCoordinator:
                 prepared=prepared,
             )
         return response
+
+    @staticmethod
+    def _normalize_prepared(value: object) -> PreparedWrite:
+        if not isinstance(value, PreparedWrite):
+            raise TypeError("Write preparation returned an invalid result")
+        if not isinstance(value.needs_input, bool):
+            raise TypeError("Write preparation returned an invalid needs-input flag")
+        if value.artifact_markdown is not None and not isinstance(value.artifact_markdown, str):
+            raise TypeError("Write preparation returned an invalid artifact")
+        proposed_action = dict(value.proposed_action)
+        material_effects = dict(value.material_effects)
+        if not all(isinstance(key, str) for key in proposed_action):
+            raise TypeError("Write preparation returned invalid proposed-action keys")
+        if not all(isinstance(key, str) for key in material_effects):
+            raise TypeError("Write preparation returned invalid material-effect keys")
+        return PreparedWrite(
+            proposed_action=proposed_action,
+            material_effects=material_effects,
+            artifact_markdown=value.artifact_markdown,
+            needs_input=value.needs_input,
+        )
+
+    @staticmethod
+    def _prepared_response(
+        prepared: PreparedWrite,
+        request_id: str,
+        company_id: int,
+    ) -> WriteSafetyResponse:
+        return WriteSafetyResponse(
+            status="needs_input" if prepared.needs_input else "preview",
+            outcome="not_attempted",
+            request_id=request_id,
+            company_id=company_id,
+            proposed_action=dict(prepared.proposed_action),
+            material_effects=dict(prepared.material_effects),
+            artifact_markdown=prepared.artifact_markdown,
+        )
 
     def _finalize_unknown(
         self,

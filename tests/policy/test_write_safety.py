@@ -205,6 +205,91 @@ async def test_dry_run_defaults_to_preview_and_never_checks_or_executes(
         assert database.execute("SELECT COUNT(*) FROM idempotency_keys").fetchone()[0] == 0
 
 
+async def test_malformed_preview_preparation_is_structured_and_audited(
+    tmp_path, connection: OdooConnectionSettings
+) -> None:
+    storage = Storage.open(tmp_path / "state.sqlite3")
+    state_checked = False
+    executed = False
+
+    async def prepare() -> object:
+        return object()
+
+    async def state() -> None:
+        nonlocal state_checked
+        state_checked = True
+
+    async def execute() -> AppliedWrite:
+        nonlocal executed
+        executed = True
+        return await _applied()
+
+    result = await _run(
+        WriteSafetyCoordinator(storage),
+        _binding(connection),
+        WriteCommand(company_id=1, request_payload={"amount": "10.00"}),
+        prepare=prepare,  # type: ignore[arg-type]
+        validate_current_state=state,
+        execute=execute,
+    )
+
+    assert result.status == "failed"
+    assert result.outcome == "not_attempted"
+    assert result.error_code is ErrorCode.UNKNOWN_ERROR
+    assert state_checked is False
+    assert executed is False
+    records = storage.audit.list_for_tenant("tenant-a")
+    assert [record.final_status for record in records] == ["failed"]
+    storage.audit.verify_chain("tenant-a")
+
+
+@pytest.mark.parametrize(
+    "malformed",
+    [
+        PreparedWrite(
+            proposed_action=object(),  # type: ignore[arg-type]
+            material_effects={},
+        ),
+        PreparedWrite(
+            proposed_action={},
+            material_effects={"invalid": object()},
+        ),
+        PreparedWrite(
+            proposed_action={},
+            material_effects={},
+            artifact_markdown=42,  # type: ignore[arg-type]
+        ),
+        PreparedWrite(
+            proposed_action={},
+            material_effects={},
+            needs_input="yes",  # type: ignore[arg-type]
+        ),
+    ],
+)
+async def test_malformed_prepared_fields_fail_inside_preview_boundary(
+    tmp_path,
+    connection: OdooConnectionSettings,
+    malformed: PreparedWrite,
+) -> None:
+    storage = Storage.open(tmp_path / "state.sqlite3")
+
+    async def prepare() -> PreparedWrite:
+        return malformed
+
+    result = await _run(
+        WriteSafetyCoordinator(storage),
+        _binding(connection),
+        WriteCommand(company_id=1, request_payload={"amount": "10.00"}),
+        prepare=prepare,
+    )
+
+    assert result.status == "failed"
+    assert result.error_code is ErrorCode.UNKNOWN_ERROR
+    assert [record.final_status for record in storage.audit.list_for_tenant("tenant-a")] == [
+        "failed"
+    ]
+
+
 @pytest.mark.parametrize(
     ("binding_permissions", "company_id", "account", "expected_code"),
     [
@@ -311,6 +396,76 @@ async def test_execution_requires_explicit_false_and_non_empty_key(
     assert called is False
     assert result.error_code is ErrorCode.EXECUTION_NOT_EXPLICIT
     assert storage.audit.list_for_tenant("tenant-a")[-1].final_status == "rejected"
+
+
+async def test_malformed_execution_preparation_finalizes_failed_and_replays(
+    tmp_path, connection: OdooConnectionSettings
+) -> None:
+    storage = Storage.open(tmp_path / "state.sqlite3")
+    coordinator = WriteSafetyCoordinator(storage)
+    preparations = 0
+    state_checked = False
+    executed = False
+
+    async def prepare() -> object:
+        nonlocal preparations
+        preparations += 1
+        return object()
+
+    async def state() -> None:
+        nonlocal state_checked
+        state_checked = True
+
+    async def execute() -> AppliedWrite:
+        nonlocal executed
+        executed = True
+        return await _applied()
+
+    command = WriteCommand(
+        company_id=1,
+        dry_run=False,
+        idempotency_key="malformed-prepare",
+        request_payload={"amount": "10.00"},
+    )
+    first = await _run(
+        coordinator,
+        _binding(connection),
+        command,
+        prepare=prepare,  # type: ignore[arg-type]
+        validate_current_state=state,
+        execute=execute,
+    )
+    replay = await _run(
+        coordinator,
+        _binding(connection),
+        command,
+        prepare=prepare,  # type: ignore[arg-type]
+        validate_current_state=state,
+        execute=execute,
+    )
+
+    assert first.status == "failed"
+    assert first.outcome == "not_attempted"
+    assert first.error_code is ErrorCode.UNKNOWN_ERROR
+    assert replay == first
+    assert preparations == 1
+    assert state_checked is False
+    assert executed is False
+    records = storage.audit.list_for_tenant("tenant-a")
+    assert [record.final_status for record in records] == [
+        "attempted",
+        "failed",
+        "replayed",
+    ]
+    with storage.database.transaction() as database:
+        row = database.execute(
+            "SELECT state, response_json FROM idempotency_keys WHERE idempotency_key = ?",
+            ("malformed-prepare",),
+        ).fetchone()
+    assert row is not None
+    assert row[0] == "failed"
+    assert '"outcome":"not_attempted"' in row[1]
+    storage.audit.verify_chain("tenant-a")
 
 
 async def test_success_reserves_and_audits_before_fresh_state_and_write(
