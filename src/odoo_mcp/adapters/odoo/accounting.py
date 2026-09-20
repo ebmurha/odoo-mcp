@@ -19,12 +19,16 @@ from odoo_mcp.adapters.accounting import (
     BankStatementLine,
     Currency,
     DatePeriod,
+    FilterClause,
     InvoiceDraft,
     InvoiceEffect,
     InvoiceLineEffect,
     InvoiceTax,
     InvoiceValidationLine,
     Journal,
+    JournalEntry,
+    JournalEntryDraft,
+    JournalEntryLine,
     PageRequest,
     PartialReconciliation,
     Partner,
@@ -1094,6 +1098,119 @@ class AccountingReader:
         move_id = _created_id(result)
         effect = await self.get_invoice_effect(draft.company_id, move_id)
         if effect.state != "draft" or effect.move_type != draft.move_type:
+            raise _invalid_response()
+        return effect
+
+    async def get_journal_entry(self, company_id: int, move_id: int) -> JournalEntry:
+        self._require_company(company_id)
+        if not isinstance(move_id, int) or isinstance(move_id, bool) or move_id <= 0:
+            raise _invalid_input("The journal entry ID is invalid.", "Use a positive entry ID.")
+        moves = await self.get_account_moves(
+            company_id,
+            ReadFilters(clauses=(FilterClause(field="id", operator="=", value=move_id),)),
+            PageRequest(limit=2),
+        )
+        if len(moves.items) != 1:
+            raise OdooMcpError(
+                ErrorCode.INVALID_INPUT,
+                "The requested journal entry is unavailable.",
+                "Use a journal entry ID from the authorized company.",
+            )
+        move = moves.items[0]
+        lines: list[JournalEntryLine] = []
+        cursor: str | None = None
+        while True:
+            page = await self.get_account_move_lines(
+                company_id,
+                ReadFilters(clauses=(FilterClause(field="move_id", operator="=", value=move_id),)),
+                PageRequest(limit=500, cursor=cursor),
+            )
+            lines.extend(
+                JournalEntryLine(
+                    id=line.id,
+                    account=line.account,
+                    partner=line.partner,
+                    description=line.label,
+                    debit=line.debit,
+                    credit=line.credit,
+                    analytic_distribution=line.analytic_distribution,
+                )
+                for line in page.items
+            )
+            if len(lines) > 10_000:
+                raise _invalid_response()
+            if page.next_cursor is None:
+                break
+            cursor = page.next_cursor
+        return JournalEntry(
+            id=move.id,
+            name=move.name,
+            move_type=move.move_type,
+            state=move.state,
+            date=move.date,
+            journal=move.journal,
+            company_id=move.company_id,
+            currency=move.currency,
+            reference=move.reference,
+            lines=tuple(lines),
+        )
+
+    async def create_journal_entry_draft(self, draft: JournalEntryDraft) -> JournalEntry:
+        self._require_company(draft.company_id)
+        ensure_accounting_action_allowed("account.move", "create_draft")
+        values: dict[str, object] = {
+            "company_id": draft.company_id,
+            "move_type": "entry",
+            "journal_id": draft.journal_id,
+            "date": draft.entry_date.isoformat(),
+            "line_ids": [
+                [
+                    0,
+                    0,
+                    {
+                        "account_id": line.account_id,
+                        "debit": float(line.debit),
+                        "credit": float(line.credit),
+                        **({"partner_id": line.partner_id} if line.partner_id else {}),
+                        **({"name": line.description} if line.description else {}),
+                        **(
+                            {"analytic_distribution": {str(line.analytic_account_id): 100}}
+                            if line.analytic_account_id
+                            else {}
+                        ),
+                    },
+                ]
+                for line in draft.lines
+            ],
+        }
+        if draft.reference is not None:
+            values["ref"] = draft.reference
+        result = await self._transport.execute_method(
+            "account.move",
+            "create",
+            named={"vals_list": values},
+            company_ids=(draft.company_id,),
+        )
+        effect = await self.get_journal_entry(draft.company_id, _created_id(result))
+        if effect.state != "draft" or effect.move_type != "entry":
+            raise _invalid_response()
+        return effect
+
+    async def post_journal_entry(self, company_id: int, move_id: int) -> JournalEntry:
+        self._require_company(company_id)
+        ensure_accounting_action_allowed("account.move", "post_existing_draft")
+        current = await self.get_journal_entry(company_id, move_id)
+        if current.state != "draft" or current.move_type != "entry":
+            raise OdooMcpError(
+                ErrorCode.JOURNAL_ENTRY_NOT_DRAFT,
+                "The journal entry is not an eligible draft manual entry.",
+                "Use an existing draft manual journal entry from the authorized company.",
+            )
+        await self._transport.execute_method(
+            "account.move", "action_post", ids=(move_id,), company_ids=(company_id,)
+        )
+        effect = await self.get_journal_entry(company_id, move_id)
+        if effect.state != "posted" or effect.move_type != "entry":
             raise _invalid_response()
         return effect
 

@@ -7,7 +7,7 @@ import logging
 from collections.abc import Awaitable, Callable, Mapping
 from datetime import date
 from decimal import Decimal
-from typing import Annotated, TypeAlias
+from typing import Annotated, Literal, TypeAlias
 
 from mcp.server import MCPServer
 from pydantic import Field, ValidationError
@@ -15,6 +15,8 @@ from pydantic import Field, ValidationError
 from odoo_mcp.adapters.accounting import (
     InvoiceDraft,
     InvoiceEffect,
+    JournalEntry,
+    JournalEntryDraft,
     PaymentRegistration,
     RelatedRecord,
 )
@@ -33,10 +35,15 @@ from odoo_mcp.mcp.schemas import (
     CashbookInput,
     CashbookResponse,
     CreateInvoiceInput,
+    CreateJournalEntryInput,
     CreditNoteInput,
     InvoiceLineInput,
+    JournalEntriesInput,
+    JournalEntriesResponse,
+    JournalEntryLineInput,
     OpenDocumentsInput,
     OpenDocumentsResponse,
+    PostJournalEntryInput,
     ReconciliationInput,
     ReconciliationProposal,
     RegisterPaymentInput,
@@ -64,6 +71,13 @@ from odoo_mcp.workflows.accounting.invoicing import (
     prepare_payment,
     prepare_validation,
 )
+from odoo_mcp.workflows.accounting.journals import (
+    execute_journal_entry_draft,
+    execute_journal_entry_post,
+    list_journal_entries,
+    prepare_journal_entry_draft,
+    prepare_journal_entry_post,
+)
 from odoo_mcp.workflows.accounting.reconcile_bank import (
     build_reconciliation_proposal,
     flag_unmatched_statement_lines,
@@ -78,6 +92,7 @@ ReportResponse: TypeAlias = (
     | CashbookResponse
     | UnmatchedStatementLinesResponse
     | OpenDocumentsResponse
+    | JournalEntriesResponse
 )
 ReportOperation = Callable[[OdooAdapter, Company, str], Awaitable[ReportResponse]]
 LOGGER = logging.getLogger(__name__)
@@ -1499,6 +1514,192 @@ def create_mcp_server(
         description=payment_definition.description,
         annotations=payment_definition.annotations,
         meta=payment_definition.protocol_meta(),
+        structured_output=True,
+    )
+
+    journal_list_definition = get_tool_definition("list_journal_entries")
+
+    async def list_journal_entries_tool(
+        period_start: date,
+        period_end: date,
+        company_id: PositiveCompanyId,
+        journal_ids: tuple[int, ...] = (),
+        states: tuple[Literal["draft", "posted"], ...] = (),
+        limit: ReportLimit = 100,
+        cursor: ReportCursor = None,
+    ) -> AccountingToolResponse:
+        try:
+            request = JournalEntriesInput(
+                period_start=period_start,
+                period_end=period_end,
+                company_id=company_id,
+                journal_ids=journal_ids,
+                states=states,
+                limit=limit,
+                cursor=cursor,
+            )
+        except ValidationError:
+            return await invalid_accounting_report(
+                journal_list_definition,
+                company_id,
+                {
+                    "period_start": period_start.isoformat(),
+                    "period_end": period_end.isoformat(),
+                    "journal_ids": list(journal_ids),
+                    "states": list(states),
+                    "limit": limit,
+                    "cursor": cursor,
+                },
+            )
+
+        async def run(adapter: OdooAdapter, company: Company, request_id: str) -> ReportResponse:
+            return await list_journal_entries(
+                adapter, request, company_name=company.name, request_id=request_id
+            )
+
+        return await accounting_report(journal_list_definition, request, run)
+
+    server.add_tool(
+        list_journal_entries_tool,
+        name=journal_list_definition.name,
+        title=journal_list_definition.title,
+        description=journal_list_definition.description,
+        annotations=journal_list_definition.annotations,
+        meta=journal_list_definition.protocol_meta(),
+        structured_output=True,
+    )
+
+    create_journal_definition = get_tool_definition("create_journal_entry")
+
+    async def create_journal_entry_tool(
+        company_id: PositiveCompanyId,
+        journal_id: PositiveIdentifier,
+        entry_date: date,
+        lines: tuple[JournalEntryLineInput, ...],
+        reference: str | None = None,
+        dry_run: bool = True,
+        idempotency_key: IdempotencyKey = None,
+    ) -> WriteSafetyResponse:
+        raw_payload: dict[str, object] = {
+            "journal_id": journal_id,
+            "entry_date": entry_date.isoformat(),
+            "reference": reference,
+            "lines": [line.model_dump(mode="json") for line in lines],
+            "idempotency_key": idempotency_key,
+        }
+        try:
+            request = CreateJournalEntryInput(
+                company_id=company_id,
+                journal_id=journal_id,
+                entry_date=entry_date,
+                reference=reference,
+                lines=lines,
+                dry_run=dry_run,
+                idempotency_key=idempotency_key,
+            )
+        except ValidationError:
+            return await invalid_accounting_write(
+                create_journal_definition, company_id, dry_run, raw_payload
+            )
+
+        async def prepare_op(adapter: OdooAdapter) -> tuple[object, PreparedWrite]:
+            return await prepare_journal_entry_draft(adapter, request)
+
+        async def validate_op(adapter: OdooAdapter, state: object) -> None:
+            if not isinstance(state, JournalEntryDraft):
+                raise RuntimeError("Invalid prepared journal-entry state")
+            refreshed, _ = await prepare_journal_entry_draft(adapter, request)
+            if refreshed != state:
+                raise OdooMcpError(
+                    ErrorCode.ODOO_STATE_CONFLICT,
+                    "A journal entry reference changed before draft creation.",
+                    "Refresh and retry with a new idempotency key.",
+                )
+
+        async def execute_op(adapter: OdooAdapter, state: object) -> AppliedWrite:
+            if not isinstance(state, JournalEntryDraft):
+                raise RuntimeError("Invalid prepared journal-entry state")
+            return await execute_journal_entry_draft(adapter, state)
+
+        return await accounting_write(
+            create_journal_definition,
+            WriteCommand(
+                company_id=request.company_id,
+                request_payload=request.model_dump(
+                    mode="json", exclude={"company_id", "dry_run", "idempotency_key"}
+                ),
+                dry_run=request.dry_run,
+                idempotency_key=request.idempotency_key,
+            ),
+            prepare_op,
+            validate_op,
+            execute_op,
+        )
+
+    server.add_tool(
+        create_journal_entry_tool,
+        name=create_journal_definition.name,
+        title=create_journal_definition.title,
+        description=create_journal_definition.description,
+        annotations=create_journal_definition.annotations,
+        meta=create_journal_definition.protocol_meta(),
+        structured_output=True,
+    )
+
+    post_journal_definition = get_tool_definition("post_journal_entry")
+
+    async def post_journal_entry_tool(
+        company_id: PositiveCompanyId,
+        move_id: PositiveIdentifier,
+        dry_run: bool = True,
+        idempotency_key: IdempotencyKey = None,
+    ) -> WriteSafetyResponse:
+        request = PostJournalEntryInput(
+            company_id=company_id,
+            move_id=move_id,
+            dry_run=dry_run,
+            idempotency_key=idempotency_key,
+        )
+
+        async def prepare_op(adapter: OdooAdapter) -> tuple[object, PreparedWrite]:
+            return await prepare_journal_entry_post(adapter, request)
+
+        async def validate_op(adapter: OdooAdapter, state: object) -> None:
+            if not isinstance(state, JournalEntry):
+                raise RuntimeError("Invalid prepared journal-post state")
+            refreshed, prepared = await prepare_journal_entry_post(adapter, request)
+            if refreshed != state or prepared.needs_input:
+                raise OdooMcpError(
+                    ErrorCode.ODOO_STATE_CONFLICT,
+                    "The draft journal entry changed before posting.",
+                    "Refresh and retry with a new idempotency key.",
+                )
+
+        async def execute_op(adapter: OdooAdapter, state: object) -> AppliedWrite:
+            if not isinstance(state, JournalEntry):
+                raise RuntimeError("Invalid prepared journal-post state")
+            return await execute_journal_entry_post(adapter, request.company_id, state.id)
+
+        return await accounting_write(
+            post_journal_definition,
+            WriteCommand(
+                company_id=request.company_id,
+                request_payload={"move_id": request.move_id},
+                dry_run=request.dry_run,
+                idempotency_key=request.idempotency_key,
+            ),
+            prepare_op,
+            validate_op,
+            execute_op,
+        )
+
+    server.add_tool(
+        post_journal_entry_tool,
+        name=post_journal_definition.name,
+        title=post_journal_definition.title,
+        description=post_journal_definition.description,
+        annotations=post_journal_definition.annotations,
+        meta=post_journal_definition.protocol_meta(),
         structured_output=True,
     )
     return server

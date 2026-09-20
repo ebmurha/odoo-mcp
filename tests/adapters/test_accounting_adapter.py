@@ -19,6 +19,8 @@ from odoo_mcp.adapters.accounting import (
     InvoiceDraft,
     InvoiceDraftLine,
     Journal,
+    JournalEntryDraft,
+    JournalEntryDraftLine,
     PageRequest,
     PartialReconciliation,
     Partner,
@@ -511,6 +513,84 @@ async def test_account_moves_are_typed_scoped_and_cursor_paginated(
     assert transport.calls[0]["limit"] == 2
     assert ["id", ">", 1] in transport.calls[1]["domain"]
     assert "password" not in first.items[0].model_dump()
+
+
+async def test_manual_journal_draft_creation_is_separate_from_posting(
+    connection: OdooConnectionSettings,
+) -> None:
+    move = _move(901)
+    move["state"] = "draft"
+    transport = FakeTransport(
+        {
+            "account.move": [move],
+            "account.move.line": [
+                {
+                    "id": 1001,
+                    "move_id": [901, "MVE/901"],
+                    "account_id": [10, "Debit"],
+                    "journal_id": [30, "Synthetic Journal"],
+                    "partner_id": [20, "Synthetic Partner"],
+                    "company_id": [1, "Synthetic Company"],
+                    "currency_id": [40, "Synthetic Currency"],
+                    "date": "2026-09-01",
+                    "date_maturity": False,
+                    "name": "Debit line",
+                    "debit": "100",
+                    "credit": "0",
+                    "balance": "100",
+                    "amount_currency": "100",
+                    "amount_residual": "0",
+                    "amount_residual_currency": "0",
+                    "reconciled": False,
+                    "analytic_distribution": {"77": 100},
+                }
+            ],
+        }
+    )
+    client = await _validated_client(connection, transport)
+
+    effect = await client.create_journal_entry_draft(
+        JournalEntryDraft(
+            company_id=1,
+            journal_id=30,
+            entry_date=date(2026, 9, 1),
+            reference="Synthetic",
+            lines=(
+                JournalEntryDraftLine(
+                    account_id=10,
+                    partner_id=20,
+                    description="Debit line",
+                    debit=Decimal("100"),
+                    credit=Decimal("0"),
+                    analytic_account_id=77,
+                ),
+                JournalEntryDraftLine(
+                    account_id=11,
+                    debit=Decimal("0"),
+                    credit=Decimal("100"),
+                ),
+            ),
+        )
+    )
+
+    assert effect.state == "draft"
+    assert [call["method"] for call in transport.executions] == ["create"]
+    values = transport.executions[0]["named"]["vals_list"]
+    assert values["move_type"] == "entry"
+    assert values["line_ids"][0][2]["analytic_distribution"] == {"77": 100}
+
+
+async def test_post_adapter_rejects_non_draft_before_action(
+    connection: OdooConnectionSettings,
+) -> None:
+    transport = FakeTransport({"account.move": [_move(901)], "account.move.line": []})
+    client = await _validated_client(connection, transport)
+
+    with pytest.raises(OdooMcpError) as raised:
+        await client.post_journal_entry(1, 901)
+
+    assert raised.value.code is ErrorCode.JOURNAL_ENTRY_NOT_DRAFT
+    assert transport.executions == []
 
 
 async def test_currencies_return_odoo_rounding_in_authorized_company_context(

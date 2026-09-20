@@ -101,6 +101,9 @@ async def test_all_profiles_expose_identical_registry_and_discovery(
         "create_credit_note",
         "validate_invoice",
         "register_payment",
+        "list_journal_entries",
+        "create_journal_entry",
+        "post_journal_entry",
     ]
     for output in outputs:
         output.pop("request_id")
@@ -118,8 +121,8 @@ async def test_registry_metadata_and_schemas_match_the_contract(
     server = create_mcp_server(Resolver(_binding(DeploymentProfile.LOCAL, connection)))
     tools = await server.list_tools()
 
-    assert len(TOOL_REGISTRY) == 14
-    assert len(tools) == 14
+    assert len(TOOL_REGISTRY) == 17
+    assert len(tools) == 17
     assert [tool.name for tool in tools] == [definition.name for definition in TOOL_REGISTRY]
     for tool, definition in zip(tools, TOOL_REGISTRY, strict=True):
         assert tool.input_schema["type"] == "object"
@@ -152,6 +155,13 @@ async def test_registry_metadata_and_schemas_match_the_contract(
     assert "vendor_reference" in tools[10].input_schema["properties"]
     assert tools[12].annotations.destructive_hint is True
     assert tools[13].annotations.destructive_hint is True
+    assert set(tools[14].input_schema["required"]) == {
+        "period_start",
+        "period_end",
+        "company_id",
+    }
+    assert tools[15].annotations.destructive_hint is False
+    assert tools[16].annotations.destructive_hint is True
 
 
 async def test_permission_denial_happens_before_adapter_creation(
@@ -220,6 +230,7 @@ def test_public_permission_example_matches_registry() -> None:
             "flag_unmatched_statement_lines",
             "list_open_invoices",
             "list_open_bills",
+            "list_journal_entries",
         },
         "accounting_propose": {
             "reconcile_bank_statement_lines",
@@ -228,5 +239,7 @@ def test_public_permission_example_matches_registry() -> None:
             "create_credit_note",
             "validate_invoice",
             "register_payment",
+            "create_journal_entry",
+            "post_journal_entry",
         },
     }

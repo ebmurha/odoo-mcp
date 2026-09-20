@@ -287,6 +287,51 @@ TOOL_REGISTRY: tuple[ToolDefinition, ...] = (
             open_world_hint=True,
         ),
     ),
+    ToolDefinition(
+        name="list_journal_entries",
+        version="1.0.0",
+        title="List journal entries",
+        description="List filtered manual journal entries with bounded compact lines.",
+        risk_level="read",
+        required_permission="accounting_read",
+        required_capability="account",
+        annotations=ToolAnnotations(
+            read_only_hint=True,
+            destructive_hint=False,
+            idempotent_hint=True,
+            open_world_hint=True,
+        ),
+    ),
+    ToolDefinition(
+        name="create_journal_entry",
+        version="1.0.0",
+        title="Create manual journal entry draft",
+        description="Preview or explicitly create one balanced unposted manual journal entry.",
+        risk_level="draft_write",
+        required_permission="accounting_propose",
+        required_capability="account",
+        annotations=ToolAnnotations(
+            read_only_hint=False,
+            destructive_hint=False,
+            idempotent_hint=True,
+            open_world_hint=True,
+        ),
+    ),
+    ToolDefinition(
+        name="post_journal_entry",
+        version="1.0.0",
+        title="Post existing manual journal entry",
+        description="Preview or explicitly post one existing balanced draft manual entry.",
+        risk_level="confirm_write",
+        required_permission="accounting_propose",
+        required_capability="account",
+        annotations=ToolAnnotations(
+            read_only_hint=False,
+            destructive_hint=True,
+            idempotent_hint=True,
+            open_world_hint=True,
+        ),
+    ),
 )
 
 

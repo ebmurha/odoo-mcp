@@ -142,6 +142,10 @@ boundary and never expand the technical user's Odoo permissions.
   records but never executes a payment or alters accounting records. Non-manual
   or unidentified methods report their possible external effect as unknown.
   Execution requires an idempotency key and a freshly revalidated wizard route.
+- `list_journal_entries` returns filtered draft and posted manual entries with
+  bounded line details and opaque continuation cursors. `create_journal_entry`
+  creates only a balanced draft, while the separate `post_journal_entry` tool
+  revalidates and posts one existing draft after explicit execution.
 
 Report results are deterministically ordered and cursor-paginated with a default
 limit of 100 and maximum of 500. Empty data is a successful empty report;

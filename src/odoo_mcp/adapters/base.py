@@ -19,6 +19,8 @@ from odoo_mcp.adapters.accounting import (
     InvoiceDraft,
     InvoiceEffect,
     Journal,
+    JournalEntry,
+    JournalEntryDraft,
     PageRequest,
     PartialReconciliation,
     Partner,
@@ -129,6 +131,12 @@ class OdooAdapter(Protocol):
     async def get_invoice_effect(self, company_id: int, move_id: int) -> InvoiceEffect: ...
 
     async def create_draft_invoice(self, draft: InvoiceDraft) -> InvoiceEffect: ...
+
+    async def get_journal_entry(self, company_id: int, move_id: int) -> JournalEntry: ...
+
+    async def create_journal_entry_draft(self, draft: JournalEntryDraft) -> JournalEntry: ...
+
+    async def post_journal_entry(self, company_id: int, move_id: int) -> JournalEntry: ...
 
     async def post_invoice(self, company_id: int, move_id: int) -> InvoiceEffect: ...
 

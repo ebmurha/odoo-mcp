@@ -275,6 +275,46 @@ class InvoiceDraft(AdapterValue):
     vendor_reference: str | None = None
 
 
+class JournalEntryDraftLine(AdapterValue):
+    account_id: int = Field(gt=0)
+    partner_id: int | None = Field(default=None, gt=0)
+    description: str | None = None
+    debit: Decimal = Field(ge=0)
+    credit: Decimal = Field(ge=0)
+    analytic_account_id: int | None = Field(default=None, gt=0)
+
+
+class JournalEntryDraft(AdapterValue):
+    company_id: int = Field(gt=0)
+    journal_id: int = Field(gt=0)
+    entry_date: Date
+    reference: str | None = None
+    lines: tuple[JournalEntryDraftLine, ...] = Field(min_length=2, max_length=500)
+
+
+class JournalEntryLine(AdapterValue):
+    id: int = Field(gt=0)
+    account: RelatedRecord
+    partner: RelatedRecord | None = None
+    description: str | None = None
+    debit: Decimal
+    credit: Decimal
+    analytic_distribution: dict[str, Decimal] = Field(default_factory=dict)
+
+
+class JournalEntry(AdapterValue):
+    id: int = Field(gt=0)
+    name: str
+    move_type: str
+    state: str
+    date: Date
+    journal: RelatedRecord
+    company_id: int = Field(gt=0)
+    currency: RelatedRecord
+    reference: str | None = None
+    lines: tuple[JournalEntryLine, ...]
+
+
 class PaymentRoute(AdapterValue):
     journal: RelatedRecord
     payment_method_line: RelatedRecord

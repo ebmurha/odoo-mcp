@@ -292,6 +292,71 @@ class RegisterPaymentInput(BaseModel):
         return self
 
 
+class JournalEntriesInput(AccountingReadInput):
+    period_start: date
+    period_end: date
+    journal_ids: tuple[int, ...] = Field(default=(), max_length=500)
+    states: tuple[Literal["draft", "posted"], ...] = Field(default=(), max_length=2)
+
+    @model_validator(mode="after")
+    def validate_filters(self) -> JournalEntriesInput:
+        if self.period_end < self.period_start:
+            raise ValueError("period_end must not precede period_start")
+        if any(identifier <= 0 for identifier in self.journal_ids):
+            raise ValueError("journal_ids must contain positive integers")
+        if len(set(self.journal_ids)) != len(self.journal_ids):
+            raise ValueError("journal_ids must not contain duplicates")
+        if len(set(self.states)) != len(self.states):
+            raise ValueError("states must not contain duplicates")
+        return self
+
+
+class JournalEntryLineInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    account_id: int = Field(gt=0)
+    partner_id: int | None = Field(default=None, gt=0)
+    description: str | None = Field(default=None, max_length=500)
+    debit: Decimal = Field(ge=0)
+    credit: Decimal = Field(ge=0)
+    analytic_account_id: int | None = Field(default=None, gt=0)
+
+    @model_validator(mode="after")
+    def validate_amounts(self) -> JournalEntryLineInput:
+        if (self.debit > 0) == (self.credit > 0):
+            raise ValueError("exactly one of debit or credit must be positive")
+        if self.description is not None and not self.description.strip():
+            raise ValueError("description must not be blank")
+        return self
+
+
+class CreateJournalEntryInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    company_id: int = Field(gt=0)
+    journal_id: int = Field(gt=0)
+    entry_date: date
+    reference: str | None = Field(default=None, max_length=500)
+    lines: tuple[JournalEntryLineInput, ...] = Field(min_length=2, max_length=500)
+    dry_run: bool = True
+    idempotency_key: str | None = Field(default=None, min_length=1, max_length=128)
+
+    @model_validator(mode="after")
+    def validate_reference(self) -> CreateJournalEntryInput:
+        if self.reference is not None and not self.reference.strip():
+            raise ValueError("reference must not be blank")
+        return self
+
+
+class PostJournalEntryInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    company_id: int = Field(gt=0)
+    move_id: int = Field(gt=0)
+    dry_run: bool = True
+    idempotency_key: str | None = Field(default=None, min_length=1, max_length=128)
+
+
 class TrialBalanceItem(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -488,6 +553,61 @@ class OpenDocumentsResponse(BaseModel):
     artifact_markdown: str
 
 
+class JournalEntryLineItem(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    line_id: int
+    account_id: int
+    account_name: str
+    partner_id: int | None
+    partner_name: str | None
+    description: str | None
+    debit: Decimal
+    credit: Decimal
+    analytic_ids: list[int]
+
+
+class JournalEntryItem(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    move_id: int
+    name: str
+    date: date
+    journal_id: int
+    journal_name: str
+    state: Literal["draft", "posted"]
+    reference: str | None
+    currency_id: int
+    currency_name: str
+    total_debit: Decimal
+    total_credit: Decimal
+    lines: list[JournalEntryLineItem]
+    lines_truncated: bool
+    lines_cursor: str | None
+
+
+class JournalEntriesSummary(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    entry_count: int
+    draft_count: int
+    posted_count: int
+
+
+class JournalEntriesResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["ok"] = "ok"
+    request_id: str
+    company_id: int
+    period_start: date
+    period_end: date
+    items: list[JournalEntryItem]
+    next_cursor: str | None
+    summary: JournalEntriesSummary
+    artifact_markdown: str
+
+
 class TrialBalanceResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -561,6 +681,7 @@ class AccountingToolResponse(BaseModel):
             | CashbookItem
             | UnmatchedStatementLineItem
             | OpenDocumentItem
+            | JournalEntryItem
         ]
         | None
     ) = None
@@ -571,6 +692,7 @@ class AccountingToolResponse(BaseModel):
         | CashbookSummary
         | UnmatchedStatementLinesSummary
         | OpenDocumentsSummary
+        | JournalEntriesSummary
         | None
     ) = None
     artifact_markdown: str | None = None
@@ -613,6 +735,7 @@ class AccountingToolResponse(BaseModel):
             | CashbookResponse
             | UnmatchedStatementLinesResponse
             | OpenDocumentsResponse
+            | JournalEntriesResponse
         ),
     ) -> AccountingToolResponse:
         return cls(**response.model_dump())

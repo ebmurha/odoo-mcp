@@ -9,6 +9,7 @@ permissions:
     - flag_unmatched_statement_lines
     - list_open_invoices
     - list_open_bills
+    - list_journal_entries
   accounting_propose:
     - reconcile_bank_statement_lines
     - create_customer_invoice
@@ -16,3 +17,5 @@ permissions:
     - create_credit_note
     - validate_invoice
     - register_payment
+    - create_journal_entry
+    - post_journal_entry

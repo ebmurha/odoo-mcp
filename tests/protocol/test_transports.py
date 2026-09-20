@@ -105,6 +105,9 @@ def test_streamable_http_lists_the_shared_registry(
         "create_credit_note",
         "validate_invoice",
         "register_payment",
+        "list_journal_entries",
+        "create_journal_entry",
+        "post_journal_entry",
     ]
     assert called.status_code == 200
     assert called.json()["result"]["structuredContent"]["status"] == "ok"
@@ -143,4 +146,7 @@ async def test_stdio_profile_lists_the_shared_registry() -> None:
         "create_credit_note",
         "validate_invoice",
         "register_payment",
+        "list_journal_entries",
+        "create_journal_entry",
+        "post_journal_entry",
     ]
