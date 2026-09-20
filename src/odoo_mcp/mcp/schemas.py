@@ -132,6 +132,64 @@ class AgingInput(AccountingReadInput):
         return self
 
 
+class CashbookInput(AccountingReadInput):
+    period_start: date
+    period_end: date
+    journal_ids: tuple[int, ...] = Field(default=(), max_length=500)
+    partner_ids: tuple[int, ...] = Field(default=(), max_length=500)
+
+    @model_validator(mode="after")
+    def validate_filters(self) -> CashbookInput:
+        if self.period_end < self.period_start:
+            raise ValueError("period_end must not precede period_start")
+        for name, identifiers in (
+            ("journal_ids", self.journal_ids),
+            ("partner_ids", self.partner_ids),
+        ):
+            if any(identifier <= 0 for identifier in identifiers):
+                raise ValueError(f"{name} must contain positive integers")
+            if len(set(identifiers)) != len(identifiers):
+                raise ValueError(f"{name} must not contain duplicates")
+        return self
+
+
+class UnmatchedStatementLinesInput(AccountingReadInput):
+    period_start: date
+    period_end: date
+    journal_id: int | None = Field(default=None, gt=0)
+    match_confidence_threshold: Decimal = Field(
+        default=Decimal("0.85"), ge=Decimal("0"), le=Decimal("1")
+    )
+
+    @model_validator(mode="after")
+    def validate_period(self) -> UnmatchedStatementLinesInput:
+        if self.period_end < self.period_start:
+            raise ValueError("period_end must not precede period_start")
+        return self
+
+
+class ReconciliationInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    company_id: int = Field(gt=0)
+    period: str = Field(pattern=r"^\d{4}-(0[1-9]|1[0-2])$")
+    bank_journal_id: int = Field(gt=0)
+    statement_line_ids: tuple[int, ...] = Field(min_length=1, max_length=500)
+    match_confidence_threshold: Decimal = Field(
+        default=Decimal("0.85"), ge=Decimal("0"), le=Decimal("1")
+    )
+    dry_run: bool = True
+    idempotency_key: str | None = Field(default=None, min_length=1, max_length=128)
+
+    @model_validator(mode="after")
+    def validate_statement_lines(self) -> ReconciliationInput:
+        if any(identifier <= 0 for identifier in self.statement_line_ids):
+            raise ValueError("statement_line_ids must contain positive integers")
+        if len(set(self.statement_line_ids)) != len(self.statement_line_ids):
+            raise ValueError("statement_line_ids must not contain duplicates")
+        return self
+
+
 class TrialBalanceItem(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -182,6 +240,105 @@ class AgingSummary(BaseModel):
     buckets: AgingBuckets
 
 
+class CashbookItem(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    line_id: int
+    move_id: int
+    journal_id: int
+    journal_name: str
+    date: date
+    partner_id: int | None
+    partner_name: str | None
+    reference: str | None
+    currency_id: int | None
+    currency_name: str
+    debit: Decimal
+    credit: Decimal
+    amount: Decimal
+
+
+class CashbookSummary(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    transaction_count: int
+    opening_balance: Decimal
+    total_debit: Decimal
+    total_credit: Decimal
+    closing_balance: Decimal
+
+
+UnmatchedReason = Literal[
+    "no_eligible_candidate",
+    "below_confidence_threshold",
+    "ambiguous_best_match",
+    "candidate_conflict",
+]
+
+
+class UnmatchedStatementLineItem(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    statement_line_id: int
+    date: date
+    amount: Decimal
+    currency_id: int | None
+    currency_name: str
+    partner_id: int | None
+    partner_name: str | None
+    reference: str | None
+    best_rejected_score: Decimal | None
+    reason_code: UnmatchedReason
+
+
+class UnmatchedStatementLinesSummary(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    statement_line_count: int
+    unmatched_count: int
+    no_candidate_count: int
+    below_threshold_count: int
+    ambiguous_count: int
+    conflict_count: int
+
+
+class ReconciliationMatch(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    statement_line_id: int
+    move_line_id: int
+    amount: Decimal
+    currency_id: int | None
+    currency_name: str
+    confidence: Decimal
+    score_components: dict[str, Decimal]
+
+
+class ReconciliationSummary(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    statement_line_count: int
+    matched_count: int
+    unmatched_count: int
+    currency_id: int | None
+    currency_name: str
+    matched_amount: Decimal
+    unmatched_amount: Decimal
+
+
+class ReconciliationProposal(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    company_id: int
+    period: str
+    bank_journal_id: int
+    matches: list[ReconciliationMatch]
+    unmatched: list[UnmatchedStatementLineItem]
+    summary: ReconciliationSummary
+    risk_flags: list[str]
+    artifact_markdown: str
+
+
 class TrialBalanceResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -209,6 +366,34 @@ class AgingResponse(BaseModel):
     artifact_markdown: str
 
 
+class CashbookResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["ok"] = "ok"
+    request_id: str
+    company_id: int
+    period_start: date
+    period_end: date
+    items: list[CashbookItem]
+    next_cursor: str | None
+    summary: CashbookSummary
+    artifact_markdown: str
+
+
+class UnmatchedStatementLinesResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["ok"] = "ok"
+    request_id: str
+    company_id: int
+    period_start: date
+    period_end: date
+    items: list[UnmatchedStatementLineItem]
+    next_cursor: str | None
+    summary: UnmatchedStatementLinesSummary
+    artifact_markdown: str
+
+
 class AccountingToolResponse(BaseModel):
     """One compact response shape for accounting report success or failure."""
 
@@ -220,9 +405,13 @@ class AccountingToolResponse(BaseModel):
     period_start: date | None = None
     period_end: date | None = None
     as_of_date: date | None = None
-    items: list[TrialBalanceItem | AgingItem] | None = None
+    items: list[TrialBalanceItem | AgingItem | CashbookItem | UnmatchedStatementLineItem] | None = (
+        None
+    )
     next_cursor: str | None = None
-    summary: TrialBalanceSummary | AgingSummary | None = None
+    summary: (
+        TrialBalanceSummary | AgingSummary | CashbookSummary | UnmatchedStatementLinesSummary | None
+    ) = None
     artifact_markdown: str | None = None
     error_code: ErrorCode | None = None
     error_message: str | None = None
@@ -255,7 +444,15 @@ class AccountingToolResponse(BaseModel):
         return {key: value for key, value in serialized.items() if value is not None}
 
     @classmethod
-    def from_success(cls, response: TrialBalanceResponse | AgingResponse) -> AccountingToolResponse:
+    def from_success(
+        cls,
+        response: (
+            TrialBalanceResponse
+            | AgingResponse
+            | CashbookResponse
+            | UnmatchedStatementLinesResponse
+        ),
+    ) -> AccountingToolResponse:
         return cls(**response.model_dump())
 
     @classmethod

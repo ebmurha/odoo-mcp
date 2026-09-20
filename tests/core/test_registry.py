@@ -91,6 +91,9 @@ async def test_all_profiles_expose_identical_registry_and_discovery(
         "get_trial_balance",
         "get_aged_receivables",
         "get_aged_payables",
+        "get_cashbook",
+        "flag_unmatched_statement_lines",
+        "reconcile_bank_statement_lines",
     ]
     for output in outputs:
         output.pop("request_id")
@@ -108,14 +111,14 @@ async def test_registry_metadata_and_schemas_match_the_contract(
     server = create_mcp_server(Resolver(_binding(DeploymentProfile.LOCAL, connection)))
     tools = await server.list_tools()
 
-    assert len(TOOL_REGISTRY) == 4
-    assert len(tools) == 4
+    assert len(TOOL_REGISTRY) == 7
+    assert len(tools) == 7
     assert [tool.name for tool in tools] == [definition.name for definition in TOOL_REGISTRY]
     for tool, definition in zip(tools, TOOL_REGISTRY, strict=True):
         assert tool.input_schema["type"] == "object"
         assert tool.output_schema is not None
         assert tool.annotations is not None
-        assert tool.annotations.read_only_hint is True
+        assert tool.annotations.read_only_hint is (definition.risk_level == "read")
         assert tool.annotations.destructive_hint is False
         assert tool.annotations.idempotent_hint is True
         assert tool.annotations.open_world_hint is True
@@ -127,6 +130,17 @@ async def test_registry_metadata_and_schemas_match_the_contract(
         "company_id",
     }
     assert set(tools[2].input_schema["required"]) == {"as_of_date", "company_id"}
+    assert set(tools[4].input_schema["required"]) == {
+        "period_start",
+        "period_end",
+        "company_id",
+    }
+    assert set(tools[6].input_schema["required"]) == {
+        "period",
+        "company_id",
+        "bank_journal_id",
+        "statement_line_ids",
+    }
 
 
 async def test_permission_denial_happens_before_adapter_creation(
@@ -191,5 +205,8 @@ def test_public_permission_example_matches_registry() -> None:
             "get_trial_balance",
             "get_aged_receivables",
             "get_aged_payables",
+            "get_cashbook",
+            "flag_unmatched_statement_lines",
         },
+        "accounting_propose": {"reconcile_bank_statement_lines"},
     }

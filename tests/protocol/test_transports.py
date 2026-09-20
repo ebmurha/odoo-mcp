@@ -95,6 +95,9 @@ def test_streamable_http_lists_the_shared_registry(
         "get_trial_balance",
         "get_aged_receivables",
         "get_aged_payables",
+        "get_cashbook",
+        "flag_unmatched_statement_lines",
+        "reconcile_bank_statement_lines",
     ]
     assert called.status_code == 200
     assert called.json()["result"]["structuredContent"]["status"] == "ok"
@@ -123,4 +126,7 @@ async def test_stdio_profile_lists_the_shared_registry() -> None:
         "get_trial_balance",
         "get_aged_receivables",
         "get_aged_payables",
+        "get_cashbook",
+        "flag_unmatched_statement_lines",
+        "reconcile_bank_statement_lines",
     ]

@@ -5,3 +5,7 @@ permissions:
     - get_trial_balance
     - get_aged_receivables
     - get_aged_payables
+    - get_cashbook
+    - flag_unmatched_statement_lines
+  accounting_propose:
+    - reconcile_bank_statement_lines

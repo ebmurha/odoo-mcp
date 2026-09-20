@@ -6,6 +6,7 @@ import inspect
 import logging
 from collections.abc import Awaitable, Callable, Mapping
 from datetime import date
+from decimal import Decimal
 from typing import Annotated, TypeAlias
 
 from mcp.server import MCPServer
@@ -23,21 +24,45 @@ from odoo_mcp.mcp.schemas import (
     AgingInput,
     AgingResponse,
     CapabilitiesToolResponse,
+    CashbookInput,
+    CashbookResponse,
+    ReconciliationInput,
+    ReconciliationProposal,
     TrialBalanceInput,
     TrialBalanceResponse,
+    UnmatchedStatementLinesInput,
+    UnmatchedStatementLinesResponse,
+)
+from odoo_mcp.policy.write_safety import (
+    AppliedWrite,
+    PreparedWrite,
+    WriteCommand,
+    WriteSafetyCoordinator,
+    WriteSafetyResponse,
 )
 from odoo_mcp.storage import AuditEvent, Storage
+from odoo_mcp.workflows.accounting.cashbook import get_cashbook
+from odoo_mcp.workflows.accounting.reconcile_bank import (
+    build_reconciliation_proposal,
+    flag_unmatched_statement_lines,
+)
 from odoo_mcp.workflows.accounting.reports import get_aged_balance, get_trial_balance
 from odoo_mcp.workflows.core.capabilities import get_erp_capabilities
 
 AdapterFactory = Callable[[object], Awaitable[OdooAdapter]]
-ReportResponse: TypeAlias = TrialBalanceResponse | AgingResponse
+ReportResponse: TypeAlias = (
+    TrialBalanceResponse | AgingResponse | CashbookResponse | UnmatchedStatementLinesResponse
+)
 ReportOperation = Callable[[OdooAdapter, str, str], Awaitable[ReportResponse]]
 LOGGER = logging.getLogger(__name__)
 PositiveCompanyId: TypeAlias = Annotated[int, Field(gt=0)]
 ReportLimit: TypeAlias = Annotated[int, Field(ge=1, le=500)]
 ReportCursor: TypeAlias = Annotated[str | None, Field(max_length=128)]
 IdempotencyKey: TypeAlias = Annotated[str | None, Field(min_length=1, max_length=128)]
+PositiveIdentifier: TypeAlias = Annotated[int, Field(gt=0)]
+ConfidenceThreshold: TypeAlias = Annotated[Decimal, Field(ge=0, le=1)]
+StatementLineIds: TypeAlias = Annotated[tuple[int, ...], Field(min_length=1, max_length=500)]
+PeriodMonth: TypeAlias = Annotated[str, Field(pattern=r"^\d{4}-(0[1-9]|1[0-2])$")]
 
 
 async def _default_adapter_factory(connection: object) -> OdooAdapter:
@@ -403,6 +428,386 @@ def create_mcp_server(
 
     add_aging_tool("get_aged_receivables", payable=False)
     add_aging_tool("get_aged_payables", payable=True)
+
+    cashbook_definition = get_tool_definition("get_cashbook")
+
+    async def cashbook_tool(
+        period_start: date,
+        period_end: date,
+        company_id: PositiveCompanyId,
+        journal_ids: tuple[int, ...] = (),
+        partner_ids: tuple[int, ...] = (),
+        limit: ReportLimit = 100,
+        cursor: ReportCursor = None,
+    ) -> AccountingToolResponse:
+        try:
+            request = CashbookInput(
+                period_start=period_start,
+                period_end=period_end,
+                company_id=company_id,
+                journal_ids=journal_ids,
+                partner_ids=partner_ids,
+                limit=limit,
+                cursor=cursor,
+            )
+        except ValidationError:
+            return await invalid_accounting_report(
+                cashbook_definition,
+                company_id,
+                {
+                    "period_start": period_start.isoformat(),
+                    "period_end": period_end.isoformat(),
+                    "company_id": company_id,
+                    "journal_ids": list(journal_ids),
+                    "partner_ids": list(partner_ids),
+                    "limit": limit,
+                    "cursor": cursor,
+                },
+            )
+
+        async def run(
+            adapter: OdooAdapter,
+            company_name: str,
+            request_id: str,
+        ) -> ReportResponse:
+            return await get_cashbook(
+                adapter,
+                request,
+                company_name=company_name,
+                request_id=request_id,
+            )
+
+        return await accounting_report(cashbook_definition, request, run)
+
+    server.add_tool(
+        cashbook_tool,
+        name=cashbook_definition.name,
+        title=cashbook_definition.title,
+        description=cashbook_definition.description,
+        annotations=cashbook_definition.annotations,
+        meta=cashbook_definition.protocol_meta(),
+        structured_output=True,
+    )
+
+    unmatched_definition = get_tool_definition("flag_unmatched_statement_lines")
+
+    async def unmatched_statement_lines_tool(
+        period_start: date,
+        period_end: date,
+        company_id: PositiveCompanyId,
+        journal_id: PositiveIdentifier | None = None,
+        match_confidence_threshold: ConfidenceThreshold = Decimal("0.85"),
+        limit: ReportLimit = 100,
+        cursor: ReportCursor = None,
+    ) -> AccountingToolResponse:
+        try:
+            request = UnmatchedStatementLinesInput(
+                period_start=period_start,
+                period_end=period_end,
+                company_id=company_id,
+                journal_id=journal_id,
+                match_confidence_threshold=match_confidence_threshold,
+                limit=limit,
+                cursor=cursor,
+            )
+        except ValidationError:
+            return await invalid_accounting_report(
+                unmatched_definition,
+                company_id,
+                {
+                    "period_start": period_start.isoformat(),
+                    "period_end": period_end.isoformat(),
+                    "company_id": company_id,
+                    "journal_id": journal_id,
+                    "match_confidence_threshold": str(match_confidence_threshold),
+                    "limit": limit,
+                    "cursor": cursor,
+                },
+            )
+
+        async def run(
+            adapter: OdooAdapter,
+            company_name: str,
+            request_id: str,
+        ) -> ReportResponse:
+            return await flag_unmatched_statement_lines(
+                adapter,
+                request,
+                company_name=company_name,
+                request_id=request_id,
+            )
+
+        return await accounting_report(unmatched_definition, request, run)
+
+    server.add_tool(
+        unmatched_statement_lines_tool,
+        name=unmatched_definition.name,
+        title=unmatched_definition.title,
+        description=unmatched_definition.description,
+        annotations=unmatched_definition.annotations,
+        meta=unmatched_definition.protocol_meta(),
+        structured_output=True,
+    )
+
+    reconciliation_definition = get_tool_definition("reconcile_bank_statement_lines")
+
+    async def reconciliation_failure(
+        *,
+        company_id: int,
+        dry_run: bool,
+        input_payload: Mapping[str, object],
+        error: ErrorResponse,
+        binding: ConnectionBinding | None,
+        snapshot: CapabilitySnapshot | None = None,
+    ) -> WriteSafetyResponse:
+        response = WriteSafetyResponse(
+            status="failed",
+            outcome="not_attempted",
+            request_id=error.request_id,
+            company_id=company_id,
+            error_code=error.error_code,
+            error_message=error.error_message,
+            remediation_hint=error.remediation_hint,
+        )
+        if binding is not None and storage is not None:
+            try:
+                storage.audit.append(
+                    _audit_event(
+                        binding,
+                        reconciliation_definition,
+                        company_id,
+                        input_payload,
+                        error.request_id,
+                        snapshot,
+                        final_status="failed",
+                        actual_result=response.model_dump(mode="json"),
+                        error=error,
+                        dry_run=dry_run,
+                    )
+                )
+            except Exception:
+                LOGGER.warning("Reconciliation audit persistence failed; details suppressed.")
+        return response
+
+    async def reconcile_bank_statement_lines_tool(
+        period: PeriodMonth,
+        company_id: PositiveCompanyId,
+        bank_journal_id: PositiveIdentifier,
+        statement_line_ids: StatementLineIds,
+        match_confidence_threshold: ConfidenceThreshold = Decimal("0.85"),
+        dry_run: bool = True,
+        idempotency_key: IdempotencyKey = None,
+    ) -> WriteSafetyResponse:
+        request_id = new_request_id()
+        raw_payload: dict[str, object] = {
+            "period": period,
+            "company_id": company_id,
+            "bank_journal_id": bank_journal_id,
+            "statement_line_ids": list(statement_line_ids),
+            "match_confidence_threshold": str(match_confidence_threshold),
+            "dry_run": dry_run,
+            "idempotency_key": idempotency_key,
+        }
+        binding: ConnectionBinding | None = None
+        snapshot: CapabilitySnapshot | None = None
+        try:
+            request = ReconciliationInput(
+                period=period,
+                company_id=company_id,
+                bank_journal_id=bank_journal_id,
+                statement_line_ids=statement_line_ids,
+                match_confidence_threshold=match_confidence_threshold,
+                dry_run=dry_run,
+                idempotency_key=idempotency_key,
+            )
+        except ValidationError:
+            try:
+                binding = await resolver.resolve()
+                if reconciliation_definition.required_permission not in binding.permissions:
+                    raise OdooMcpError(
+                        ErrorCode.ODOO_AUTH_FAILED,
+                        "The resolved MCP identity is not authorized for reconciliation proposals.",
+                        "Reconnect with accounting proposal permission and retry.",
+                    )
+                if company_id not in binding.connection.allowed_company_ids:
+                    raise OdooMcpError(
+                        ErrorCode.COMPANY_NOT_FOUND,
+                        "The requested company is not authorized for this connection.",
+                        "Use an authorized company ID and retry.",
+                    )
+                error = ErrorResponse(
+                    error_code=ErrorCode.INVALID_INPUT,
+                    error_message="The reconciliation proposal input is invalid.",
+                    remediation_hint="Correct the period, identifiers, threshold, or controls.",
+                    request_id=request_id,
+                )
+            except OdooMcpError as exc:
+                error = exc.as_response(request_id)
+            except Exception:
+                error = ErrorResponse(
+                    error_code=ErrorCode.UNKNOWN_ERROR,
+                    error_message="The reconciliation proposal failed unexpectedly.",
+                    remediation_hint="Retry the request or contact the service operator.",
+                    request_id=request_id,
+                )
+            return await reconciliation_failure(
+                company_id=company_id,
+                dry_run=dry_run,
+                input_payload=raw_payload,
+                error=error,
+                binding=binding,
+            )
+
+        initial_adapter: OdooAdapter | None = None
+        try:
+            binding = await resolver.resolve()
+            if reconciliation_definition.required_permission not in binding.permissions:
+                raise OdooMcpError(
+                    ErrorCode.ODOO_AUTH_FAILED,
+                    "The resolved MCP identity is not authorized for reconciliation proposals.",
+                    "Reconnect with accounting proposal permission and retry.",
+                )
+            if request.company_id not in binding.connection.allowed_company_ids:
+                raise OdooMcpError(
+                    ErrorCode.COMPANY_NOT_FOUND,
+                    "The requested company is not authorized for this connection.",
+                    "Use an authorized company ID and retry.",
+                )
+            initial_adapter = await adapter_factory(binding.connection)
+            companies = await initial_adapter.get_companies()
+            company = next((item for item in companies if item.id == request.company_id), None)
+            if company is None:
+                raise OdooMcpError(
+                    ErrorCode.COMPANY_NOT_FOUND,
+                    "The requested company is unavailable to the technical user.",
+                    "Check company access and retry.",
+                )
+            snapshot = await initial_adapter.get_capabilities()
+            await _close_adapter(initial_adapter)
+            initial_adapter = None
+            if storage is None:
+                raise RuntimeError("Reconciliation proposal storage is unavailable")
+        except OdooMcpError as exc:
+            error = exc.as_response(request_id)
+        except Exception:
+            error = ErrorResponse(
+                error_code=ErrorCode.UNKNOWN_ERROR,
+                error_message="The reconciliation proposal failed unexpectedly.",
+                remediation_hint="Retry the request or contact the service operator.",
+                request_id=request_id,
+            )
+        else:
+            proposal: ReconciliationProposal | None = None
+
+            async def load_proposal() -> ReconciliationProposal:
+                adapter = await adapter_factory(binding.connection)
+                try:
+                    return await build_reconciliation_proposal(
+                        adapter,
+                        request,
+                        company_name=company.name,
+                        request_id=request_id,
+                    )
+                finally:
+                    await _close_adapter(adapter)
+
+            async def prepare() -> PreparedWrite:
+                nonlocal proposal
+                proposal = await load_proposal()
+                payload = proposal.model_dump(mode="json", exclude={"artifact_markdown"})
+                return PreparedWrite(
+                    proposed_action={
+                        "action": "persist_reconciliation_proposal",
+                        "bank_journal_id": request.bank_journal_id,
+                        "statement_line_ids": list(request.statement_line_ids),
+                        "finalizes_odoo_reconciliation": False,
+                    },
+                    material_effects=payload,
+                    artifact_markdown=proposal.artifact_markdown,
+                )
+
+            async def validate_current_state() -> None:
+                nonlocal proposal
+                refreshed = await load_proposal()
+                if proposal is None or refreshed.model_dump() != proposal.model_dump():
+                    raise OdooMcpError(
+                        ErrorCode.ODOO_STATE_CONFLICT,
+                        "The reconciliation candidates changed before proposal persistence.",
+                        "Refresh the proposal and retry with a new idempotency key.",
+                    )
+                proposal = refreshed
+
+            async def persist_proposal() -> AppliedWrite:
+                if proposal is None:
+                    raise RuntimeError("Reconciliation proposal was not prepared")
+                payload = proposal.model_dump(mode="json", exclude={"artifact_markdown"})
+                record = storage.proposal_journal.record(
+                    request_id=request_id,
+                    tenant_id=binding.tenant_id,
+                    company_id=request.company_id,
+                    tool_name=reconciliation_definition.name,
+                    module="accounting",
+                    proposal_type="bank_reconciliation",
+                    payload=payload,
+                    artifact_markdown=proposal.artifact_markdown,
+                )
+                return AppliedWrite(
+                    material_effects={**payload, "proposal_id": record.id},
+                    artifact_markdown=proposal.artifact_markdown,
+                )
+
+            command = WriteCommand(
+                company_id=request.company_id,
+                request_payload={
+                    "period": request.period,
+                    "bank_journal_id": request.bank_journal_id,
+                    "statement_line_ids": list(request.statement_line_ids),
+                    "match_confidence_threshold": str(request.match_confidence_threshold),
+                },
+                dry_run=request.dry_run,
+                idempotency_key=request.idempotency_key,
+            )
+            return await WriteSafetyCoordinator(storage).run(
+                binding=binding,
+                definition=reconciliation_definition,
+                module="accounting",
+                snapshot=snapshot,
+                command=command,
+                prepare=prepare,
+                validate_current_state=validate_current_state,
+                execute=persist_proposal,
+                request_id=request_id,
+            )
+
+        if initial_adapter is not None:
+            try:
+                await _close_adapter(initial_adapter)
+            except Exception:
+                LOGGER.warning("Odoo adapter cleanup failed; details were suppressed.")
+                error = ErrorResponse(
+                    error_code=ErrorCode.UNKNOWN_ERROR,
+                    error_message="The reconciliation proposal failed unexpectedly.",
+                    remediation_hint="Retry the request or contact the service operator.",
+                    request_id=request_id,
+                )
+        return await reconciliation_failure(
+            company_id=request.company_id,
+            dry_run=request.dry_run,
+            input_payload=raw_payload,
+            error=error,
+            binding=binding,
+            snapshot=snapshot,
+        )
+
+    server.add_tool(
+        reconcile_bank_statement_lines_tool,
+        name=reconciliation_definition.name,
+        title=reconciliation_definition.title,
+        description=reconciliation_definition.description,
+        annotations=reconciliation_definition.annotations,
+        meta=reconciliation_definition.protocol_meta(),
+        structured_output=True,
+    )
     return server
 
 
@@ -417,6 +822,7 @@ def _audit_event(
     final_status: str,
     actual_result: dict[str, object] | None = None,
     error: ErrorResponse | None = None,
+    dry_run: bool = False,
 ) -> AuditEvent:
     return AuditEvent(
         request_id=request_id,
@@ -432,7 +838,7 @@ def _audit_event(
         odoo_version=None if snapshot is None else str(snapshot.version),
         odoo_transport=None if snapshot is None else snapshot.transport,
         input_payload=input_payload,
-        dry_run=False,
+        dry_run=dry_run,
         proposed_action=None,
         actual_result=actual_result,
         affected_odoo_records=(),

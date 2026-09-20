@@ -1,8 +1,9 @@
 # Odoo MCP
 
 `odoo-mcp` is a workflow-native MCP server for Odoo Enterprise. It exposes
-read-only capability discovery, trial-balance reporting, and aged receivables
-and payables reporting.
+read-only capability discovery, trial-balance reporting, aged receivables and
+payables reporting, cashbook visibility, unmatched bank-line detection, and
+proposal-only bank reconciliation.
 
 The internal accounting adapter provides bounded, typed, company-scoped read
 primitives for the reporting workflows. It enforces fixed model/action allowlists,
@@ -94,8 +95,10 @@ failures. Audit and response text suppress raw exception details.
 
 Human confirmation belongs to the MCP client host. The server does not issue
 approval tokens, provide an approval UI, or automatically turn a preview into
-execution. No write-capable business tool is registered in the current public
-tool set; subsequent accounting workflows use this shared safety boundary.
+execution. Reconciliation calls default to preview. An explicit
+`dry_run: false` call with an idempotency key stores a server-owned proposal and
+Markdown artifact, but never finalizes reconciliation or changes a bank
+statement line in Odoo.
 
 ## Configuration
 
@@ -110,13 +113,21 @@ Use a dedicated non-production Odoo technical user with only the required
 company and module access. Company IDs are an additional MCP authorization
 boundary and never expand the technical user's Odoo permissions.
 
-## Accounting reports
+## Accounting workflows
 
 - `get_trial_balance` returns posted opening balances, inclusive-period debit
   and credit movement, closing balances, totals, and a Markdown artifact.
 - `get_aged_receivables` and `get_aged_payables` reconstruct posted residuals
   as of a date, including later partial reconciliations, and group them into
   not-yet-due, 1–30, 31–60, 61–90, and 90+ day buckets.
+- `get_cashbook` returns posted move lines from cash and bank journals with
+  opening balance, period debit and credit, and closing balance.
+- `flag_unmatched_statement_lines` identifies unreconciled statement lines
+  without one unique eligible match at or above the requested threshold.
+- `reconcile_bank_statement_lines` scores exact one-to-one candidates by amount,
+  partner, normalized reference, and date proximity. Ties and candidate reuse
+  remain explicit unmatched results. The tool can persist a proposal locally;
+  it does not perform Odoo reconciliation.
 
 Report results are deterministically ordered and cursor-paginated with a default
 limit of 100 and maximum of 500. Empty data is a successful empty report;

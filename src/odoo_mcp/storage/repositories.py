@@ -92,31 +92,59 @@ class ProposalRepository:
         _required(tool_name, "tool_name")
         _required(module, "module")
         _required(proposal_type, "proposal_type")
-        created_at = timestamp()
         with self._database.transaction(write=True) as connection:
-            cursor = connection.execute(
-                """
-                INSERT INTO proposals (
-                    request_id, tenant_id, company_id, tool_name, module,
-                    proposal_type, payload_json, status, executed_at,
-                    erp_record_refs, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, 'proposed', NULL, '[]', ?)
-                """,
-                (
-                    request_id,
-                    tenant_id,
-                    company_id,
-                    tool_name,
-                    module,
-                    proposal_type,
-                    canonical_json(payload),
-                    created_at,
-                ),
+            return self.create_in_transaction(
+                connection,
+                request_id,
+                tenant_id,
+                company_id,
+                tool_name,
+                module,
+                proposal_type,
+                payload,
             )
-            row = connection.execute(
-                "SELECT * FROM proposals WHERE id = ? AND tenant_id = ?",
-                (cursor.lastrowid, tenant_id),
-            ).fetchone()
+
+    def create_in_transaction(
+        self,
+        connection: sqlite3.Connection,
+        request_id: str,
+        tenant_id: str,
+        company_id: int,
+        tool_name: str,
+        module: str,
+        proposal_type: str,
+        payload: Mapping[str, object],
+    ) -> ProposalRecord:
+        _required(request_id, "request_id")
+        _required(tenant_id, "tenant_id")
+        _company(company_id)
+        _required(tool_name, "tool_name")
+        _required(module, "module")
+        _required(proposal_type, "proposal_type")
+        created_at = timestamp()
+        cursor = connection.execute(
+            """
+            INSERT INTO proposals (
+                request_id, tenant_id, company_id, tool_name, module,
+                proposal_type, payload_json, status, executed_at,
+                erp_record_refs, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, 'proposed', NULL, '[]', ?)
+            """,
+            (
+                request_id,
+                tenant_id,
+                company_id,
+                tool_name,
+                module,
+                proposal_type,
+                canonical_json(payload),
+                created_at,
+            ),
+        )
+        row = connection.execute(
+            "SELECT * FROM proposals WHERE id = ? AND tenant_id = ?",
+            (cursor.lastrowid, tenant_id),
+        ).fetchone()
         if row is None:
             raise ProposalTransitionError("Proposal creation failed")
         return _proposal(row)

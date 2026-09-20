@@ -513,8 +513,9 @@ class WriteSafetyCoordinator:
             return self._failure(
                 OdooMcpError(
                     ErrorCode.UNKNOWN_ERROR,
-                    "The Odoo write outcome is unknown and requires recovery.",
-                    "Do not retry with a new key; inspect Odoo and recover this request.",
+                    "The operation outcome is unknown and requires recovery.",
+                    "Do not retry with a new key; inspect the target system and "
+                    "recover this request.",
                 ),
                 selected_request_id,
                 command.company_id,
@@ -574,8 +575,8 @@ class WriteSafetyCoordinator:
         response = self._failure(
             OdooMcpError(
                 ErrorCode.UNKNOWN_ERROR,
-                "The Odoo write outcome is unknown and requires recovery.",
-                "Do not retry with a new key; inspect Odoo and recover this request.",
+                "The operation outcome is unknown and requires recovery.",
+                "Do not retry with a new key; inspect the target system and recover this request.",
             ),
             request_id,
             command.company_id,

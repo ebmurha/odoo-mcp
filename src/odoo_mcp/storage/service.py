@@ -19,6 +19,7 @@ from odoo_mcp.storage.json_support import (
 )
 from odoo_mcp.storage.migrations import apply_migrations
 from odoo_mcp.storage.models import IdempotencyState, ProposalState
+from odoo_mcp.storage.proposals import ProposalJournal
 from odoo_mcp.storage.reporting import ReportJournal
 from odoo_mcp.storage.repositories import (
     ArtifactRepository,
@@ -41,6 +42,7 @@ class Storage:
         self.capabilities = CapabilityCacheRepository(database)
         self.connections = SQLiteEncryptedConnectionRepository(database, self.audit, keyring)
         self.reports = ReportJournal(database, self.artifacts, self.audit)
+        self.proposal_journal = ProposalJournal(database, self.proposals, self.artifacts)
 
     @classmethod
     def open(cls, path: Path, *, keyring: EncryptionKeyring | None = None) -> Storage:

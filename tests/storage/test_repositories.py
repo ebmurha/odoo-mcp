@@ -48,6 +48,33 @@ def test_proposals_artifacts_and_capabilities_are_tenant_and_company_scoped(tmp_
     assert storage.capabilities.get("tenant-b", "connection-a", "19") is None
 
 
+def test_proposal_and_artifact_persist_atomically(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    storage = Storage.open(tmp_path / "proposal-atomic.sqlite3")
+
+    def fail_artifact(*_args: object, **_kwargs: object) -> object:
+        raise RuntimeError("synthetic artifact failure")
+
+    monkeypatch.setattr(storage.artifacts, "create_in_transaction", fail_artifact)
+
+    with pytest.raises(RuntimeError, match="synthetic artifact failure"):
+        storage.proposal_journal.record(
+            request_id="req_atomic",
+            tenant_id="tenant-a",
+            company_id=1,
+            tool_name="reconcile_bank_statement_lines",
+            module="accounting",
+            proposal_type="bank_reconciliation",
+            payload={"matches": []},
+            artifact_markdown="# Synthetic proposal",
+        )
+
+    with storage.database.transaction() as database:
+        assert database.execute("SELECT COUNT(*) FROM proposals").fetchone()[0] == 0
+        assert database.execute("SELECT COUNT(*) FROM artifacts").fetchone()[0] == 0
+
+
 def test_proposal_state_machine_rejects_invalid_and_concurrent_transitions(tmp_path) -> None:
     storage = Storage.open(tmp_path / "state.sqlite3")
     proposal = storage.proposals.create(

@@ -128,6 +128,60 @@ TOOL_REGISTRY: tuple[ToolDefinition, ...] = (
             open_world_hint=True,
         ),
     ),
+    ToolDefinition(
+        name="get_cashbook",
+        version="1.0.0",
+        title="Get cashbook",
+        description=(
+            "Return posted cash and bank transactions, opening and closing balances, "
+            "period totals, and a Markdown artifact."
+        ),
+        risk_level="read",
+        required_permission="accounting_read",
+        required_capability="account",
+        annotations=ToolAnnotations(
+            read_only_hint=True,
+            destructive_hint=False,
+            idempotent_hint=True,
+            open_world_hint=True,
+        ),
+    ),
+    ToolDefinition(
+        name="flag_unmatched_statement_lines",
+        version="1.0.0",
+        title="Flag unmatched bank statement lines",
+        description=(
+            "Identify unreconciled bank statement lines without a unique candidate "
+            "at or above the requested confidence threshold."
+        ),
+        risk_level="read",
+        required_permission="accounting_read",
+        required_capability="account_accountant",
+        annotations=ToolAnnotations(
+            read_only_hint=True,
+            destructive_hint=False,
+            idempotent_hint=True,
+            open_world_hint=True,
+        ),
+    ),
+    ToolDefinition(
+        name="reconcile_bank_statement_lines",
+        version="1.0.0",
+        title="Propose bank statement reconciliation",
+        description=(
+            "Preview or persist deterministic reconciliation proposals without "
+            "changing final reconciliation state in Odoo."
+        ),
+        risk_level="propose",
+        required_permission="accounting_propose",
+        required_capability="account_accountant",
+        annotations=ToolAnnotations(
+            read_only_hint=False,
+            destructive_hint=False,
+            idempotent_hint=True,
+            open_world_hint=True,
+        ),
+    ),
 )
 
 
