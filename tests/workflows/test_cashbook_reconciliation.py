@@ -8,6 +8,7 @@ import pytest
 from odoo_mcp.adapters.accounting import (
     AccountMoveLine,
     BankStatementLine,
+    Currency,
     DatePeriod,
     Journal,
     PageRequest,
@@ -119,6 +120,22 @@ class CashAdapter:
     async def get_journals(self, company_id: int, *, page: PageRequest) -> RecordPage[Journal]:
         assert company_id == 1
         return RecordPage(items=self.journals)
+
+    async def get_currencies(
+        self,
+        company_id: int,
+        currency_ids: tuple[int, ...],
+        *,
+        page: PageRequest,
+    ) -> RecordPage[Currency]:
+        assert company_id == 1
+        names = {1: "KES", 2: "USD", 3: "EUR"}
+        return RecordPage(
+            items=[
+                Currency(id=identifier, name=names[identifier], rounding=Decimal("0.01"))
+                for identifier in currency_ids
+            ]
+        )
 
     async def get_account_move_lines(
         self, company_id: int, filters: ReadFilters, page: PageRequest
@@ -435,6 +452,100 @@ async def test_company_currency_journal_rejects_foreign_exchange_candidates() ->
     assert result.matches == []
     assert result.unmatched[0].reason_code == "no_eligible_candidate"
     assert result.summary.currency_id == COMPANY_CURRENCY.id
+
+
+@pytest.mark.parametrize(
+    ("statement_amount", "expected_match"),
+    [
+        ("100.004", True),
+        ("100.005", False),
+        ("100.006", False),
+    ],
+)
+async def test_company_currency_matching_uses_odoo_precision(
+    statement_amount: str,
+    expected_match: bool,
+) -> None:
+    adapter = CashAdapter(
+        statements=[_statement(1001, amount=statement_amount)],
+        lines=[
+            _move_line(
+                2001,
+                amount="-100.00",
+                line_date=date(2026, 4, 10),
+                partner_id=7,
+                label="invoice 42",
+            )
+        ],
+    )
+
+    result = await build_reconciliation_proposal(
+        adapter,
+        ReconciliationInput(
+            company_id=1,
+            period="2026-04",
+            bank_journal_id=10,
+            statement_line_ids=(1001,),
+        ),
+        company_currency=COMPANY_CURRENCY,
+        company_name="Synthetic Co",
+        request_id="req_company_precision",
+    )
+
+    assert bool(result.matches) is expected_match
+
+
+@pytest.mark.parametrize(
+    ("statement_amount", "expected_match"),
+    [
+        ("100.004", True),
+        ("100.005", False),
+        ("100.006", False),
+    ],
+)
+async def test_foreign_journal_matching_uses_journal_currency_precision(
+    statement_amount: str,
+    expected_match: bool,
+) -> None:
+    usd = RelatedRecord(id=2, name="USD")
+    adapter = CashAdapter(
+        statements=[_statement(1001, amount=statement_amount)],
+        lines=[
+            _move_line(
+                2001,
+                amount="-100.00",
+                line_date=date(2026, 4, 10),
+                partner_id=7,
+                label="invoice 42",
+                currency=usd,
+            )
+        ],
+        journals=[
+            Journal(
+                id=10,
+                name="USD Bank",
+                code="USD",
+                journal_type="bank",
+                company_id=1,
+                currency=usd,
+            )
+        ],
+    )
+
+    result = await build_reconciliation_proposal(
+        adapter,
+        ReconciliationInput(
+            company_id=1,
+            period="2026-04",
+            bank_journal_id=10,
+            statement_line_ids=(1001,),
+        ),
+        company_currency=COMPANY_CURRENCY,
+        company_name="Synthetic Co",
+        request_id="req_journal_precision",
+    )
+
+    assert bool(result.matches) is expected_match
 
 
 def test_reconciliation_period_rejects_year_zero() -> None:

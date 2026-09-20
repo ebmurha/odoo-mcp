@@ -13,6 +13,7 @@ from odoo_mcp.adapters.accounting import (
     AccountMoveLine,
     AnalyticAccount,
     BankStatementLine,
+    Currency,
     DatePeriod,
     Journal,
     PageRequest,
@@ -169,6 +170,19 @@ class OdooClient:
         self, company_id: int, *, page: PageRequest = DEFAULT_PAGE_REQUEST
     ) -> RecordPage[Journal]:
         return await self._accounting.get_journals(company_id, page=page)
+
+    async def get_currencies(
+        self,
+        company_id: int,
+        currency_ids: tuple[int, ...],
+        *,
+        page: PageRequest = DEFAULT_PAGE_REQUEST,
+    ) -> RecordPage[Currency]:
+        return await self._accounting.get_currencies(
+            company_id,
+            currency_ids,
+            page=page,
+        )
 
     async def get_bank_statement_lines(
         self,

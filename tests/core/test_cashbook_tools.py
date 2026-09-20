@@ -9,6 +9,7 @@ from mcp import Client
 from odoo_mcp.adapters.accounting import (
     AccountMoveLine,
     BankStatementLine,
+    Currency,
     DatePeriod,
     Journal,
     PageRequest,
@@ -77,6 +78,21 @@ class BankAdapter:
                     journal_type="bank",
                     company_id=company_id,
                 )
+            ]
+        )
+
+    async def get_currencies(
+        self,
+        company_id: int,
+        currency_ids: tuple[int, ...],
+        *,
+        page: PageRequest,
+    ) -> RecordPage[Currency]:
+        self.read_calls.append("currencies")
+        return RecordPage(
+            items=[
+                Currency(id=identifier, name="KES", rounding=Decimal("0.01"))
+                for identifier in currency_ids
             ]
         )
 

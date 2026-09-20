@@ -8,11 +8,12 @@ import calendar
 from collections import Counter
 from dataclasses import dataclass
 from datetime import date
-from decimal import Decimal
+from decimal import ROUND_HALF_UP, Decimal
 
 from odoo_mcp.adapters.accounting import (
     AccountMoveLine,
     BankStatementLine,
+    Currency,
     DatePeriod,
     FilterClause,
     Journal,
@@ -36,6 +37,7 @@ from odoo_mcp.mcp.schemas import (
 
 _SOURCE_PAGE_SIZE = 100
 _MAX_SOURCE_RECORDS = 100_000
+_MAX_SOURCE_CURRENCIES = 500
 _ZERO = Decimal("0")
 
 
@@ -162,8 +164,34 @@ async def _journals(adapter: OdooAdapter, company_id: int) -> dict[int, Journal]
         cursor = page.next_cursor
 
 
+async def _currencies(
+    adapter: OdooAdapter,
+    company_id: int,
+    currency_ids: set[int],
+) -> dict[int, Currency]:
+    requested = tuple(sorted(currency_ids))
+    if not requested or len(requested) > _MAX_SOURCE_CURRENCIES:
+        raise _source_error("Odoo returned an invalid reconciliation currency set.")
+    page = await adapter.get_currencies(
+        company_id,
+        requested,
+        page=PageRequest(limit=_MAX_SOURCE_CURRENCIES),
+    )
+    if page.next_cursor is not None or len(page.items) != len(requested):
+        raise _source_error("Odoo returned incomplete reconciliation currency data.")
+    currencies = {item.id: item for item in page.items}
+    if set(currencies) != set(requested) or len(currencies) != len(page.items):
+        raise _source_error("Odoo returned inconsistent reconciliation currency data.")
+    return currencies
+
+
 def _reference(value: str | None) -> str:
     return " ".join((value or "").split()).casefold()
+
+
+def _round_currency_amount(value: Decimal, currency: Currency) -> Decimal:
+    units = value / currency.rounding
+    return units.quantize(Decimal("1"), rounding=ROUND_HALF_UP) * currency.rounding
 
 
 def _candidate(
@@ -171,18 +199,22 @@ def _candidate(
     line: AccountMoveLine,
     journal: Journal,
     company_currency: RelatedRecord,
+    effective_currency: Currency,
 ) -> _Candidate | None:
-    effective_currency = journal.currency or company_currency
+    effective_currency_reference = journal.currency or company_currency
     if statement.foreign_currency is not None and (
-        statement.foreign_currency.id != effective_currency.id
+        statement.foreign_currency.id != effective_currency_reference.id
     ):
         return None
-    if line.currency is None or line.currency.id != effective_currency.id:
+    if line.currency is None or line.currency.id != effective_currency_reference.id:
         return None
     if journal.currency is None:
-        amounts_match = statement.amount == -line.residual
+        candidate_amount = line.residual
     else:
-        amounts_match = statement.amount == -line.residual_currency
+        candidate_amount = line.residual_currency
+    amounts_match = _round_currency_amount(
+        statement.amount, effective_currency
+    ) == _round_currency_amount(-candidate_amount, effective_currency)
     if line.reconciled or not amounts_match:
         return None
     if statement.move is not None and statement.move.id == line.move.id:
@@ -212,28 +244,60 @@ def _decisions(
     threshold: Decimal,
     journals: dict[int, Journal],
     company_currency: RelatedRecord,
+    currencies: dict[int, Currency],
 ) -> list[_Decision]:
     company_candidates: dict[Decimal, list[AccountMoveLine]] = {}
     currency_candidates: dict[tuple[int, Decimal], list[AccountMoveLine]] = {}
+    company_currency_value = currencies[company_currency.id]
     for line in candidates:
-        company_candidates.setdefault(line.residual, []).append(line)
-        if line.currency is not None:
-            currency_candidates.setdefault((line.currency.id, line.residual_currency), []).append(
-                line
-            )
+        if line.currency is None:
+            continue
+        line_currency = currencies.get(line.currency.id)
+        if line_currency is None:
+            continue
+        if line.currency.id == company_currency.id:
+            company_candidates.setdefault(
+                _round_currency_amount(line.residual, company_currency_value), []
+            ).append(line)
+        currency_candidates.setdefault(
+            (
+                line.currency.id,
+                _round_currency_amount(line.residual_currency, line_currency),
+            ),
+            [],
+        ).append(line)
     provisional: list[_Decision] = []
     for statement in statements:
         journal = journals.get(statement.journal.id)
         if journal is None or journal.journal_type not in {"bank", "cash"}:
             raise _source_error("Odoo returned an unavailable statement journal.")
         if journal.currency is None:
-            eligible_amounts = company_candidates.get(-statement.amount, [])
+            effective_currency = company_currency_value
+            eligible_amounts = company_candidates.get(
+                _round_currency_amount(-statement.amount, effective_currency), []
+            )
         else:
-            eligible_amounts = currency_candidates.get((journal.currency.id, -statement.amount), [])
+            effective_currency = currencies[journal.currency.id]
+            eligible_amounts = currency_candidates.get(
+                (
+                    journal.currency.id,
+                    _round_currency_amount(-statement.amount, effective_currency),
+                ),
+                [],
+            )
         scored = [
             candidate
             for line in eligible_amounts
-            if (candidate := _candidate(statement, line, journal, company_currency)) is not None
+            if (
+                candidate := _candidate(
+                    statement,
+                    line,
+                    journal,
+                    company_currency,
+                    effective_currency,
+                )
+            )
+            is not None
         ]
         scored.sort(key=lambda item: (-item.score, item.line.id))
         if not scored:
@@ -379,6 +443,18 @@ async def build_reconciliation_proposal(
             "The requested bank journal is unavailable.",
             "Use a cash or bank journal available to the authorized company.",
         )
+    currencies = await _currencies(
+        adapter,
+        request.company_id,
+        {
+            company_currency.id,
+            *(
+                item.currency.id
+                for item in journals.values()
+                if item.journal_type in {"bank", "cash"} and item.currency is not None
+            ),
+        },
+    )
     by_id = {item.id: item for item in statement_lines}
     missing = set(request.statement_line_ids) - set(by_id)
     if missing:
@@ -400,6 +476,7 @@ async def build_reconciliation_proposal(
         request.match_confidence_threshold,
         journals,
         company_currency,
+        currencies,
     )
     matches = [
         ReconciliationMatch(
@@ -496,12 +573,25 @@ async def flag_unmatched_statement_lines(
         if not item.reconciled
     ]
     journals = await _journals(adapter, request.company_id)
+    currencies = await _currencies(
+        adapter,
+        request.company_id,
+        {
+            company_currency.id,
+            *(
+                item.currency.id
+                for item in journals.values()
+                if item.journal_type in {"bank", "cash"} and item.currency is not None
+            ),
+        },
+    )
     decisions = _decisions(
         statements,
         await _candidate_lines(adapter, request.company_id),
         request.match_confidence_threshold,
         journals,
         company_currency,
+        currencies,
     )
     all_items = [
         _unmatched(item, journals[item.statement.journal.id], company_currency)

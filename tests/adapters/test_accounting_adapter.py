@@ -13,6 +13,7 @@ from odoo_mcp.adapters.accounting import (
     AccountMoveLine,
     AnalyticAccount,
     BankStatementLine,
+    Currency,
     DatePeriod,
     FilterClause,
     Journal,
@@ -162,6 +163,62 @@ async def test_account_moves_are_typed_scoped_and_cursor_paginated(
     assert transport.calls[0]["limit"] == 2
     assert ["id", ">", 1] in transport.calls[1]["domain"]
     assert "password" not in first.items[0].model_dump()
+
+
+async def test_currencies_return_odoo_rounding_in_authorized_company_context(
+    connection: OdooConnectionSettings,
+) -> None:
+    transport = FakeTransport(
+        {
+            "res.currency": [
+                {"id": 40, "name": "Synthetic Currency", "rounding": 0.01},
+            ]
+        }
+    )
+    client = await _validated_client(connection, transport)
+
+    result = await client.get_currencies(1, (40,), page=PageRequest(limit=1))
+
+    assert result.items == [Currency(id=40, name="Synthetic Currency", rounding=Decimal("0.01"))]
+    assert transport.calls[0] == {
+        "model": "res.currency",
+        "domain": [["id", "in", [40]]],
+        "fields": ["id", "name", "rounding"],
+        "limit": 2,
+        "offset": 0,
+        "order": "id asc",
+        "company_ids": (1,),
+    }
+
+
+@pytest.mark.parametrize("rounding", [0, -0.01, False, "not-a-number"])
+async def test_currency_rounding_must_be_positive_and_numeric(
+    connection: OdooConnectionSettings,
+    rounding: object,
+) -> None:
+    transport = FakeTransport(
+        {"res.currency": [{"id": 40, "name": "Synthetic Currency", "rounding": rounding}]}
+    )
+    client = await _validated_client(connection, transport)
+
+    with pytest.raises(OdooMcpError) as caught:
+        await client.get_currencies(1, (40,), page=PageRequest(limit=1))
+
+    assert caught.value.code is ErrorCode.ODOO_API_ERROR
+
+
+async def test_currency_response_must_match_requested_ids(
+    connection: OdooConnectionSettings,
+) -> None:
+    transport = FakeTransport(
+        {"res.currency": [{"id": 41, "name": "Unexpected Currency", "rounding": 0.01}]}
+    )
+    client = await _validated_client(connection, transport)
+
+    with pytest.raises(OdooMcpError) as caught:
+        await client.get_currencies(1, (40,), page=PageRequest(limit=1))
+
+    assert caught.value.code is ErrorCode.ODOO_API_ERROR
 
 
 @pytest.mark.parametrize(

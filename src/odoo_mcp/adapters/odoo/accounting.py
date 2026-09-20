@@ -17,6 +17,7 @@ from odoo_mcp.adapters.accounting import (
     AdapterValue,
     AnalyticAccount,
     BankStatementLine,
+    Currency,
     DatePeriod,
     Journal,
     PageRequest,
@@ -41,6 +42,7 @@ RawRecord: TypeAlias = Mapping[str, object]
 RecordT = TypeVar("RecordT", bound=AdapterValue)
 ParsedT = TypeVar("ParsedT")
 RowValidator = Callable[[list[RawRecord], int], Awaitable[None]]
+_MAX_CURRENCY_IDS = 500
 
 _ACCOUNT_MOVE_FIELDS = [
     "id",
@@ -89,6 +91,7 @@ _PARTIAL_RECONCILIATION_FIELDS = [
     "max_date",
 ]
 _JOURNAL_FIELDS = ["id", "name", "code", "type", "company_id", "currency_id"]
+_CURRENCY_FIELDS = ["id", "name", "rounding"]
 _BANK_STATEMENT_LINE_FIELDS = [
     "id",
     "date",
@@ -249,6 +252,13 @@ def _optional_decimal(value: object) -> Decimal | None:
     return _decimal(value)
 
 
+def _positive_decimal(value: object) -> Decimal:
+    result = _decimal(value)
+    if result <= 0:
+        raise _invalid_response()
+    return result
+
+
 def _boolean(value: object) -> bool:
     if not isinstance(value, bool):
         raise _invalid_response()
@@ -365,6 +375,14 @@ def _normalize_journal(raw: RawRecord) -> Journal:
         journal_type=_text(raw.get("type")),
         company_id=_company_id(raw.get("company_id")),
         currency=_optional_relation(raw.get("currency_id")),
+    )
+
+
+def _normalize_currency(raw: RawRecord) -> Currency:
+    return Currency(
+        id=_read_field(raw, "res.currency", "id", _positive_int),
+        name=_read_field(raw, "res.currency", "name", _text),
+        rounding=_read_field(raw, "res.currency", "rounding", _positive_decimal),
     )
 
 
@@ -691,6 +709,39 @@ class AccountingReader:
             _JOURNAL_FIELDS,
             _normalize_journal,
         )
+
+    async def get_currencies(
+        self,
+        company_id: int,
+        currency_ids: tuple[int, ...],
+        *,
+        page: PageRequest = DEFAULT_PAGE_REQUEST,
+    ) -> RecordPage[Currency]:
+        if (
+            not currency_ids
+            or len(currency_ids) > _MAX_CURRENCY_IDS
+            or len(set(currency_ids)) != len(currency_ids)
+            or any(
+                not isinstance(identifier, int) or isinstance(identifier, bool) or identifier <= 0
+                for identifier in currency_ids
+            )
+        ):
+            raise _invalid_input(
+                "The currency selection is invalid.",
+                "Use unique positive currency IDs and retry.",
+            )
+        result = await self._read_page(
+            "res.currency",
+            company_id,
+            [["id", "in", list(currency_ids)]],
+            ReadFilters(),
+            page,
+            _CURRENCY_FIELDS,
+            _normalize_currency,
+        )
+        if any(item.id not in currency_ids for item in result.items):
+            raise _invalid_response()
+        return result
 
     async def get_bank_statement_lines(
         self,

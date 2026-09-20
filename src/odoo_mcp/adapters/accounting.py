@@ -66,6 +66,12 @@ class RelatedRecord(AdapterValue):
     name: str
 
 
+class Currency(AdapterValue):
+    id: int = Field(gt=0)
+    name: str
+    rounding: Decimal = Field(gt=0)
+
+
 ItemT = TypeVar("ItemT", bound=AdapterValue)
 
 
