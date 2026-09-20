@@ -12,26 +12,31 @@ from odoo_mcp.adapters.accounting import (
     AccountMoveLine,
     Currency,
     InvoiceEffect,
+    InvoiceValidationLine,
     PageRequest,
     PartialReconciliation,
     Partner,
+    PaymentRegistrationPreview,
     PaymentRoute,
     ReadFilters,
     RecordPage,
     RelatedRecord,
 )
+from odoo_mcp.adapters.base import Company
 from odoo_mcp.mcp.error_codes import ErrorCode, OdooMcpError
 from odoo_mcp.mcp.schemas import (
     CreateInvoiceInput,
     InvoiceLineInput,
     OpenDocumentsInput,
     RegisterPaymentInput,
+    ValidateInvoiceInput,
 )
 from odoo_mcp.workflows.accounting.invoicing import (
     DEFERRED_INVOICE_FIELDS,
     list_open_documents,
     prepare_invoice_draft,
     prepare_payment,
+    prepare_validation,
 )
 
 
@@ -164,10 +169,18 @@ class InvoiceAdapter:
     async def get_invoice_effect(self, company_id: int, invoice_id: int) -> InvoiceEffect:
         return _effect()
 
-    async def get_payment_routes(
-        self, company_id: int, invoice_id: int
-    ) -> tuple[PaymentRoute, ...]:
-        return self.routes
+    async def get_payment_registration_preview(self, request: object) -> PaymentRegistrationPreview:
+        return PaymentRegistrationPreview(
+            invoice_id=101,
+            company_id=1,
+            payment_date=date(2026, 3, 1),
+            amount=Decimal("100"),
+            currency=RelatedRecord(id=40, name="USD"),
+            payment_type="inbound",
+            partner_type="customer",
+            can_edit_wizard=True,
+            routes=self.routes,
+        )
 
 
 async def test_open_invoice_reconstructs_historical_multicurrency_residual() -> None:
@@ -222,14 +235,16 @@ async def test_payment_requires_exact_route_when_odoo_has_multiple_choices() -> 
         PaymentRoute(
             journal=RelatedRecord(id=1, name="Bank A"),
             payment_method_line=RelatedRecord(id=11, name="Manual"),
+            payment_method_code="manual",
             payment_type="inbound",
-            may_initiate_external_effect=False,
+            external_effect_status="not_initiated_by_odoo",
         ),
         PaymentRoute(
             journal=RelatedRecord(id=2, name="Bank B"),
             payment_method_line=RelatedRecord(id=22, name="Electronic"),
+            payment_method_code="custom",
             payment_type="inbound",
-            may_initiate_external_effect=True,
+            external_effect_status="unknown",
         ),
     )
     request = RegisterPaymentInput(
@@ -276,3 +291,219 @@ def test_invoice_lines_reject_nonpositive_quantity_and_negative_amount() -> None
             unit_price=Decimal("-1"),
             account_id=70,
         )
+
+
+class ValidationAdapter:
+    def __init__(self, effect: InvoiceEffect) -> None:
+        self.effect = effect
+
+    async def get_invoice_effect(self, company_id: int, invoice_id: int) -> InvoiceEffect:
+        return self.effect
+
+    async def get_companies(self) -> list[Company]:
+        return [
+            Company(
+                id=1,
+                name="Synthetic Company",
+                currency=RelatedRecord(id=1, name="KES"),
+            )
+        ]
+
+    async def get_currencies(
+        self,
+        company_id: int,
+        currency_ids: tuple[int, ...],
+        *,
+        page: PageRequest,
+    ) -> RecordPage[Currency]:
+        return RecordPage(
+            items=[
+                Currency(
+                    id=identifier,
+                    name="KES" if identifier == 1 else "USD",
+                    rounding=Decimal("0.01"),
+                )
+                for identifier in currency_ids
+            ]
+        )
+
+
+def _validation_line(
+    identifier: int,
+    *,
+    display_type: str,
+    account: bool = True,
+    debit: str = "0",
+    credit: str = "0",
+    amount_currency: str = "0",
+    currency_id: int | None = 40,
+    subtotal: str = "0",
+    total: str = "0",
+) -> InvoiceValidationLine:
+    return InvoiceValidationLine(
+        id=identifier,
+        display_type=display_type,
+        account=RelatedRecord(id=70 + identifier, name="Account") if account else None,
+        debit=Decimal(debit),
+        credit=Decimal(credit),
+        balance=Decimal(debit) - Decimal(credit),
+        currency=(RelatedRecord(id=currency_id, name="USD") if currency_id is not None else None),
+        amount_currency=Decimal(amount_currency),
+        subtotal=Decimal(subtotal),
+        total=Decimal(total),
+    )
+
+
+def _validation_effect(
+    lines: tuple[InvoiceValidationLine, ...],
+    *,
+    untaxed: str = "100",
+    tax: str = "20",
+    total: str = "120",
+) -> InvoiceEffect:
+    return _effect().model_copy(
+        update={
+            "state": "draft",
+            "amount_untaxed": Decimal(untaxed),
+            "amount_tax": Decimal(tax),
+            "amount_total": Decimal(total),
+            "validation_lines": lines,
+        }
+    )
+
+
+@pytest.mark.parametrize(
+    ("effect", "expected"),
+    [
+        (
+            _validation_effect(
+                (_validation_line(1, display_type="line_section", account=False),),
+                untaxed="0",
+                tax="0",
+                total="0",
+            ),
+            "NO_POSTABLE_LINES",
+        ),
+        (
+            _validation_effect(
+                (
+                    _validation_line(
+                        1,
+                        display_type="product",
+                        account=False,
+                        credit="100",
+                        amount_currency="-100",
+                        subtotal="100",
+                        total="100",
+                    ),
+                    _validation_line(2, display_type="payment_term", debit="100"),
+                ),
+                tax="0",
+                total="100",
+            ),
+            "LINE_ACCOUNT_MISSING",
+        ),
+        (
+            _validation_effect(
+                (
+                    _validation_line(
+                        1, display_type="product", credit="99", subtotal="100", total="120"
+                    ),
+                    _validation_line(2, display_type="payment_term", debit="120"),
+                )
+            ),
+            "ENTRY_UNBALANCED",
+        ),
+        (
+            _validation_effect(
+                (
+                    _validation_line(
+                        1,
+                        display_type="product",
+                        credit="100",
+                        amount_currency="-100",
+                        currency_id=41,
+                        subtotal="100",
+                        total="120",
+                    ),
+                    _validation_line(2, display_type="tax", credit="20"),
+                    _validation_line(3, display_type="payment_term", debit="120"),
+                )
+            ),
+            "CURRENCY_INCONSISTENT",
+        ),
+        (
+            _validation_effect(
+                (
+                    _validation_line(
+                        1, display_type="product", credit="100", subtotal="90", total="110"
+                    ),
+                    _validation_line(2, display_type="tax", credit="20"),
+                    _validation_line(3, display_type="payment_term", debit="120"),
+                )
+            ),
+            "TOTAL_ARITHMETIC_MISMATCH",
+        ),
+        (
+            _validation_effect(
+                (
+                    _validation_line(
+                        1, display_type="product", credit="100", subtotal="100", total="120"
+                    ),
+                    _validation_line(2, display_type="tax", credit="20"),
+                    _validation_line(3, display_type="payment_term", debit="120"),
+                ),
+                tax="10",
+            ),
+            "TAX_ARITHMETIC_MISMATCH",
+        ),
+    ],
+)
+async def test_validation_preview_reports_each_local_blocker(
+    effect: InvoiceEffect, expected: str
+) -> None:
+    _state, prepared = await prepare_validation(
+        ValidationAdapter(effect),
+        ValidateInvoiceInput(invoice_id=101, company_id=1),
+    )
+
+    assert expected in prepared.material_effects["blocking_validation_findings"]
+    assert prepared.material_effects["validation_status"] == "blocked"
+    assert prepared.needs_input is True
+
+
+async def test_validation_preview_is_locally_clear_but_defers_odoo_constraints() -> None:
+    effect = _validation_effect(
+        (
+            _validation_line(1, display_type="product", credit="100", subtotal="100", total="120"),
+            _validation_line(2, display_type="tax", credit="20"),
+            _validation_line(3, display_type="payment_term", debit="120"),
+        )
+    )
+
+    _state, prepared = await prepare_validation(
+        ValidationAdapter(effect),
+        ValidateInvoiceInput(invoice_id=101, company_id=1),
+    )
+
+    assert prepared.material_effects["blocking_validation_findings"] == []
+    assert prepared.material_effects["validation_status"] == "locally_clear_with_deferred_checks"
+    assert prepared.material_effects["deferred_checks"] == ["odoo_posting_constraints"]
+    assert prepared.needs_input is False
+
+
+async def test_validation_balance_uses_company_currency_precision() -> None:
+    effect = _validation_effect(
+        (
+            _validation_line(1, display_type="product", credit="100", subtotal="100", total="120"),
+            _validation_line(2, display_type="tax", credit="20"),
+            _validation_line(3, display_type="payment_term", debit="120.004"),
+        )
+    )
+
+    _state, prepared = await prepare_validation(
+        ValidationAdapter(effect),
+        ValidateInvoiceInput(invoice_id=101, company_id=1),
+    )
+
+    assert "ENTRY_UNBALANCED" not in prepared.material_effects["blocking_validation_findings"]

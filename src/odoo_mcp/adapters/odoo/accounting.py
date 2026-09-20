@@ -23,12 +23,14 @@ from odoo_mcp.adapters.accounting import (
     InvoiceEffect,
     InvoiceLineEffect,
     InvoiceTax,
+    InvoiceValidationLine,
     Journal,
     PageRequest,
     PartialReconciliation,
     Partner,
-    PaymentMethodLine,
+    PaymentPreviewRequest,
     PaymentRegistration,
+    PaymentRegistrationPreview,
     PaymentRoute,
     PaymentScheduleLine,
     PaymentTerm,
@@ -115,13 +117,6 @@ _BANK_STATEMENT_LINE_FIELDS = [
     "move_id",
 ]
 _PAYMENT_TERM_FIELDS = ["id", "name", "company_id"]
-_PAYMENT_METHOD_LINE_FIELDS = [
-    "id",
-    "name",
-    "journal_id",
-    "payment_method_id",
-    "payment_type",
-]
 _PARTNER_FIELDS = ["id", "name", "company_id", "customer_rank", "supplier_rank"]
 _PRODUCT_FIELDS = ["id", "name", "default_code", "company_id", "list_price", "currency_id"]
 _ACCOUNT_FIELDS = [
@@ -164,11 +159,34 @@ _INVOICE_EFFECT_LINE_FIELDS = [
     "price_subtotal",
     "price_total",
     "tax_line_id",
+    "account_id",
+    "debit",
+    "credit",
     "balance",
+    "currency_id",
+    "amount_currency",
     "analytic_distribution",
     "date_maturity",
     "amount_residual",
 ]
+
+_PAYMENT_PREVIEW_FIELDS = [
+    "available_journal_ids",
+    "journal_id",
+    "available_payment_method_line_ids",
+    "payment_method_line_id",
+    "payment_method_code",
+    "amount",
+    "currency_id",
+    "payment_date",
+    "payment_type",
+    "partner_type",
+    "company_id",
+    "can_edit_wizard",
+]
+_MAX_PAYMENT_JOURNALS = 50
+_MAX_PAYMENT_METHODS = 100
+_MAX_PAYMENT_TRANSIENTS = 200
 
 _FILTER_FIELDS: dict[str, frozenset[str]] = {
     "account.move": frozenset(
@@ -255,6 +273,15 @@ def _positive_or_zero_int(value: object) -> int:
     if not isinstance(value, int) or isinstance(value, bool) or value < 0:
         raise _invalid_response()
     return value
+
+
+def _positive_ids(value: object, *, maximum: int) -> tuple[int, ...]:
+    if not isinstance(value, (list, tuple)) or len(value) > maximum:
+        raise _invalid_response()
+    identifiers = tuple(_positive_int(item) for item in value)
+    if len(identifiers) != len(set(identifiers)):
+        raise _invalid_response()
+    return identifiers
 
 
 def _created_id(value: object) -> int:
@@ -464,16 +491,6 @@ def _normalize_payment_term(raw: RawRecord) -> PaymentTerm:
         id=_positive_int(raw.get("id")),
         name=_text(raw.get("name")),
         company_id=_optional_company_id(raw.get("company_id")),
-    )
-
-
-def _normalize_payment_method_line(raw: RawRecord) -> PaymentMethodLine:
-    return PaymentMethodLine(
-        id=_positive_int(raw.get("id")),
-        name=_text(raw.get("name")),
-        journal=_relation(raw.get("journal_id")),
-        payment_method=_relation(raw.get("payment_method_id")),
-        payment_type=_optional_text(raw.get("payment_type")),
     )
 
 
@@ -844,33 +861,6 @@ class AccountingReader:
             _normalize_payment_term,
         )
 
-    async def get_payment_method_lines(
-        self,
-        company_id: int,
-        journal_ids: tuple[int, ...],
-        *,
-        page: PageRequest = DEFAULT_PAGE_REQUEST,
-    ) -> RecordPage[PaymentMethodLine]:
-        if not journal_ids or any(
-            not isinstance(item, int) or isinstance(item, bool) or item <= 0 for item in journal_ids
-        ):
-            raise _invalid_input(
-                "The journal IDs are invalid.",
-                "Provide one or more positive journal IDs.",
-            )
-        return await self._read_page(
-            "account.payment.method.line",
-            company_id,
-            [
-                ["journal_id.company_id", "=", company_id],
-                ["journal_id", "in", list(dict.fromkeys(journal_ids))],
-            ],
-            ReadFilters(),
-            page,
-            _PAYMENT_METHOD_LINE_FIELDS,
-            _normalize_payment_method_line,
-        )
-
     async def get_partners(
         self,
         company_id: int,
@@ -973,6 +963,7 @@ class AccountingReader:
         if len(line_rows) > 1000:
             raise _invalid_response()
         invoice_lines: list[InvoiceLineEffect] = []
+        validation_lines: list[InvoiceValidationLine] = []
         tax_totals: dict[int, tuple[str, Decimal]] = {}
         schedule: list[PaymentScheduleLine] = []
         for value in line_rows:
@@ -981,6 +972,21 @@ class AccountingReader:
                 raise _invalid_response()
             display_type = _optional_text(line.get("display_type"))
             tax = _optional_relation(line.get("tax_line_id"))
+            validation_lines.append(
+                InvoiceValidationLine(
+                    id=_positive_int(line.get("id")),
+                    display_type=display_type,
+                    account=_optional_relation(line.get("account_id")),
+                    debit=_decimal(line.get("debit")),
+                    credit=_decimal(line.get("credit")),
+                    balance=_decimal(line.get("balance")),
+                    currency=_optional_relation(line.get("currency_id")),
+                    amount_currency=_decimal(line.get("amount_currency")),
+                    tax_line=tax,
+                    subtotal=_decimal(line.get("price_subtotal")),
+                    total=_decimal(line.get("price_total")),
+                )
+            )
             if tax is not None:
                 existing = tax_totals.get(tax.id)
                 if existing is not None and existing[0] != tax.name:
@@ -1038,6 +1044,7 @@ class AccountingReader:
             ),
             lines=tuple(invoice_lines),
             payment_schedule=tuple(schedule),
+            validation_lines=tuple(validation_lines),
         )
 
     async def create_draft_invoice(self, draft: InvoiceDraft) -> InvoiceEffect:
@@ -1189,85 +1196,230 @@ class AccountingReader:
             raise _invalid_response()
         return await self.get_invoice_effect(company_id, move_id)
 
-    async def get_payment_routes(
-        self, company_id: int, invoice_id: int
-    ) -> tuple[PaymentRoute, ...]:
-        invoice = await self.get_invoice_effect(company_id, invoice_id)
-        payment_type = "inbound" if invoice.move_type == "out_invoice" else "outbound"
-        journal_items: list[Journal] = []
-        cursor: str | None = None
-        while True:
-            journals = await self.get_journals(
-                company_id, page=PageRequest(limit=500, cursor=cursor)
+    async def _payment_wizard_row(
+        self,
+        request: PaymentPreviewRequest,
+        *,
+        journal_id: int | None = None,
+        payment_method_line_id: int | None = None,
+        execution: bool = False,
+    ) -> tuple[int, RawRecord]:
+        context = {
+            "allowed_company_ids": [request.company_id],
+            "active_model": "account.move",
+            "active_ids": [request.invoice_id],
+            "active_id": request.invoice_id,
+        }
+        values: dict[str, object] = {
+            "payment_date": request.payment_date.isoformat(),
+            "amount": float(request.amount),
+        }
+        if journal_id is not None:
+            values["journal_id"] = journal_id
+        if payment_method_line_id is not None:
+            values["payment_method_line_id"] = payment_method_line_id
+        ensure_accounting_action_allowed(
+            "account.payment.register",
+            "create_execution_transient" if execution else "create_preview_transient",
+        )
+        wizard_id = _created_id(
+            await self._transport.execute_method(
+                "account.payment.register",
+                "create",
+                named={"vals_list": values, "context": context},
+                company_ids=(request.company_id,),
             )
-            journal_items.extend(journals.items)
-            if journals.next_cursor is None:
-                break
-            cursor = journals.next_cursor
-        cash_ids = tuple(item.id for item in journal_items if item.journal_type in {"bank", "cash"})
-        if not cash_ids:
-            return ()
-        method_items: list[PaymentMethodLine] = []
-        cursor = None
-        while True:
-            methods = await self.get_payment_method_lines(
-                company_id,
-                cash_ids,
-                page=PageRequest(limit=500, cursor=cursor),
-            )
-            method_items.extend(methods.items)
-            if methods.next_cursor is None:
-                break
-            cursor = methods.next_cursor
-        cash_journals = {item.id: item for item in journal_items if item.id in cash_ids}
-        if any(
-            item.journal.id not in cash_journals
-            or item.journal.name != cash_journals[item.journal.id].name
-            for item in method_items
+        )
+        ensure_accounting_action_allowed("account.payment.register", "read_preview_transient")
+        result = await self._transport.execute_method(
+            "account.payment.register",
+            "read",
+            ids=(wizard_id,),
+            named={"fields": list(_PAYMENT_PREVIEW_FIELDS), "context": context},
+            company_ids=(request.company_id,),
+        )
+        if not isinstance(result, list) or len(result) != 1:
+            raise _invalid_response()
+        row = _record(result[0])
+        if (
+            _company_id(row.get("company_id")) != request.company_id
+            or _date(row.get("payment_date")) != request.payment_date
+            or _decimal(row.get("amount")) <= 0
         ):
             raise _invalid_response()
-        route_ids = [(item.journal.id, item.id) for item in method_items]
-        if len(route_ids) != len(set(route_ids)):
+        return wizard_id, row
+
+    @staticmethod
+    def _payment_row_signature(row: RawRecord) -> tuple[object, ...]:
+        return (
+            _decimal(row.get("amount")),
+            _relation(row.get("currency_id")),
+            _text(row.get("payment_type")),
+            _text(row.get("partner_type")),
+            _company_id(row.get("company_id")),
+            _boolean(row.get("can_edit_wizard")),
+            _positive_ids(row.get("available_journal_ids"), maximum=_MAX_PAYMENT_JOURNALS),
+        )
+
+    @staticmethod
+    def _payment_route(row: RawRecord, journal_id: int, method_id: int) -> PaymentRoute:
+        journal = _relation(row.get("journal_id"))
+        method = _relation(row.get("payment_method_line_id"))
+        if journal.id != journal_id or method.id != method_id:
             raise _invalid_response()
-        return tuple(
-            PaymentRoute(
-                journal=item.journal,
-                payment_method_line=RelatedRecord(
-                    id=item.id,
-                    name=item.name,
-                ),
-                payment_type=payment_type,
-                may_initiate_external_effect=item.payment_method.name.casefold() != "manual",
+        code = _optional_text(row.get("payment_method_code"))
+        return PaymentRoute(
+            journal=journal,
+            payment_method_line=method,
+            payment_method_code=code,
+            payment_type=_text(row.get("payment_type")),
+            external_effect_status=("not_initiated_by_odoo" if code == "manual" else "unknown"),
+        )
+
+    async def get_payment_registration_preview(
+        self, request: PaymentPreviewRequest
+    ) -> PaymentRegistrationPreview:
+        self._require_company(request.company_id)
+        invoice = await self.get_invoice_effect(request.company_id, request.invoice_id)
+        if (
+            invoice.state != "posted"
+            or invoice.move_type not in {"out_invoice", "in_invoice"}
+            or request.amount > invoice.amount_residual
+        ):
+            raise _invalid_input(
+                "The invoice is not eligible for payment registration.",
+                "Use a posted invoice or bill and an amount within its residual.",
             )
-            for item in method_items
-            if item.payment_type in {None, payment_type}
+        _default_id, default_row = await self._payment_wizard_row(request)
+        default_signature = self._payment_row_signature(default_row)
+        journal_ids = _positive_ids(
+            default_row.get("available_journal_ids"), maximum=_MAX_PAYMENT_JOURNALS
+        )
+        default_journal = _optional_relation(default_row.get("journal_id"))
+        default_method = _optional_relation(default_row.get("payment_method_line_id"))
+        if (default_journal is None) != (default_method is None) or (
+            default_journal is not None and default_journal.id not in journal_ids
+        ):
+            raise _invalid_response()
+        routes: list[PaymentRoute] = []
+        transient_count = 1
+        for journal_id in journal_ids:
+            transient_count += 1
+            if transient_count > _MAX_PAYMENT_TRANSIENTS:
+                raise _invalid_response()
+            _journal_wizard_id, journal_row = await self._payment_wizard_row(
+                request, journal_id=journal_id
+            )
+            if (
+                self._payment_row_signature(journal_row) != default_signature
+                or _relation(journal_row.get("journal_id")).id != journal_id
+            ):
+                raise _invalid_response()
+            method_ids = _positive_ids(
+                journal_row.get("available_payment_method_line_ids"),
+                maximum=_MAX_PAYMENT_METHODS,
+            )
+            selected_method = _optional_relation(journal_row.get("payment_method_line_id"))
+            if selected_method is not None and selected_method.id not in method_ids:
+                raise _invalid_response()
+            for method_id in method_ids:
+                if selected_method is not None and method_id == selected_method.id:
+                    method_row = journal_row
+                else:
+                    transient_count += 1
+                    if transient_count > _MAX_PAYMENT_TRANSIENTS:
+                        raise _invalid_response()
+                    _method_wizard_id, method_row = await self._payment_wizard_row(
+                        request,
+                        journal_id=journal_id,
+                        payment_method_line_id=method_id,
+                    )
+                    if self._payment_row_signature(method_row) != default_signature:
+                        raise _invalid_response()
+                routes.append(self._payment_route(method_row, journal_id, method_id))
+        route_ids = [(item.journal.id, item.payment_method_line.id) for item in routes]
+        default_route = (
+            (default_journal.id, default_method.id)
+            if default_journal is not None and default_method is not None
+            else None
+        )
+        if len(route_ids) != len(set(route_ids)) or (
+            default_route is not None and default_route not in route_ids
+        ):
+            raise _invalid_response()
+        currency = _relation(default_row.get("currency_id"))
+        amount = _decimal(default_row.get("amount"))
+        expected_payment_type = "inbound" if invoice.move_type == "out_invoice" else "outbound"
+        expected_partner_type = "customer" if invoice.move_type == "out_invoice" else "supplier"
+        if (
+            currency.id != invoice.currency.id
+            or amount > invoice.amount_residual
+            or _text(default_row.get("payment_type")) != expected_payment_type
+            or _text(default_row.get("partner_type")) != expected_partner_type
+        ):
+            raise _invalid_response()
+        return PaymentRegistrationPreview(
+            invoice_id=request.invoice_id,
+            company_id=request.company_id,
+            payment_date=_date(default_row.get("payment_date")),
+            amount=amount,
+            currency=currency,
+            payment_type=_text(default_row.get("payment_type")),
+            partner_type=_text(default_row.get("partner_type")),
+            can_edit_wizard=_boolean(default_row.get("can_edit_wizard")),
+            routes=tuple(routes),
+            default_journal_id=default_journal.id if default_journal else None,
+            default_payment_method_line_id=default_method.id if default_method else None,
         )
 
     async def register_payment(self, registration: PaymentRegistration) -> InvoiceEffect:
         self._require_company(registration.company_id)
-        ensure_accounting_action_allowed("account.payment.register", "create_transient")
+        request = PaymentPreviewRequest(
+            invoice_id=registration.invoice_id,
+            company_id=registration.company_id,
+            payment_date=registration.payment_date,
+            amount=registration.amount,
+        )
+        effect = await self.get_invoice_effect(registration.company_id, registration.invoice_id)
+        if effect.state != "posted" or registration.amount > effect.amount_residual:
+            raise _invalid_input(
+                "The invoice is no longer eligible for payment registration.",
+                "Refresh the invoice and retry with a new idempotency key.",
+            )
+        wizard_id, row = await self._payment_wizard_row(
+            request,
+            journal_id=registration.journal_id,
+            payment_method_line_id=registration.payment_method_line_id,
+            execution=True,
+        )
+        available_journals = _positive_ids(
+            row.get("available_journal_ids"), maximum=_MAX_PAYMENT_JOURNALS
+        )
+        available_methods = _positive_ids(
+            row.get("available_payment_method_line_ids"), maximum=_MAX_PAYMENT_METHODS
+        )
+        route = self._payment_route(
+            row, registration.journal_id, registration.payment_method_line_id
+        )
+        if (
+            registration.journal_id not in available_journals
+            or registration.payment_method_line_id not in available_methods
+            or _relation(row.get("currency_id")).id != effect.currency.id
+            or _decimal(row.get("amount")) != registration.amount
+            or _text(row.get("payment_type"))
+            != ("inbound" if effect.move_type == "out_invoice" else "outbound")
+            or _text(row.get("partner_type"))
+            != ("customer" if effect.move_type == "out_invoice" else "supplier")
+            or route.payment_method_code != registration.payment_method_code
+            or route.external_effect_status != registration.external_effect_status
+        ):
+            raise _invalid_response()
         context = {
             "allowed_company_ids": [registration.company_id],
             "active_model": "account.move",
             "active_ids": [registration.invoice_id],
             "active_id": registration.invoice_id,
         }
-        wizard_id = _created_id(
-            await self._transport.execute_method(
-                "account.payment.register",
-                "create",
-                named={
-                    "vals_list": {
-                        "payment_date": registration.payment_date.isoformat(),
-                        "amount": float(registration.amount),
-                        "journal_id": registration.journal_id,
-                        "payment_method_line_id": registration.payment_method_line_id,
-                    },
-                    "context": context,
-                },
-                company_ids=(registration.company_id,),
-            )
-        )
         ensure_accounting_action_allowed("account.payment.register", "execute_standard_workflow")
         await self._transport.execute_method(
             "account.payment.register",

@@ -22,7 +22,8 @@ from odoo_mcp.adapters.accounting import (
     PageRequest,
     PartialReconciliation,
     Partner,
-    PaymentMethodLine,
+    PaymentPreviewRequest,
+    PaymentRegistration,
     PaymentTerm,
     Product,
     ReadFilters,
@@ -113,6 +114,67 @@ class FakeTransport:
         return None
 
 
+class PaymentWizardTransport(FakeTransport):
+    def __init__(self, rows: dict[str, list[dict[str, Any]]]) -> None:
+        super().__init__(rows)
+        self.wizard_values: dict[int, dict[str, Any]] = {}
+        self.next_wizard_id = 5000
+        self.available_journal_ids = [10, 20]
+
+    async def execute_method(
+        self,
+        model: str,
+        method: str,
+        *,
+        ids: tuple[int, ...] = (),
+        positional: list[Any] | None = None,
+        named: dict[str, Any] | None = None,
+        company_ids: tuple[int, ...],
+    ) -> Any:
+        self.executions.append(
+            {
+                "model": model,
+                "method": method,
+                "ids": ids,
+                "positional": positional,
+                "named": named,
+                "company_ids": company_ids,
+            }
+        )
+        assert model == "account.payment.register"
+        if method == "create":
+            self.next_wizard_id += 1
+            assert named is not None
+            self.wizard_values[self.next_wizard_id] = dict(named["vals_list"])
+            return self.next_wizard_id
+        if method == "action_create_payments":
+            return True
+        assert method == "read" and len(ids) == 1
+        values = self.wizard_values[ids[0]]
+        journal_id = values.get("journal_id", 10)
+        method_id = values.get("payment_method_line_id", 100 if journal_id == 10 else 200)
+        methods = [100, 101] if journal_id == 10 else [200]
+        method_name = "Localized Manual" if method_id == 100 else f"Method {method_id}"
+        method_code = "manual" if method_id == 100 else "electronic"
+        return [
+            {
+                "id": ids[0],
+                "available_journal_ids": self.available_journal_ids,
+                "journal_id": [journal_id, f"Journal {journal_id}"],
+                "available_payment_method_line_ids": methods,
+                "payment_method_line_id": [method_id, method_name],
+                "payment_method_code": method_code,
+                "amount": values["amount"],
+                "currency_id": [40, "USD"],
+                "payment_date": values["payment_date"],
+                "payment_type": "inbound",
+                "partner_type": "customer",
+                "company_id": [1, "Synthetic Company"],
+                "can_edit_wizard": True,
+            }
+        ]
+
+
 def _move(identifier: int) -> dict[str, Any]:
     return {
         "id": identifier,
@@ -188,7 +250,12 @@ async def test_draft_invoice_creation_uses_allowlisted_create_and_reads_back_eff
                     "price_subtotal": "20",
                     "price_total": "23.20",
                     "tax_line_id": False,
+                    "account_id": [70, "Revenue"],
+                    "debit": "0",
+                    "credit": "20",
                     "balance": "-20",
+                    "currency_id": [40, "USD"],
+                    "amount_currency": "-20",
                     "analytic_distribution": {"77": 100},
                     "date_maturity": False,
                     "amount_residual": "0",
@@ -204,7 +271,12 @@ async def test_draft_invoice_creation_uses_allowlisted_create_and_reads_back_eff
                     "price_subtotal": "0",
                     "price_total": "0",
                     "tax_line_id": [55, "VAT"],
+                    "account_id": [71, "Tax"],
+                    "debit": "0",
+                    "credit": "3.20",
                     "balance": "-3.20",
+                    "currency_id": [40, "USD"],
+                    "amount_currency": "-3.20",
                     "analytic_distribution": {},
                     "date_maturity": False,
                     "amount_residual": "0",
@@ -220,7 +292,12 @@ async def test_draft_invoice_creation_uses_allowlisted_create_and_reads_back_eff
                     "price_subtotal": "0",
                     "price_total": "0",
                     "tax_line_id": False,
+                    "account_id": [72, "Receivable"],
+                    "debit": "23.20",
+                    "credit": "0",
                     "balance": "23.20",
+                    "currency_id": [40, "USD"],
+                    "amount_currency": "23.20",
                     "analytic_distribution": {},
                     "date_maturity": "2026-10-20",
                     "amount_residual": "23.20",
@@ -258,6 +335,138 @@ async def test_draft_invoice_creation_uses_allowlisted_create_and_reads_back_eff
     assert effect.taxes[0].amount == Decimal("3.20")
     assert effect.lines[0].total == Decimal("23.20")
     assert effect.payment_schedule[0].amount == Decimal("23.20")
+
+
+async def test_payment_preview_uses_only_bounded_wizard_create_read_routes(
+    connection: OdooConnectionSettings,
+) -> None:
+    invoice = _invoice_effect_row(101)
+    invoice.update(
+        {
+            "name": "INV/101",
+            "state": "posted",
+            "amount_residual": "100",
+            "amount_total": "100",
+            "amount_untaxed": "100",
+            "amount_tax": "0",
+        }
+    )
+    transport = PaymentWizardTransport({"account.move": [invoice], "account.move.line": []})
+    client = await _validated_client(connection, transport)
+
+    preview = await client.get_payment_registration_preview(
+        PaymentPreviewRequest(
+            invoice_id=101,
+            company_id=1,
+            payment_date=date(2026, 9, 20),
+            amount=Decimal("100"),
+        )
+    )
+
+    assert [(route.journal.id, route.payment_method_line.id) for route in preview.routes] == [
+        (10, 100),
+        (10, 101),
+        (20, 200),
+    ]
+    assert preview.routes[0].payment_method_line.name == "Localized Manual"
+    assert preview.routes[0].external_effect_status == "not_initiated_by_odoo"
+    assert preview.routes[1].external_effect_status == "unknown"
+    assert preview.default_journal_id == 10
+    assert preview.default_payment_method_line_id == 100
+    assert [call["method"] for call in transport.executions] == [
+        "create",
+        "read",
+        "create",
+        "read",
+        "create",
+        "read",
+        "create",
+        "read",
+    ]
+    assert all(call["model"] == "account.payment.register" for call in transport.executions)
+    expected_fields = [
+        "available_journal_ids",
+        "journal_id",
+        "available_payment_method_line_ids",
+        "payment_method_line_id",
+        "payment_method_code",
+        "amount",
+        "currency_id",
+        "payment_date",
+        "payment_type",
+        "partner_type",
+        "company_id",
+        "can_edit_wizard",
+    ]
+    assert all(
+        call["named"]["fields"] == expected_fields
+        for call in transport.executions
+        if call["method"] == "read"
+    )
+    assert not {"search", "search_read", "write", "unlink", "action_create_payments"} & {
+        call["method"] for call in transport.executions
+    }
+
+
+async def test_payment_execution_uses_fresh_wizard_read_before_standard_action(
+    connection: OdooConnectionSettings,
+) -> None:
+    invoice = _invoice_effect_row(101)
+    invoice.update(
+        {
+            "name": "INV/101",
+            "state": "posted",
+            "amount_residual": "100",
+            "amount_total": "100",
+            "amount_untaxed": "100",
+            "amount_tax": "0",
+        }
+    )
+    transport = PaymentWizardTransport({"account.move": [invoice], "account.move.line": []})
+    client = await _validated_client(connection, transport)
+
+    await client.register_payment(
+        PaymentRegistration(
+            invoice_id=101,
+            company_id=1,
+            payment_date=date(2026, 9, 20),
+            amount=Decimal("100"),
+            journal_id=10,
+            payment_method_line_id=100,
+            payment_method_code="manual",
+            external_effect_status="not_initiated_by_odoo",
+        )
+    )
+
+    assert [call["method"] for call in transport.executions] == [
+        "create",
+        "read",
+        "action_create_payments",
+    ]
+    assert transport.executions[-1]["ids"] == transport.executions[-2]["ids"]
+
+
+async def test_payment_preview_rejects_excessive_wizard_routes(
+    connection: OdooConnectionSettings,
+) -> None:
+    invoice = _invoice_effect_row(101)
+    invoice.update({"state": "posted", "amount_residual": "100"})
+    transport = PaymentWizardTransport({"account.move": [invoice], "account.move.line": []})
+    transport.available_journal_ids = list(range(1, 52))
+    client = await _validated_client(connection, transport)
+
+    with pytest.raises(OdooMcpError) as caught:
+        await client.get_payment_registration_preview(
+            PaymentPreviewRequest(
+                invoice_id=101,
+                company_id=1,
+                payment_date=date(2026, 9, 20),
+                amount=Decimal("100"),
+            )
+        )
+
+    assert caught.value.code is ErrorCode.ODOO_API_ERROR
+    assert [call["method"] for call in transport.executions] == ["create", "read"]
 
 
 async def test_account_moves_are_typed_scoped_and_cursor_paginated(
@@ -376,11 +585,6 @@ async def test_currency_response_must_match_requested_ids(
             ["company_id", "=", 1],
         ),
         ("get_payment_terms", "account.payment.term", ["company_id", "in", [False, 1]]),
-        (
-            "get_payment_method_lines",
-            "account.payment.method.line",
-            ["journal_id.company_id", "=", 1],
-        ),
         ("get_partners", "res.partner", ["company_id", "in", [False, 1]]),
         ("get_products", "product.product", ["company_id", "in", [False, 1]]),
         ("get_account_accounts", "account.account", ["company_ids", "in", [1]]),
@@ -409,8 +613,6 @@ async def test_every_accounting_read_adds_an_explicit_company_scope(
             journal_id=30,
             page=page,
         )
-    elif method == "get_payment_method_lines":
-        await client.get_payment_method_lines(1, (30,), page=page)
     elif method in {
         "get_account_move_lines",
         "get_partial_reconciliations",
@@ -615,15 +817,6 @@ async def test_every_accounting_record_shape_is_normalized(
             }
         ],
         "account.payment.term": [{"id": 11, "name": "Immediate", "company_id": False}],
-        "account.payment.method.line": [
-            {
-                "id": 12,
-                "name": "Manual",
-                "journal_id": [8, "Bank"],
-                "payment_method_id": [13, "Manual"],
-                "payment_type": "inbound",
-            }
-        ],
         "res.partner": [{"id": 14, "name": "Partner", "company_id": False}],
         "product.product": [
             {
@@ -671,7 +864,6 @@ async def test_every_accounting_record_shape_is_normalized(
             page=page,
         ),
         await client.get_payment_terms(1, page=page),
-        await client.get_payment_method_lines(1, (8,), page=page),
         await client.get_partners(1, ReadFilters(), page=page),
         await client.get_products(1, ReadFilters(), page=page),
         await client.get_account_accounts(1, ReadFilters(), page=page),
@@ -684,7 +876,6 @@ async def test_every_accounting_record_shape_is_normalized(
         Journal,
         BankStatementLine,
         PaymentTerm,
-        PaymentMethodLine,
         Partner,
         Product,
         Account,
@@ -696,7 +887,7 @@ async def test_every_accounting_record_shape_is_normalized(
     )
     assert results[0].items[0].balance == Decimal("10.00")
     assert results[0].items[0].analytic_distribution == {"6": Decimal("100")}
-    assert results[8].items[0].company_ids == (1,)
+    assert results[7].items[0].company_ids == (1,)
 
 
 async def test_cross_company_response_is_rejected(

@@ -38,8 +38,14 @@ async def test_write_method_payloads_match_odoo_18_and_19_contracts(
         assert request.url.path in {
             "/json/2/account.move/action_post",
             "/json/2/account.move/create",
+            "/json/2/account.payment.register/create",
+            "/json/2/account.payment.register/read",
         }
-        return httpx.Response(200, json=901 if request.url.path.endswith("/create") else True)
+        if request.url.path.endswith("/create"):
+            return httpx.Response(200, json=901)
+        if request.url.path.endswith("/read"):
+            return httpx.Response(200, json=[{"id": 501}])
+        return httpx.Response(200, json=True)
 
     def rpc_handler(request: httpx.Request) -> httpx.Response:
         body: dict[str, Any] = __import__("json").loads(request.content)
@@ -64,12 +70,38 @@ async def test_write_method_payloads_match_odoo_18_and_19_contracts(
             named={"vals_list": {"move_type": "out_invoice"}},
             company_ids=(1,),
         )
+        await json2.execute_method(
+            "account.payment.register",
+            "create",
+            named={"vals_list": {"amount": 100}},
+            company_ids=(1,),
+        )
+        await json2.execute_method(
+            "account.payment.register",
+            "read",
+            ids=(501,),
+            named={"fields": ["journal_id"]},
+            company_ids=(1,),
+        )
         await rpc.authenticate()
         await rpc.execute_method("account.move", "action_post", ids=(101,), company_ids=(1,))
         await rpc.execute_method(
             "account.move",
             "create",
             named={"vals_list": {"move_type": "out_invoice"}},
+            company_ids=(1,),
+        )
+        await rpc.execute_method(
+            "account.payment.register",
+            "create",
+            named={"vals_list": {"amount": 100}},
+            company_ids=(1,),
+        )
+        await rpc.execute_method(
+            "account.payment.register",
+            "read",
+            ids=(501,),
+            named={"fields": ["journal_id"]},
             company_ids=(1,),
         )
     finally:
@@ -80,6 +112,15 @@ async def test_write_method_payloads_match_odoo_18_and_19_contracts(
         {"ids": [101], "context": {"allowed_company_ids": [1]}},
         {
             "vals_list": {"move_type": "out_invoice"},
+            "context": {"allowed_company_ids": [1]},
+        },
+        {
+            "vals_list": {"amount": 100},
+            "context": {"allowed_company_ids": [1]},
+        },
+        {
+            "ids": [501],
+            "fields": ["journal_id"],
             "context": {"allowed_company_ids": [1]},
         },
     ]
@@ -93,6 +134,18 @@ async def test_write_method_payloads_match_odoo_18_and_19_contracts(
         [{"move_type": "out_invoice"}],
     ]
     assert rpc_create_args[6] == {"context": {"allowed_company_ids": [1]}}
+    rpc_payment_create_args = rpc_requests[3]["params"]["args"]
+    assert rpc_payment_create_args[3:6] == [
+        "account.payment.register",
+        "create",
+        [{"amount": 100}],
+    ]
+    rpc_read_args = rpc_requests[4]["params"]["args"]
+    assert rpc_read_args[3:6] == ["account.payment.register", "read", [[501]]]
+    assert rpc_read_args[6] == {
+        "fields": ["journal_id"],
+        "context": {"allowed_company_ids": [1]},
+    }
 
 
 @pytest.mark.parametrize(

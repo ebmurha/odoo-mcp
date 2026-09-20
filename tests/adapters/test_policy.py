@@ -27,7 +27,6 @@ def test_policy_constants_match_the_public_adapter_contract() -> None:
                 "account.bank.statement.line",
                 "account.payment",
                 "account.payment.term",
-                "account.payment.method.line",
                 "account.account",
                 "account.partial.reconcile",
                 "account.analytic.account",
@@ -40,7 +39,14 @@ def test_policy_constants_match_the_public_adapter_contract() -> None:
     assert ACCOUNTING_MODEL_ACTION_ALLOWLIST == {
         "account.move": frozenset({"create_draft", "post_existing_draft", "reverse_existing_move"}),
         "account.move.reversal": frozenset({"create_transient", "execute_standard_workflow"}),
-        "account.payment.register": frozenset({"create_transient", "execute_standard_workflow"}),
+        "account.payment.register": frozenset(
+            {
+                "create_preview_transient",
+                "read_preview_transient",
+                "create_execution_transient",
+                "execute_standard_workflow",
+            }
+        ),
     }
     assert FIELD_DENYLIST == frozenset(
         {"password", "password_crypt", "api_key", "bank_account_number", "acc_number"}
@@ -82,7 +88,9 @@ def test_only_the_exact_accounting_actions_are_allowed() -> None:
     ensure_accounting_action_allowed("account.move", "create_draft")
     ensure_accounting_action_allowed("account.move", "post_existing_draft")
     ensure_accounting_action_allowed("account.move.reversal", "execute_standard_workflow")
-    ensure_accounting_action_allowed("account.payment.register", "create_transient")
+    ensure_accounting_action_allowed("account.payment.register", "create_preview_transient")
+    ensure_accounting_action_allowed("account.payment.register", "read_preview_transient")
+    ensure_accounting_action_allowed("account.payment.register", "create_execution_transient")
 
 
 def test_only_exact_capability_sentinel_is_probeable() -> None:

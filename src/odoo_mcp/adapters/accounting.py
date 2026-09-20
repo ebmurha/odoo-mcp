@@ -159,14 +159,6 @@ class PaymentTerm(AdapterValue):
     company_id: int | None = Field(default=None, gt=0)
 
 
-class PaymentMethodLine(AdapterValue):
-    id: int = Field(gt=0)
-    name: str
-    journal: RelatedRecord
-    payment_method: RelatedRecord
-    payment_type: str | None = None
-
-
 class Partner(AdapterValue):
     id: int = Field(gt=0)
     name: str
@@ -219,6 +211,20 @@ class InvoiceLineEffect(AdapterValue):
     analytic_distribution: dict[str, Decimal] = Field(default_factory=dict)
 
 
+class InvoiceValidationLine(AdapterValue):
+    id: int = Field(gt=0)
+    display_type: str | None = None
+    account: RelatedRecord | None = None
+    debit: Decimal
+    credit: Decimal
+    balance: Decimal
+    currency: RelatedRecord | None = None
+    amount_currency: Decimal
+    tax_line: RelatedRecord | None = None
+    subtotal: Decimal
+    total: Decimal
+
+
 class PaymentScheduleLine(AdapterValue):
     due_date: Date
     amount: Decimal
@@ -245,6 +251,7 @@ class InvoiceEffect(AdapterValue):
     taxes: tuple[InvoiceTax, ...] = ()
     lines: tuple[InvoiceLineEffect, ...] = ()
     payment_schedule: tuple[PaymentScheduleLine, ...] = ()
+    validation_lines: tuple[InvoiceValidationLine, ...] = ()
 
 
 class InvoiceDraftLine(AdapterValue):
@@ -271,8 +278,30 @@ class InvoiceDraft(AdapterValue):
 class PaymentRoute(AdapterValue):
     journal: RelatedRecord
     payment_method_line: RelatedRecord
+    payment_method_code: str | None = None
     payment_type: str
-    may_initiate_external_effect: bool
+    external_effect_status: Literal["not_initiated_by_odoo", "unknown"]
+
+
+class PaymentPreviewRequest(AdapterValue):
+    invoice_id: int = Field(gt=0)
+    company_id: int = Field(gt=0)
+    payment_date: Date
+    amount: Decimal = Field(gt=0)
+
+
+class PaymentRegistrationPreview(AdapterValue):
+    invoice_id: int = Field(gt=0)
+    company_id: int = Field(gt=0)
+    payment_date: Date
+    amount: Decimal = Field(gt=0)
+    currency: RelatedRecord
+    payment_type: str
+    partner_type: str
+    can_edit_wizard: bool
+    routes: tuple[PaymentRoute, ...]
+    default_journal_id: int | None = Field(default=None, gt=0)
+    default_payment_method_line_id: int | None = Field(default=None, gt=0)
 
 
 class PaymentRegistration(AdapterValue):
@@ -282,3 +311,5 @@ class PaymentRegistration(AdapterValue):
     amount: Decimal = Field(gt=0)
     journal_id: int = Field(gt=0)
     payment_method_line_id: int = Field(gt=0)
+    payment_method_code: str | None = None
+    external_effect_status: Literal["not_initiated_by_odoo", "unknown"]

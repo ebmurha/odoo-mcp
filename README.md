@@ -134,10 +134,14 @@ boundary and never expand the technical user's Odoo permissions.
 - `create_customer_invoice` and `create_supplier_bill` provide non-mutating,
   input-only previews by default. Explicit execution creates one unposted
   draft and reads back Odoo's effective accounting results.
-- `create_credit_note` creates one linked full draft reversal;
-  `validate_invoice` posts one existing draft; and `register_payment` delegates
-  to Odoo's configured payment-registration workflow. Each defaults to preview,
-  requires an idempotency key for execution, and never changes configuration.
+- `create_credit_note` creates one linked full draft reversal. Before posting,
+  `validate_invoice` reports locally determinable balance, currency, account,
+  total, and tax blockers while explicitly deferring Odoo-only posting checks.
+- `register_payment` delegates route discovery and execution to Odoo's standard
+  payment-registration wizard. Preview may create bounded ephemeral wizard
+  records but never executes a payment or alters accounting records. Non-manual
+  or unidentified methods report their possible external effect as unknown.
+  Execution requires an idempotency key and a freshly revalidated wizard route.
 
 Report results are deterministically ordered and cursor-paginated with a default
 limit of 100 and maximum of 500. Empty data is a successful empty report;

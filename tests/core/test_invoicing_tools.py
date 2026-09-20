@@ -279,3 +279,59 @@ async def test_invoice_execution_distinguishes_known_denial_from_unknown_outcome
             "attempted",
             "failed" if failure == "permission" else "unknown",
         ]
+
+
+async def test_invalid_credit_and_payment_inputs_are_structured_and_audited(
+    connection: OdooConnectionSettings, tmp_path
+) -> None:
+    storage = Storage.open(tmp_path / "invalid-writes.sqlite3")
+    server = create_mcp_server(
+        Resolver(_binding(connection)),
+        adapter_factory=lambda _connection: InvoiceAdapter(InvoiceState()),
+        storage=storage,
+    )
+    calls = [
+        (
+            "create_credit_note",
+            {
+                "company_id": 1,
+                "original_move_id": 101,
+                "credit_date": "2026-09-20",
+                "reason": "   ",
+            },
+        ),
+        (
+            "register_payment",
+            {
+                "company_id": 1,
+                "invoice_id": 101,
+                "payment_date": "2026-09-20",
+                "amount": "-1",
+            },
+        ),
+        (
+            "register_payment",
+            {
+                "company_id": 1,
+                "invoice_id": 101,
+                "payment_date": "2026-09-20",
+                "journal_id": 30,
+            },
+        ),
+    ]
+
+    async with Client(server) as client:
+        results = [await client.call_tool(name, arguments) for name, arguments in calls]
+
+    assert all(result.is_error is False for result in results)
+    assert all(result.structured_content is not None for result in results)
+    assert [result.structured_content["error_code"] for result in results] == [
+        "INVALID_INPUT",
+        "INVALID_INPUT",
+        "INVALID_INPUT",
+    ]
+    assert [item.tool_name for item in storage.audit.list_for_tenant("tenant-invoice")] == [
+        "create_credit_note",
+        "register_payment",
+        "register_payment",
+    ]

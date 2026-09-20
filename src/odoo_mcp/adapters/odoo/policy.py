@@ -18,7 +18,6 @@ MODULE_MODEL_READ_ALLOWLIST: dict[str, frozenset[str]] = {
             "account.bank.statement.line",
             "account.payment",
             "account.payment.term",
-            "account.payment.method.line",
             "account.account",
             "account.partial.reconcile",
             "account.analytic.account",
@@ -32,7 +31,14 @@ MODULE_MODEL_READ_ALLOWLIST: dict[str, frozenset[str]] = {
 ACCOUNTING_MODEL_ACTION_ALLOWLIST: dict[str, frozenset[str]] = {
     "account.move": frozenset({"create_draft", "post_existing_draft", "reverse_existing_move"}),
     "account.move.reversal": frozenset({"create_transient", "execute_standard_workflow"}),
-    "account.payment.register": frozenset({"create_transient", "execute_standard_workflow"}),
+    "account.payment.register": frozenset(
+        {
+            "create_preview_transient",
+            "read_preview_transient",
+            "create_execution_transient",
+            "execute_standard_workflow",
+        }
+    ),
 }
 
 FIELD_DENYLIST = frozenset(

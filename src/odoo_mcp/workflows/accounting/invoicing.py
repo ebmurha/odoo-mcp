@@ -6,7 +6,7 @@ import base64
 import binascii
 from collections import defaultdict
 from datetime import date
-from decimal import Decimal
+from decimal import ROUND_HALF_UP, Decimal
 
 from odoo_mcp.adapters.accounting import (
     AccountMove,
@@ -18,6 +18,7 @@ from odoo_mcp.adapters.accounting import (
     PageRequest,
     PartialReconciliation,
     Partner,
+    PaymentPreviewRequest,
     PaymentRegistration,
     ReadFilters,
 )
@@ -407,7 +408,7 @@ async def _validate_draft_references(
 
 
 def _effect(effect: InvoiceEffect) -> dict[str, object]:
-    return effect.model_dump(mode="json")
+    return effect.model_dump(mode="json", exclude={"validation_lines"})
 
 
 async def prepare_invoice_draft(
@@ -468,12 +469,82 @@ async def prepare_validation(
             "The document is not an eligible draft invoice, bill, or credit note.",
             "Refresh the document and submit an eligible draft.",
         )
+    companies = await adapter.get_companies()
+    company = next((item for item in companies if item.id == request.company_id), None)
+    if company is None or company.currency is None:
+        raise OdooMcpError(
+            ErrorCode.ODOO_API_ERROR,
+            "Odoo returned incomplete company currency data.",
+            "Correct the authorized company currency and retry.",
+        )
+    currency_ids = tuple(dict.fromkeys((company.currency.id, effect.currency.id)))
+    currencies = await adapter.get_currencies(
+        request.company_id, currency_ids, page=PageRequest(limit=len(currency_ids))
+    )
+    currency_by_id = {item.id: item for item in currencies.items}
+    if set(currency_by_id) != set(currency_ids):
+        raise OdooMcpError(
+            ErrorCode.ODOO_API_ERROR,
+            "Odoo returned incomplete currency precision data.",
+            "Correct the configured currencies and retry.",
+        )
+
+    def rounded(value: Decimal, currency_id: int) -> Decimal:
+        increment = currency_by_id[currency_id].rounding
+        return (value / increment).quantize(Decimal("1"), rounding=ROUND_HALF_UP) * increment
+
+    findings: list[str] = []
+    postable = [
+        line
+        for line in effect.validation_lines
+        if line.display_type not in {"line_section", "line_note"}
+    ]
+    if not postable:
+        findings.append("NO_POSTABLE_LINES")
+    if any(line.account is None for line in postable):
+        findings.append("LINE_ACCOUNT_MISSING")
+    debit = sum((line.debit for line in postable), Decimal("0"))
+    credit = sum((line.credit for line in postable), Decimal("0"))
+    if (
+        rounded(debit, company.currency.id) != rounded(credit, company.currency.id)
+        or rounded(sum((line.balance for line in postable), Decimal("0")), company.currency.id) != 0
+        or any(
+            rounded(line.debit - line.credit, company.currency.id)
+            != rounded(line.balance, company.currency.id)
+            for line in postable
+        )
+    ):
+        findings.append("ENTRY_UNBALANCED")
+    if any(
+        line.amount_currency != 0
+        and (line.currency is None or line.currency.id != effect.currency.id)
+        for line in postable
+    ):
+        findings.append("CURRENCY_INCONSISTENT")
+    product_lines = [
+        line for line in effect.validation_lines if line.display_type in {None, "product"}
+    ]
+    subtotal = sum((abs(line.subtotal) for line in product_lines), Decimal("0"))
+    total = sum((abs(line.total) for line in product_lines), Decimal("0"))
+    if rounded(subtotal, effect.currency.id) != rounded(
+        abs(effect.amount_untaxed), effect.currency.id
+    ) or rounded(total, effect.currency.id) != rounded(
+        abs(effect.amount_total), effect.currency.id
+    ):
+        findings.append("TOTAL_ARITHMETIC_MISMATCH")
+    if rounded(abs(effect.amount_untaxed) + abs(effect.amount_tax), effect.currency.id) != rounded(
+        abs(effect.amount_total), effect.currency.id
+    ):
+        findings.append("TAX_ARITHMETIC_MISMATCH")
     return effect, PreparedWrite(
         proposed_action={"action": "post_existing_draft", "invoice_id": effect.id},
         material_effects={
             "invoice": _effect(effect),
-            "blocking_validation_findings": [],
+            "blocking_validation_findings": findings,
+            "validation_status": ("blocked" if findings else "locally_clear_with_deferred_checks"),
+            "deferred_checks": ["odoo_posting_constraints"],
         },
+        needs_input=bool(findings),
     )
 
 
@@ -510,7 +581,15 @@ async def prepare_payment(
     amount = request.amount or effect.amount_residual
     if amount <= 0 or amount > effect.amount_residual:
         raise _invalid("The payment amount is invalid.", "Use a positive amount within residual.")
-    routes = await adapter.get_payment_routes(request.company_id, request.invoice_id)
+    preview = await adapter.get_payment_registration_preview(
+        PaymentPreviewRequest(
+            invoice_id=request.invoice_id,
+            company_id=request.company_id,
+            payment_date=request.payment_date,
+            amount=amount,
+        )
+    )
+    routes = preview.routes
     selected = [
         route
         for route in routes
@@ -527,6 +606,11 @@ async def prepare_payment(
                 material_effects={
                     "reason_code": "PAYMENT_ROUTE_SELECTION_REQUIRED",
                     "valid_choices": choices,
+                    "preparation_state": "odoo_transient_created",
+                    "amount": str(preview.amount),
+                    "currency": preview.currency.model_dump(),
+                    "expected_invoice_state": "unknown_until_execution",
+                    "external_effect_status": "unknown",
                 },
                 needs_input=True,
             ),
@@ -536,9 +620,11 @@ async def prepare_payment(
         invoice_id=effect.id,
         company_id=request.company_id,
         payment_date=request.payment_date,
-        amount=amount,
+        amount=preview.amount,
         journal_id=route.journal.id,
         payment_method_line_id=route.payment_method_line.id,
+        payment_method_code=route.payment_method_code,
+        external_effect_status=route.external_effect_status,
     )
     return (
         effect,
@@ -546,10 +632,12 @@ async def prepare_payment(
         PreparedWrite(
             proposed_action={"action": "register_payment", "invoice_id": effect.id},
             material_effects={
-                "amount": str(amount),
-                "currency": effect.currency.model_dump(),
+                "amount": str(preview.amount),
+                "currency": preview.currency.model_dump(),
                 "selected_route": route.model_dump(mode="json"),
-                "expected_invoice_state_known": False,
+                "preparation_state": "odoo_transient_created",
+                "expected_invoice_state": "unknown_until_execution",
+                "external_effect_status": route.external_effect_status,
             },
         ),
     )

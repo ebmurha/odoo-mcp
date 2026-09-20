@@ -20,7 +20,6 @@ _SPEC.loader.exec_module(live)
 
 class EmptyJournalAdapter:
     def __init__(self) -> None:
-        self.payment_method_lines_called = False
         self.closed = False
 
     async def get_companies(self) -> list[Company]:
@@ -37,10 +36,6 @@ class EmptyJournalAdapter:
     async def get_journals(self, *args: Any, **kwargs: Any) -> RecordPage[Any]:
         return RecordPage(items=[])
 
-    async def get_payment_method_lines(self, *args: Any, **kwargs: Any) -> RecordPage[Any]:
-        self.payment_method_lines_called = True
-        return RecordPage(items=[])
-
     async def close(self) -> None:
         self.closed = True
 
@@ -54,7 +49,7 @@ class EmptyJournalAdapter:
         return empty_read
 
 
-async def test_live_qualification_cannot_pass_without_payment_method_line_read(
+async def test_live_qualification_cannot_pass_without_authorized_journal(
     monkeypatch: pytest.MonkeyPatch,
     connection: OdooConnectionSettings,
 ) -> None:
@@ -78,5 +73,4 @@ async def test_live_qualification_cannot_pass_without_payment_method_line_read(
         await live._qualify()
 
     assert caught.value.code.value == "CAPABILITY_NOT_AVAILABLE"
-    assert adapter.payment_method_lines_called is False
     assert adapter.closed is True

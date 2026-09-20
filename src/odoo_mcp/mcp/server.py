@@ -347,6 +347,72 @@ def create_mcp_server(
                 LOGGER.warning("Accounting report audit persistence failed; details suppressed.")
         return AccountingToolResponse.from_error(error)
 
+    async def invalid_accounting_write(
+        definition: ToolDefinition,
+        company_id: int,
+        dry_run: bool,
+        input_payload: Mapping[str, object],
+    ) -> WriteSafetyResponse:
+        request_id = new_request_id()
+        binding: ConnectionBinding | None = None
+        try:
+            binding = await resolver.resolve()
+            if definition.required_permission not in binding.permissions:
+                raise OdooMcpError(
+                    ErrorCode.ODOO_AUTH_FAILED,
+                    "The resolved MCP identity is not authorized for this accounting write.",
+                    "Reconnect with accounting proposal permission and retry.",
+                )
+            if company_id not in binding.connection.allowed_company_ids:
+                raise OdooMcpError(
+                    ErrorCode.COMPANY_NOT_FOUND,
+                    "The requested company is not authorized for this connection.",
+                    "Use an authorized company ID and retry.",
+                )
+            error = ErrorResponse(
+                error_code=ErrorCode.INVALID_INPUT,
+                error_message="The accounting write input is invalid.",
+                remediation_hint="Correct the identifiers, amounts, dates, or controls and retry.",
+                request_id=request_id,
+            )
+        except OdooMcpError as exc:
+            error = exc.as_response(request_id)
+        except Exception:
+            error = ErrorResponse(
+                error_code=ErrorCode.UNKNOWN_ERROR,
+                error_message="The accounting write failed unexpectedly.",
+                remediation_hint="Retry the request or contact the service operator.",
+                request_id=request_id,
+            )
+        response = WriteSafetyResponse(
+            status="failed",
+            outcome="not_attempted",
+            request_id=request_id,
+            company_id=company_id,
+            error_code=error.error_code,
+            error_message=error.error_message,
+            remediation_hint=error.remediation_hint,
+        )
+        if binding is not None and storage is not None:
+            try:
+                storage.audit.append(
+                    _audit_event(
+                        binding,
+                        definition,
+                        company_id,
+                        input_payload,
+                        request_id,
+                        None,
+                        final_status="failed",
+                        actual_result=response.model_dump(mode="json"),
+                        error=error,
+                        dry_run=dry_run,
+                    )
+                )
+            except Exception:
+                LOGGER.warning("Accounting write audit persistence failed; details suppressed.")
+        return response
+
     async def accounting_write(
         definition: ToolDefinition,
         command: WriteCommand,
@@ -401,6 +467,13 @@ def create_mcp_server(
                 nonlocal state
                 adapter = await adapter_factory(binding.connection)
                 try:
+                    companies = await adapter.get_companies()
+                    if command.company_id not in {item.id for item in companies}:
+                        raise OdooMcpError(
+                            ErrorCode.COMPANY_NOT_FOUND,
+                            "The requested company is unavailable to the technical user.",
+                            "Check company access and retry.",
+                        )
                     state, prepared = await prepare_operation(adapter)
                     return prepared
                 finally:
@@ -411,6 +484,13 @@ def create_mcp_server(
                     raise RuntimeError("Accounting write was not prepared")
                 adapter = await adapter_factory(binding.connection)
                 try:
+                    companies = await adapter.get_companies()
+                    if command.company_id not in {item.id for item in companies}:
+                        raise OdooMcpError(
+                            ErrorCode.COMPANY_NOT_FOUND,
+                            "The requested company is unavailable to the technical user.",
+                            "Check company access and retry.",
+                        )
                     await validate_operation(adapter, state)
                 finally:
                     await _close_adapter(adapter)
@@ -420,6 +500,13 @@ def create_mcp_server(
                     raise RuntimeError("Accounting write was not prepared")
                 adapter = await adapter_factory(binding.connection)
                 try:
+                    companies = await adapter.get_companies()
+                    if command.company_id not in {item.id for item in companies}:
+                        raise OdooMcpError(
+                            ErrorCode.COMPANY_NOT_FOUND,
+                            "The requested company is unavailable to the technical user.",
+                            "Check company access and retry.",
+                        )
                     return await execute_operation(adapter, state)
                 except OdooMcpError as exc:
                     if exc.code is ErrorCode.ODOO_PERMISSION_DENIED:
@@ -1049,18 +1136,31 @@ def create_mcp_server(
             dry_run: bool,
             idempotency_key: IdempotencyKey,
         ) -> WriteSafetyResponse:
-            request = CreateInvoiceInput(
-                company_id=company_id,
-                partner_id=partner_id,
-                invoice_date=invoice_date,
-                lines=lines,
-                currency_id=currency_id,
-                payment_term_id=payment_term_id,
-                analytic_account_id=analytic_account_id,
-                vendor_reference=vendor_reference,
-                dry_run=dry_run,
-                idempotency_key=idempotency_key,
-            )
+            raw_payload: dict[str, object] = {
+                "partner_id": partner_id,
+                "invoice_date": invoice_date.isoformat(),
+                "lines": [item.model_dump(mode="json") for item in lines],
+                "currency_id": currency_id,
+                "payment_term_id": payment_term_id,
+                "analytic_account_id": analytic_account_id,
+                "vendor_reference": vendor_reference,
+                "idempotency_key": idempotency_key,
+            }
+            try:
+                request = CreateInvoiceInput(
+                    company_id=company_id,
+                    partner_id=partner_id,
+                    invoice_date=invoice_date,
+                    lines=lines,
+                    currency_id=currency_id,
+                    payment_term_id=payment_term_id,
+                    analytic_account_id=analytic_account_id,
+                    vendor_reference=vendor_reference,
+                    dry_run=dry_run,
+                    idempotency_key=idempotency_key,
+                )
+            except ValidationError:
+                return await invalid_accounting_write(definition, company_id, dry_run, raw_payload)
             payload = request.model_dump(
                 mode="json", exclude={"company_id", "dry_run", "idempotency_key"}
             )
@@ -1179,14 +1279,25 @@ def create_mcp_server(
         dry_run: bool = True,
         idempotency_key: IdempotencyKey = None,
     ) -> WriteSafetyResponse:
-        request = CreditNoteInput(
-            company_id=company_id,
-            original_move_id=original_move_id,
-            credit_date=credit_date,
-            reason=reason,
-            dry_run=dry_run,
-            idempotency_key=idempotency_key,
-        )
+        raw_payload: dict[str, object] = {
+            "original_move_id": original_move_id,
+            "credit_date": credit_date.isoformat(),
+            "reason": reason,
+            "idempotency_key": idempotency_key,
+        }
+        try:
+            request = CreditNoteInput(
+                company_id=company_id,
+                original_move_id=original_move_id,
+                credit_date=credit_date,
+                reason=reason,
+                dry_run=dry_run,
+                idempotency_key=idempotency_key,
+            )
+        except ValidationError:
+            return await invalid_accounting_write(
+                credit_definition, company_id, dry_run, raw_payload
+            )
         payload = request.model_dump(
             mode="json", exclude={"company_id", "dry_run", "idempotency_key"}
         )
@@ -1215,7 +1326,7 @@ def create_mcp_server(
                 request.reason.strip(),
             )
             return AppliedWrite(
-                material_effects=effect.model_dump(mode="json"),
+                material_effects=effect.model_dump(mode="json", exclude={"validation_lines"}),
                 record_refs=(f"account.move:{effect.id}",),
             )
 
@@ -1263,8 +1374,8 @@ def create_mcp_server(
         async def validate_op(adapter: OdooAdapter, state: object) -> None:
             if not isinstance(state, InvoiceEffect):
                 raise RuntimeError("Invalid prepared validation state")
-            refreshed, _ = await prepare_validation(adapter, request)
-            if refreshed != state:
+            refreshed, prepared = await prepare_validation(adapter, request)
+            if refreshed != state or prepared.needs_input:
                 raise OdooMcpError(
                     ErrorCode.ODOO_STATE_CONFLICT,
                     "The draft changed before posting.",
@@ -1276,7 +1387,7 @@ def create_mcp_server(
                 raise RuntimeError("Invalid prepared validation state")
             effect = await adapter.post_invoice(request.company_id, request.invoice_id)
             return AppliedWrite(
-                material_effects=effect.model_dump(mode="json"),
+                material_effects=effect.model_dump(mode="json", exclude={"validation_lines"}),
                 record_refs=(f"account.move:{effect.id}",),
             )
 
@@ -1315,16 +1426,29 @@ def create_mcp_server(
         dry_run: bool = True,
         idempotency_key: IdempotencyKey = None,
     ) -> WriteSafetyResponse:
-        request = RegisterPaymentInput(
-            invoice_id=invoice_id,
-            company_id=company_id,
-            payment_date=payment_date,
-            amount=amount,
-            journal_id=journal_id,
-            payment_method_line_id=payment_method_line_id,
-            dry_run=dry_run,
-            idempotency_key=idempotency_key,
-        )
+        raw_payload: dict[str, object] = {
+            "invoice_id": invoice_id,
+            "payment_date": payment_date.isoformat(),
+            "amount": str(amount) if amount is not None else None,
+            "journal_id": journal_id,
+            "payment_method_line_id": payment_method_line_id,
+            "idempotency_key": idempotency_key,
+        }
+        try:
+            request = RegisterPaymentInput(
+                invoice_id=invoice_id,
+                company_id=company_id,
+                payment_date=payment_date,
+                amount=amount,
+                journal_id=journal_id,
+                payment_method_line_id=payment_method_line_id,
+                dry_run=dry_run,
+                idempotency_key=idempotency_key,
+            )
+        except ValidationError:
+            return await invalid_accounting_write(
+                payment_definition, company_id, dry_run, raw_payload
+            )
 
         async def prepare_op(adapter: OdooAdapter) -> tuple[object, PreparedWrite]:
             effect, registration, prepared = await prepare_payment(adapter, request)
@@ -1349,7 +1473,7 @@ def create_mcp_server(
                 raise RuntimeError("Payment route was not resolved")
             effect = await adapter.register_payment(registration)
             return AppliedWrite(
-                material_effects=effect.model_dump(mode="json"),
+                material_effects=effect.model_dump(mode="json", exclude={"validation_lines"}),
                 record_refs=(f"account.move:{effect.id}",),
             )
 

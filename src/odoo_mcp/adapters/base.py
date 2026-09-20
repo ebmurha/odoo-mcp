@@ -22,9 +22,9 @@ from odoo_mcp.adapters.accounting import (
     PageRequest,
     PartialReconciliation,
     Partner,
-    PaymentMethodLine,
+    PaymentPreviewRequest,
     PaymentRegistration,
-    PaymentRoute,
+    PaymentRegistrationPreview,
     PaymentTerm,
     Product,
     ReadFilters,
@@ -94,14 +94,6 @@ class OdooAdapter(Protocol):
         self, company_id: int, *, page: PageRequest = DEFAULT_PAGE_REQUEST
     ) -> RecordPage[PaymentTerm]: ...
 
-    async def get_payment_method_lines(
-        self,
-        company_id: int,
-        journal_ids: tuple[int, ...],
-        *,
-        page: PageRequest = DEFAULT_PAGE_REQUEST,
-    ) -> RecordPage[PaymentMethodLine]: ...
-
     async def get_partners(
         self,
         company_id: int,
@@ -148,8 +140,8 @@ class OdooAdapter(Protocol):
         reason: str,
     ) -> InvoiceEffect: ...
 
-    async def get_payment_routes(
-        self, company_id: int, invoice_id: int
-    ) -> tuple[PaymentRoute, ...]: ...
+    async def get_payment_registration_preview(
+        self, request: PaymentPreviewRequest
+    ) -> PaymentRegistrationPreview: ...
 
     async def register_payment(self, registration: PaymentRegistration) -> InvoiceEffect: ...
