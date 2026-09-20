@@ -437,3 +437,52 @@ async def test_repeated_upstream_cursor_fails_explicitly() -> None:
         )
 
     assert caught.value.code is ErrorCode.ODOO_API_ERROR
+
+
+async def test_large_unmatched_report_pages_without_truncating_summary() -> None:
+    class PagingAdapter(CashAdapter):
+        async def get_bank_statement_lines(
+            self,
+            company_id: int,
+            period: DatePeriod,
+            journal_id: int | None,
+            *,
+            page: PageRequest,
+        ) -> RecordPage[BankStatementLine]:
+            offset = 0 if page.cursor is None else int(page.cursor)
+            selected = self.statements[offset : offset + page.limit]
+            next_offset = offset + len(selected)
+            return RecordPage(
+                items=selected,
+                next_cursor=str(next_offset) if next_offset < len(self.statements) else None,
+            )
+
+    result = await flag_unmatched_statement_lines(
+        PagingAdapter(
+            statements=[
+                _statement(
+                    identifier,
+                    amount="1",
+                    line_date=date(2026, 4, 2),
+                    partner_id=None,
+                    reference=None,
+                )
+                for identifier in range(1, 502)
+            ]
+        ),
+        UnmatchedStatementLinesInput(
+            company_id=1,
+            period_start=date(2026, 4, 1),
+            period_end=date(2026, 4, 30),
+            limit=500,
+        ),
+        company_name="Synthetic Co",
+        request_id="req_large",
+    )
+
+    assert len(result.items) == 500
+    assert result.next_cursor is not None
+    assert result.summary.statement_line_count == 501
+    assert result.summary.unmatched_count == 501
+    assert "Page rows: 1-500 of 501" in result.artifact_markdown
+    assert "Whole-report totals: reviewed 501; unmatched 501." in result.artifact_markdown
