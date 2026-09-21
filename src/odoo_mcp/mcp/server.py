@@ -31,6 +31,8 @@ from odoo_mcp.mcp.schemas import (
     AccountingToolResponse,
     AgingInput,
     AgingResponse,
+    BalanceSheetInput,
+    BalanceSheetResponse,
     CapabilitiesToolResponse,
     CashbookInput,
     CashbookResponse,
@@ -44,6 +46,8 @@ from odoo_mcp.mcp.schemas import (
     OpenDocumentsInput,
     OpenDocumentsResponse,
     PostJournalEntryInput,
+    ProfitAndLossInput,
+    ProfitAndLossResponse,
     ReconciliationInput,
     ReconciliationProposal,
     RegisterPaymentInput,
@@ -82,12 +86,19 @@ from odoo_mcp.workflows.accounting.reconcile_bank import (
     build_reconciliation_proposal,
     flag_unmatched_statement_lines,
 )
-from odoo_mcp.workflows.accounting.reports import get_aged_balance, get_trial_balance
+from odoo_mcp.workflows.accounting.reports import (
+    get_aged_balance,
+    get_balance_sheet,
+    get_profit_and_loss,
+    get_trial_balance,
+)
 from odoo_mcp.workflows.core.capabilities import get_erp_capabilities
 
 AdapterFactory = Callable[[object], Awaitable[OdooAdapter]]
 ReportResponse: TypeAlias = (
     TrialBalanceResponse
+    | ProfitAndLossResponse
+    | BalanceSheetResponse
     | AgingResponse
     | CashbookResponse
     | UnmatchedStatementLinesResponse
@@ -629,6 +640,117 @@ def create_mcp_server(
         description=trial_definition.description,
         annotations=trial_definition.annotations,
         meta=trial_definition.protocol_meta(),
+        structured_output=True,
+    )
+
+    profit_and_loss_definition = get_tool_definition("get_profit_and_loss")
+
+    async def profit_and_loss_tool(
+        period_start: date,
+        period_end: date,
+        company_id: PositiveCompanyId,
+        analytic_account_ids: tuple[int, ...] = (),
+        idempotency_key: IdempotencyKey = None,
+        limit: ReportLimit = 100,
+        cursor: ReportCursor = None,
+    ) -> AccountingToolResponse:
+        try:
+            request = ProfitAndLossInput(
+                period_start=period_start,
+                period_end=period_end,
+                company_id=company_id,
+                analytic_account_ids=analytic_account_ids,
+                idempotency_key=idempotency_key,
+                limit=limit,
+                cursor=cursor,
+            )
+        except ValidationError:
+            return await invalid_accounting_report(
+                profit_and_loss_definition,
+                company_id,
+                {
+                    "period_start": period_start.isoformat(),
+                    "period_end": period_end.isoformat(),
+                    "company_id": company_id,
+                    "analytic_account_ids": list(analytic_account_ids),
+                    "idempotency_key": idempotency_key,
+                    "limit": limit,
+                    "cursor": cursor,
+                },
+            )
+
+        async def run(adapter: OdooAdapter, company: Company, request_id: str) -> ReportResponse:
+            return await get_profit_and_loss(
+                adapter,
+                request,
+                company_currency_id=_require_company_currency(company).id,
+                company_name=company.name,
+                request_id=request_id,
+            )
+
+        return await accounting_report(profit_and_loss_definition, request, run)
+
+    server.add_tool(
+        profit_and_loss_tool,
+        name=profit_and_loss_definition.name,
+        title=profit_and_loss_definition.title,
+        description=profit_and_loss_definition.description,
+        annotations=profit_and_loss_definition.annotations,
+        meta=profit_and_loss_definition.protocol_meta(),
+        structured_output=True,
+    )
+
+    balance_sheet_definition = get_tool_definition("get_balance_sheet")
+
+    async def balance_sheet_tool(
+        as_of_date: date,
+        company_id: PositiveCompanyId,
+        analytic_account_ids: tuple[int, ...] = (),
+        idempotency_key: IdempotencyKey = None,
+        limit: ReportLimit = 100,
+        cursor: ReportCursor = None,
+    ) -> AccountingToolResponse:
+        try:
+            request = BalanceSheetInput(
+                as_of_date=as_of_date,
+                company_id=company_id,
+                analytic_account_ids=analytic_account_ids,
+                idempotency_key=idempotency_key,
+                limit=limit,
+                cursor=cursor,
+            )
+        except ValidationError:
+            return await invalid_accounting_report(
+                balance_sheet_definition,
+                company_id,
+                {
+                    "as_of_date": as_of_date.isoformat(),
+                    "company_id": company_id,
+                    "analytic_account_ids": list(analytic_account_ids),
+                    "idempotency_key": idempotency_key,
+                    "limit": limit,
+                    "cursor": cursor,
+                },
+            )
+
+        async def run(adapter: OdooAdapter, company: Company, request_id: str) -> ReportResponse:
+            return await get_balance_sheet(
+                adapter,
+                request,
+                company_currency_id=_require_company_currency(company).id,
+                company_name=company.name,
+                request_id=request_id,
+            )
+
+        return await accounting_report(balance_sheet_definition, request, run)
+
+    server.add_tool(
+        balance_sheet_tool,
+        name=balance_sheet_definition.name,
+        title=balance_sheet_definition.title,
+        description=balance_sheet_definition.description,
+        annotations=balance_sheet_definition.annotations,
+        meta=balance_sheet_definition.protocol_meta(),
         structured_output=True,
     )
 

@@ -14,8 +14,12 @@ from odoo_mcp.adapters.odoo.transports.json2 import Json2Transport
 from odoo_mcp.adapters.odoo.transports.json_rpc import JsonRpcTransport
 from odoo_mcp.app.settings import OdooConnectionSettings
 from odoo_mcp.mcp.error_codes import ErrorCode, OdooMcpError
-from odoo_mcp.mcp.schemas import TrialBalanceInput
-from odoo_mcp.workflows.accounting.reports import get_trial_balance
+from odoo_mcp.mcp.schemas import BalanceSheetInput, ProfitAndLossInput, TrialBalanceInput
+from odoo_mcp.workflows.accounting.reports import (
+    get_balance_sheet,
+    get_profit_and_loss,
+    get_trial_balance,
+)
 from odoo_mcp.workflows.core.capabilities import get_erp_capabilities
 
 
@@ -542,6 +546,100 @@ async def test_trial_balance_reconciles_through_both_transport_contracts(
     assert result.summary.period_credit == Decimal("0")
     assert result.summary.closing_balance == Decimal("125.50")
     assert result.items[0].opening_balance == Decimal("100")
+
+
+@pytest.mark.parametrize("major", [18, 19])
+async def test_financial_statements_reconcile_through_both_transport_contracts(
+    connection: OdooConnectionSettings,
+    major: int,
+) -> None:
+    def move_line(
+        identifier: int,
+        account_id: int,
+        account_name: str,
+        debit: str,
+        credit: str,
+    ) -> dict[str, object]:
+        row = _account_move_line_row()
+        row.update(
+            {
+                "id": identifier,
+                "account_id": [account_id, account_name],
+                "debit": debit,
+                "credit": credit,
+                "balance": str(Decimal(debit) - Decimal(credit)),
+                "amount_currency": str(Decimal(debit) - Decimal(credit)),
+            }
+        )
+        return row
+
+    accounts = [
+        {**_account_row(), "id": 10, "code": "1000", "name": "Cash", "account_type": "asset_cash"},
+        {**_account_row(), "id": 40, "code": "4000", "name": "Revenue", "account_type": "income"},
+        {**_account_row(), "id": 50, "code": "5000", "name": "Expense", "account_type": "expense"},
+    ]
+    lines = [
+        move_line(1, 10, "Cash", "75", "0"),
+        move_line(2, 40, "Revenue", "0", "100"),
+        move_line(3, 50, "Expense", "25", "0"),
+    ]
+
+    def result_for(model: str) -> list[dict[str, object]]:
+        if model == "res.company":
+            return [{"id": 1, "name": "Alpha"}, {"id": 2, "name": "Beta"}]
+        if model == "account.move.line":
+            return lines
+        if model == "account.account":
+            return accounts
+        if model == "res.currency":
+            return [{"id": 40, "name": "USD", "rounding": "0.01"}]
+        pytest.fail(f"Unexpected model: {model}")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/web/webclient/version_info":
+            return _version_response(major)
+        body: dict[str, Any] = __import__("json").loads(request.content)
+        if major == 18:
+            args = body["params"]["args"]
+            if body["params"]["service"] == "common":
+                return httpx.Response(200, json={"result": 7})
+            return httpx.Response(200, json={"result": result_for(args[3])})
+        if request.url.path == "/json/2/res.users/context_get":
+            return httpx.Response(200, json={"uid": 7})
+        model = request.url.path.split("/")[3]
+        return httpx.Response(200, json=result_for(model))
+
+    adapter = await OdooClient.connect(
+        connection,
+        http_transport=httpx.MockTransport(handler),
+    )
+    try:
+        await adapter.get_companies()
+        profit_and_loss = await get_profit_and_loss(
+            adapter,
+            ProfitAndLossInput(
+                company_id=1,
+                period_start=date(2026, 1, 1),
+                period_end=date(2026, 3, 31),
+            ),
+            company_currency_id=40,
+            company_name="Alpha",
+            request_id=f"req_pnl_{major}",
+        )
+        balance_sheet = await get_balance_sheet(
+            adapter,
+            BalanceSheetInput(company_id=1, as_of_date=date(2026, 3, 31)),
+            company_currency_id=40,
+            company_name="Alpha",
+            request_id=f"req_bs_{major}",
+        )
+    finally:
+        await adapter.close()
+
+    assert profit_and_loss.summary.net_profit == Decimal("75.00")
+    assert balance_sheet.summary.total_assets == Decimal("75.00")
+    assert balance_sheet.summary.total_equity == Decimal("75.00")
+    assert balance_sheet.summary.is_balanced is True
 
 
 @pytest.mark.parametrize("major", [18, 19])

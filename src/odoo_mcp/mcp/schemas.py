@@ -119,6 +119,35 @@ class TrialBalanceInput(AccountingReadInput):
         return self
 
 
+class ProfitAndLossInput(AccountingReadInput):
+    period_start: date
+    period_end: date
+    analytic_account_ids: tuple[int, ...] = Field(default=(), max_length=500)
+
+    @model_validator(mode="after")
+    def validate_period_and_analytics(self) -> ProfitAndLossInput:
+        if self.period_end < self.period_start:
+            raise ValueError("period_end must not precede period_start")
+        if any(identifier <= 0 for identifier in self.analytic_account_ids):
+            raise ValueError("analytic_account_ids must contain positive integers")
+        if len(set(self.analytic_account_ids)) != len(self.analytic_account_ids):
+            raise ValueError("analytic_account_ids must not contain duplicates")
+        return self
+
+
+class BalanceSheetInput(AccountingReadInput):
+    as_of_date: date
+    analytic_account_ids: tuple[int, ...] = Field(default=(), max_length=500)
+
+    @model_validator(mode="after")
+    def validate_analytics(self) -> BalanceSheetInput:
+        if any(identifier <= 0 for identifier in self.analytic_account_ids):
+            raise ValueError("analytic_account_ids must contain positive integers")
+        if len(set(self.analytic_account_ids)) != len(self.analytic_account_ids):
+            raise ValueError("analytic_account_ids must not contain duplicates")
+        return self
+
+
 class AgingInput(AccountingReadInput):
     as_of_date: date
     partner_ids: tuple[int, ...] = Field(default=(), max_length=500)
@@ -379,6 +408,56 @@ class TrialBalanceSummary(BaseModel):
     closing_balance: Decimal
 
 
+class ProfitAndLossItem(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    account_id: int
+    code: str
+    name: str
+    account_type: str
+    group: Literal["income", "expense"]
+    debit: Decimal
+    credit: Decimal
+    signed_balance: Decimal
+
+
+class ProfitAndLossSummary(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    account_count: int
+    income_debit: Decimal
+    income_credit: Decimal
+    income_balance: Decimal
+    expense_debit: Decimal
+    expense_credit: Decimal
+    expense_balance: Decimal
+    net_profit: Decimal
+
+
+class BalanceSheetItem(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    account_id: int
+    code: str
+    name: str
+    account_type: str
+    group: Literal["asset", "liability", "equity"]
+    signed_balance: Decimal
+
+
+class BalanceSheetSummary(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    account_count: int
+    total_assets: Decimal
+    total_liabilities: Decimal
+    equity_account_balance: Decimal
+    unclosed_earnings: Decimal
+    total_equity: Decimal
+    balancing_difference: Decimal
+    is_balanced: bool
+
+
 class AgingBuckets(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -622,6 +701,33 @@ class TrialBalanceResponse(BaseModel):
     artifact_markdown: str
 
 
+class ProfitAndLossResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["ok"] = "ok"
+    request_id: str
+    company_id: int
+    period_start: date
+    period_end: date
+    items: list[ProfitAndLossItem]
+    next_cursor: str | None
+    summary: ProfitAndLossSummary
+    artifact_markdown: str
+
+
+class BalanceSheetResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["ok"] = "ok"
+    request_id: str
+    company_id: int
+    as_of_date: date
+    items: list[BalanceSheetItem]
+    next_cursor: str | None
+    summary: BalanceSheetSummary
+    artifact_markdown: str
+
+
 class AgingResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -677,6 +783,8 @@ class AccountingToolResponse(BaseModel):
     items: (
         list[
             TrialBalanceItem
+            | ProfitAndLossItem
+            | BalanceSheetItem
             | AgingItem
             | CashbookItem
             | UnmatchedStatementLineItem
@@ -688,6 +796,8 @@ class AccountingToolResponse(BaseModel):
     next_cursor: str | None = None
     summary: (
         TrialBalanceSummary
+        | ProfitAndLossSummary
+        | BalanceSheetSummary
         | AgingSummary
         | CashbookSummary
         | UnmatchedStatementLinesSummary
@@ -731,6 +841,8 @@ class AccountingToolResponse(BaseModel):
         cls,
         response: (
             TrialBalanceResponse
+            | ProfitAndLossResponse
+            | BalanceSheetResponse
             | AgingResponse
             | CashbookResponse
             | UnmatchedStatementLinesResponse

@@ -3,6 +3,8 @@ permissions:
     - get_erp_capabilities
   accounting_read:
     - get_trial_balance
+    - get_profit_and_loss
+    - get_balance_sheet
     - get_aged_receivables
     - get_aged_payables
     - get_cashbook

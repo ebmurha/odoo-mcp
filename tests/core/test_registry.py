@@ -89,6 +89,8 @@ async def test_all_profiles_expose_identical_registry_and_discovery(
     assert [tool["name"] for tool in contracts[0]] == [
         "get_erp_capabilities",
         "get_trial_balance",
+        "get_profit_and_loss",
+        "get_balance_sheet",
         "get_aged_receivables",
         "get_aged_payables",
         "get_cashbook",
@@ -121,8 +123,8 @@ async def test_registry_metadata_and_schemas_match_the_contract(
     server = create_mcp_server(Resolver(_binding(DeploymentProfile.LOCAL, connection)))
     tools = await server.list_tools()
 
-    assert len(TOOL_REGISTRY) == 17
-    assert len(tools) == 17
+    assert len(TOOL_REGISTRY) == 19
+    assert len(tools) == 19
     assert [tool.name for tool in tools] == [definition.name for definition in TOOL_REGISTRY]
     for tool, definition in zip(tools, TOOL_REGISTRY, strict=True):
         assert tool.input_schema["type"] == "object"
@@ -139,29 +141,35 @@ async def test_registry_metadata_and_schemas_match_the_contract(
         "period_end",
         "company_id",
     }
-    assert set(tools[2].input_schema["required"]) == {"as_of_date", "company_id"}
-    assert set(tools[4].input_schema["required"]) == {
+    assert set(tools[2].input_schema["required"]) == {
         "period_start",
         "period_end",
         "company_id",
     }
+    assert set(tools[3].input_schema["required"]) == {"as_of_date", "company_id"}
+    assert set(tools[4].input_schema["required"]) == {"as_of_date", "company_id"}
     assert set(tools[6].input_schema["required"]) == {
+        "period_start",
+        "period_end",
+        "company_id",
+    }
+    assert set(tools[8].input_schema["required"]) == {
         "period",
         "company_id",
         "bank_journal_id",
         "statement_line_ids",
     }
-    assert "vendor_reference" not in tools[9].input_schema["properties"]
-    assert "vendor_reference" in tools[10].input_schema["properties"]
-    assert tools[12].annotations.destructive_hint is True
-    assert tools[13].annotations.destructive_hint is True
-    assert set(tools[14].input_schema["required"]) == {
+    assert "vendor_reference" not in tools[11].input_schema["properties"]
+    assert "vendor_reference" in tools[12].input_schema["properties"]
+    assert tools[14].annotations.destructive_hint is True
+    assert tools[15].annotations.destructive_hint is True
+    assert set(tools[16].input_schema["required"]) == {
         "period_start",
         "period_end",
         "company_id",
     }
-    assert tools[15].annotations.destructive_hint is False
-    assert tools[16].annotations.destructive_hint is True
+    assert tools[17].annotations.destructive_hint is False
+    assert tools[18].annotations.destructive_hint is True
 
 
 async def test_permission_denial_happens_before_adapter_creation(
@@ -224,6 +232,8 @@ def test_public_permission_example_matches_registry() -> None:
         "core_read": {"get_erp_capabilities"},
         "accounting_read": {
             "get_trial_balance",
+            "get_profit_and_loss",
+            "get_balance_sheet",
             "get_aged_receivables",
             "get_aged_payables",
             "get_cashbook",

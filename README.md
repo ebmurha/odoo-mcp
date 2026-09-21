@@ -117,6 +117,13 @@ boundary and never expand the technical user's Odoo permissions.
 
 - `get_trial_balance` returns posted opening balances, inclusive-period debit
   and credit movement, closing balances, totals, and a Markdown artifact.
+- `get_profit_and_loss` classifies posted lines by Odoo's income and expense
+  account types for an inclusive period. Income uses credit-minus-debit,
+  expenses use debit-minus-credit, and net profit is income minus expenses.
+- `get_balance_sheet` classifies posted lines by Odoo's asset, liability, and
+  equity account types through an inclusive date. It reports unclosed earnings
+  separately within total equity and verifies the accounting equation at
+  company-currency precision.
 - `get_aged_receivables` and `get_aged_payables` reconstruct posted residuals
   as of a date, including later partial reconciliations, and group them into
   not-yet-due, 1–30, 31–60, 61–90, and 90+ day buckets.
@@ -152,6 +159,12 @@ limit of 100 and maximum of 500. Empty data is a successful empty report;
 upstream denial, timeout, malformed data, or partial retrieval is a structured
 failure rather than an empty result. Paginated Markdown artifacts label the row
 range, continuation state, and whole-report totals explicitly.
+
+Profit-and-loss and balance-sheet analytic filters apply Odoo's percentage
+distribution to exact analytic account IDs. These reports do not infer custom
+chart-of-accounts groups, fiscal-year closing rules, consolidation, eliminations,
+or localization-specific report layouts. Unsupported account classifications
+fail explicitly instead of being guessed.
 
 ## Verification
 

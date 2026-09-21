@@ -9,6 +9,8 @@ from mcp import Client
 from odoo_mcp.adapters.accounting import (
     Account,
     AccountMoveLine,
+    AnalyticAccount,
+    Currency,
     PageRequest,
     PartialReconciliation,
     ReadFilters,
@@ -38,7 +40,13 @@ class AccountingAdapter:
         self.closed = False
 
     async def get_companies(self) -> list[Company]:
-        return [Company(id=1, name="Synthetic Company")]
+        return [
+            Company(
+                id=1,
+                name="Synthetic Company",
+                currency=RelatedRecord(id=1, name="KES"),
+            )
+        ]
 
     async def get_capabilities(self) -> CapabilitySnapshot:
         return CapabilitySnapshot(
@@ -127,6 +135,24 @@ class AccountingAdapter:
     ) -> RecordPage[PartialReconciliation]:
         return RecordPage(items=[])
 
+    async def get_analytic_accounts(
+        self,
+        company_id: int,
+        filters: ReadFilters,
+        *,
+        page: PageRequest,
+    ) -> RecordPage[AnalyticAccount]:
+        return RecordPage(items=[])
+
+    async def get_currencies(
+        self,
+        company_id: int,
+        currency_ids: tuple[int, ...],
+        *,
+        page: PageRequest,
+    ) -> RecordPage[Currency]:
+        return RecordPage(items=[Currency(id=1, name="KES", rounding=Decimal("0.01"))])
+
     async def close(self) -> None:
         self.closed = True
 
@@ -186,6 +212,55 @@ async def test_trial_balance_runs_full_path_and_persists_artifact_and_audit(
     assert "# Trial Balance" in str(artifacts[0]["content"])
     assert adapter.closed is True
     assert storage.audit.verify_chain("tenant-accounting").entry_count == 1
+
+
+async def test_financial_statements_run_full_path_and_persist_artifacts(
+    connection: OdooConnectionSettings,
+    tmp_path,
+) -> None:
+    storage = Storage.open(tmp_path / "financial-statements.sqlite3")
+    adapter = AccountingAdapter()
+
+    async def factory(_connection: object) -> OdooAdapter:
+        return adapter
+
+    server = create_mcp_server(
+        Resolver(_binding(connection)),
+        adapter_factory=factory,
+        storage=storage,
+    )
+    async with Client(server) as client:
+        profit_and_loss = await client.call_tool(
+            "get_profit_and_loss",
+            {
+                "period_start": "2026-01-01",
+                "period_end": "2026-03-31",
+                "company_id": 1,
+            },
+        )
+        balance_sheet = await client.call_tool(
+            "get_balance_sheet",
+            {"as_of_date": "2026-03-31", "company_id": 1},
+        )
+
+    assert profit_and_loss.structured_content is not None
+    assert profit_and_loss.structured_content["summary"]["net_profit"] == "10.00"
+    assert balance_sheet.structured_content is not None
+    assert balance_sheet.structured_content["summary"]["total_assets"] == "10.00"
+    assert balance_sheet.structured_content["summary"]["total_equity"] == "10.00"
+    assert balance_sheet.structured_content["summary"]["is_balanced"] is True
+    audits = storage.audit.list_for_tenant("tenant-accounting")
+    assert [audit.tool_name for audit in audits] == ["get_profit_and_loss", "get_balance_sheet"]
+    assert all(audit.final_status == "succeeded" for audit in audits)
+    with storage.database.transaction() as database:
+        artifacts = database.execute("SELECT artifact_type, content FROM artifacts").fetchall()
+    assert [row["artifact_type"] for row in artifacts] == [
+        "get_profit_and_loss",
+        "get_balance_sheet",
+    ]
+    assert "# Profit and Loss" in str(artifacts[0]["content"])
+    assert "# Balance Sheet" in str(artifacts[1]["content"])
+    assert storage.audit.verify_chain("tenant-accounting").entry_count == 2
 
 
 async def test_permission_denial_is_audited_before_adapter_creation(
@@ -395,6 +470,64 @@ async def test_invalid_report_period_returns_structured_input_error(
     assert result.structured_content["status"] == "failed"
     assert result.structured_content["error_code"] == "INVALID_INPUT"
     assert storage.audit.list_for_tenant("tenant-accounting")[0].error_code == "INVALID_INPUT"
+
+
+async def test_financial_statement_invalid_input_and_timeout_are_audited(
+    connection: OdooConnectionSettings,
+    tmp_path,
+) -> None:
+    invalid_storage = Storage.open(tmp_path / "invalid-pnl.sqlite3")
+    called = False
+
+    async def unused_factory(_connection: object) -> OdooAdapter:
+        nonlocal called
+        called = True
+        return AccountingAdapter()
+
+    invalid_server = create_mcp_server(
+        Resolver(_binding(connection)),
+        adapter_factory=unused_factory,
+        storage=invalid_storage,
+    )
+    async with Client(invalid_server) as client:
+        invalid = await client.call_tool(
+            "get_profit_and_loss",
+            {
+                "period_start": "2026-04-01",
+                "period_end": "2026-03-31",
+                "company_id": 1,
+            },
+        )
+
+    assert called is False
+    assert invalid.structured_content is not None
+    assert invalid.structured_content["error_code"] == "INVALID_INPUT"
+    assert (
+        invalid_storage.audit.list_for_tenant("tenant-accounting")[0].error_code == "INVALID_INPUT"
+    )
+
+    timeout_storage = Storage.open(tmp_path / "timeout-balance-sheet.sqlite3")
+    adapter = AccountingAdapter(fail_lines=True)
+
+    async def failing_factory(_connection: object) -> OdooAdapter:
+        return adapter
+
+    timeout_server = create_mcp_server(
+        Resolver(_binding(connection)),
+        adapter_factory=failing_factory,
+        storage=timeout_storage,
+    )
+    async with Client(timeout_server) as client:
+        timeout = await client.call_tool(
+            "get_balance_sheet",
+            {"as_of_date": "2026-03-31", "company_id": 1},
+        )
+
+    assert timeout.structured_content is not None
+    assert timeout.structured_content["error_code"] == "ODOO_API_ERROR"
+    with timeout_storage.database.transaction() as database:
+        assert database.execute("SELECT COUNT(*) FROM artifacts").fetchone()[0] == 0
+    assert timeout_storage.audit.list_for_tenant("tenant-accounting")[0].final_status == "failed"
 
 
 async def test_invalid_aging_filter_is_audited_without_adapter_creation(

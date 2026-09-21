@@ -10,8 +10,18 @@ from odoo_mcp.adapters.accounting import DatePeriod, FilterClause, PageRequest, 
 from odoo_mcp.adapters.odoo.client import OdooClient
 from odoo_mcp.app.settings import DeploymentProfile, SettingsError, load_settings
 from odoo_mcp.mcp.error_codes import ErrorCode, OdooMcpError
-from odoo_mcp.mcp.schemas import AgingInput, TrialBalanceInput
-from odoo_mcp.workflows.accounting.reports import get_aged_balance, get_trial_balance
+from odoo_mcp.mcp.schemas import (
+    AgingInput,
+    BalanceSheetInput,
+    ProfitAndLossInput,
+    TrialBalanceInput,
+)
+from odoo_mcp.workflows.accounting.reports import (
+    get_aged_balance,
+    get_balance_sheet,
+    get_profit_and_loss,
+    get_trial_balance,
+)
 
 _check_stage = "startup"
 
@@ -84,7 +94,14 @@ async def _qualify() -> None:
         await adapter.get_account_accounts(company_id, ReadFilters(), page=page)
         await adapter.get_analytic_accounts(company_id, ReadFilters(), page=page)
 
-        company_name = next(company.name for company in companies if company.id == company_id)
+        company = next(company for company in companies if company.id == company_id)
+        if company.currency is None:
+            raise OdooMcpError(
+                ErrorCode.ODOO_API_ERROR,
+                "The default company currency is unavailable.",
+                "Check Odoo company access and retry.",
+            )
+        company_name = company.name
         _check_stage = "trial balance reconciliation"
         trial = await get_trial_balance(
             adapter,
@@ -127,6 +144,44 @@ async def _qualify() -> None:
                     "The aging report did not reconcile.",
                     "Check the authorized accounting source data and retry.",
                 )
+
+        _check_stage = "profit and loss reconciliation"
+        profit_and_loss = await get_profit_and_loss(
+            adapter,
+            ProfitAndLossInput(
+                company_id=company_id,
+                period_start=month.start,
+                period_end=month.end,
+                limit=500,
+            ),
+            company_currency_id=company.currency.id,
+            company_name=company_name,
+            request_id="req_live_qualification_profit_and_loss",
+        )
+        if (
+            profit_and_loss.summary.net_profit
+            != profit_and_loss.summary.income_balance - profit_and_loss.summary.expense_balance
+        ):
+            raise OdooMcpError(
+                ErrorCode.ODOO_API_ERROR,
+                "The profit and loss report did not reconcile.",
+                "Check the authorized accounting source data and retry.",
+            )
+
+        _check_stage = "balance sheet reconciliation"
+        balance_sheet = await get_balance_sheet(
+            adapter,
+            BalanceSheetInput(company_id=company_id, as_of_date=today, limit=500),
+            company_currency_id=company.currency.id,
+            company_name=company_name,
+            request_id="req_live_qualification_balance_sheet",
+        )
+        if not balance_sheet.summary.is_balanced:
+            raise OdooMcpError(
+                ErrorCode.ODOO_API_ERROR,
+                "The balance sheet did not reconcile.",
+                "Check the authorized accounting source data and retry.",
+            )
     finally:
         await adapter.close()
 

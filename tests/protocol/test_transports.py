@@ -93,6 +93,8 @@ def test_streamable_http_lists_the_shared_registry(
     assert [tool["name"] for tool in listed.json()["result"]["tools"]] == [
         "get_erp_capabilities",
         "get_trial_balance",
+        "get_profit_and_loss",
+        "get_balance_sheet",
         "get_aged_receivables",
         "get_aged_payables",
         "get_cashbook",
@@ -134,6 +136,8 @@ async def test_stdio_profile_lists_the_shared_registry() -> None:
     assert [tool.name for tool in listed.tools] == [
         "get_erp_capabilities",
         "get_trial_balance",
+        "get_profit_and_loss",
+        "get_balance_sheet",
         "get_aged_receivables",
         "get_aged_payables",
         "get_cashbook",

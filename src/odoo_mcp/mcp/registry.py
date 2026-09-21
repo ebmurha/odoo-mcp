@@ -95,6 +95,42 @@ TOOL_REGISTRY: tuple[ToolDefinition, ...] = (
         ),
     ),
     ToolDefinition(
+        name="get_profit_and_loss",
+        version="1.0.0",
+        title="Get profit and loss",
+        description=(
+            "Return posted income and expense balances for an inclusive period, "
+            "group totals, net profit or loss, and a Markdown artifact."
+        ),
+        risk_level="read",
+        required_permission="accounting_read",
+        required_capability="account",
+        annotations=ToolAnnotations(
+            read_only_hint=True,
+            destructive_hint=False,
+            idempotent_hint=True,
+            open_world_hint=True,
+        ),
+    ),
+    ToolDefinition(
+        name="get_balance_sheet",
+        version="1.0.0",
+        title="Get balance sheet",
+        description=(
+            "Return posted asset, liability, equity, and unclosed earnings balances "
+            "through an inclusive date with a balancing check and Markdown artifact."
+        ),
+        risk_level="read",
+        required_permission="accounting_read",
+        required_capability="account",
+        annotations=ToolAnnotations(
+            read_only_hint=True,
+            destructive_hint=False,
+            idempotent_hint=True,
+            open_world_hint=True,
+        ),
+    ),
+    ToolDefinition(
         name="get_aged_receivables",
         version="1.0.0",
         title="Get aged receivables",
