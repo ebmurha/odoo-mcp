@@ -51,7 +51,12 @@ uv run odoo-mcp --profile shared --host 127.0.0.1 --port 8000
 ```
 
 Dedicated Remote reads its single Odoo connection from the process environment;
-it never loads `.env.local`. Shared Hosted requires an authenticated connector
+it never loads `.env.local`. Every `/mcp` request must carry a deployment-issued
+HS256 bearer JWT. The server validates its signature, fixed issuer, fixed
+audience, expiry, issued-at time, subject, and client ID before MCP routing;
+permissions and company grants remain server-owned. Configure
+`ODOO_MCP_AUTH_ISSUER`, `ODOO_MCP_AUTH_AUDIENCE`, and a secret-store supplied
+`ODOO_MCP_AUTH_SIGNING_KEY` of at least 32 characters. Shared Hosted requires an authenticated connector
 context and an encrypted connection repository supplied by the hosting layer.
 The package supplies a SQLite repository for that integration, but the hosting
 layer must inject its 256-bit encryption keys from a separate operator-controlled

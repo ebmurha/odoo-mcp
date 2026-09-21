@@ -21,6 +21,15 @@ Dedicated Remote uses Streamable HTTP with one deployment-owned Odoo
 connection. Supply settings through the process environment or a secret store;
 this profile never loads `.env.local`.
 
+The deployment's identity service must issue HS256 JWT bearer tokens containing
+`iss`, `aud`, `exp`, `iat`, `sub`, and `client_id`. Configure the exact issuer,
+audience, and a random signing key of at least 32 characters through
+`ODOO_MCP_AUTH_ISSUER`, `ODOO_MCP_AUTH_AUDIENCE`, and
+`ODOO_MCP_AUTH_SIGNING_KEY`. Keep the signing key in the deployment secret store
+and rotate/revoke it through that issuer. Requests with missing or invalid
+tokens are rejected before MCP routing. Tool permissions and allowed companies
+come from server configuration, never token claims.
+
 For Docker:
 
 ```console
@@ -28,15 +37,15 @@ docker compose build
 docker compose up -d
 ```
 
-The Compose template publishes only `127.0.0.1:8000`. Put a TLS-terminating,
-authenticated reverse proxy or private-network gateway in front of `/mcp`.
+The Compose template publishes only `127.0.0.1:8000`. Put a TLS-terminating
+reverse proxy or private-network gateway in front of `/mcp`.
 The package does not treat forwarding headers as identity. The unauthenticated
 `/healthz` route is a liveness check and returns no dependency details.
 
 For a direct Python service, install the wheel into `/opt/odoo-mcp/.venv`, copy
 `deploy/odoo-mcp.service` to systemd, and place non-secret permissions at
 `/etc/odoo-mcp/config.yaml`. Store credentials in the root-readable environment
-file referenced by the unit. Review paths and the service account before
+file referenced by the unit, including the Dedicated JWT settings. Review paths and the service account before
 enabling the unit.
 
 ## Shared Hosted

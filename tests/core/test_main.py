@@ -15,6 +15,10 @@ class FakeServer:
     def run(self, transport: str, **kwargs: Any) -> None:
         self.calls.append((transport, kwargs))
 
+    def streamable_http_app(self, **kwargs: Any) -> object:
+        self.calls.append(("streamable-http", kwargs))
+        return object()
+
 
 @pytest.mark.parametrize(
     ("profile", "expected_transport"),
@@ -32,10 +36,14 @@ def test_profile_selects_approved_transport(
         "ODOO_MCP_ODOO_API_KEY": "synthetic-secret",
         "ODOO_MCP_ALLOWED_COMPANY_IDS": "1",
         "ODOO_MCP_DEFAULT_COMPANY_ID": "1",
+        "ODOO_MCP_AUTH_ISSUER": "https://identity.invalid",
+        "ODOO_MCP_AUTH_AUDIENCE": "odoo-mcp",
+        "ODOO_MCP_AUTH_SIGNING_KEY": "a" * 32,
     }.items():
         monkeypatch.setenv(key, value)
     fake = FakeServer()
     monkeypatch.setattr(main_module, "create_mcp_server", lambda _resolver, **_kwargs: fake)
+    monkeypatch.setattr(main_module.uvicorn, "run", lambda *_args, **_kwargs: None)
 
     main_module.main(["--profile", profile])
 
@@ -43,7 +51,6 @@ def test_profile_selects_approved_transport(
     if expected_transport == "streamable-http":
         assert fake.calls[0][1] == {
             "host": "127.0.0.1",
-            "port": 8000,
             "stateless_http": True,
             "json_response": True,
         }
@@ -66,6 +73,31 @@ def test_empty_permission_mapping_grants_no_permissions() -> None:
     config = PermissionConfig(permissions={"core_read": ()})
 
     assert main_module._permissions(config) == frozenset()
+
+
+def test_dedicated_profile_rejects_missing_authentication_settings(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    for key, value in {
+        "ODOO_MCP_ODOO_URL": "https://odoo.invalid",
+        "ODOO_MCP_ODOO_DATABASE": "synthetic-db",
+        "ODOO_MCP_ODOO_USERNAME": "synthetic-user",
+        "ODOO_MCP_ODOO_API_KEY": "synthetic-secret",
+        "ODOO_MCP_ALLOWED_COMPANY_IDS": "1",
+        "ODOO_MCP_DEFAULT_COMPANY_ID": "1",
+    }.items():
+        monkeypatch.setenv(key, value)
+    for key in (
+        "ODOO_MCP_AUTH_ISSUER",
+        "ODOO_MCP_AUTH_AUDIENCE",
+        "ODOO_MCP_AUTH_SIGNING_KEY",
+    ):
+        monkeypatch.delenv(key, raising=False)
+    fake = FakeServer()
+    monkeypatch.setattr(main_module, "create_mcp_server", lambda _resolver, **_kwargs: fake)
+
+    with pytest.raises(SystemExit):
+        main_module.main(["--profile", "dedicated"])
 
 
 @pytest.mark.parametrize(

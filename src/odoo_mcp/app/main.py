@@ -6,14 +6,19 @@ import argparse
 from pathlib import Path
 from typing import NoReturn
 
+import uvicorn
+from starlette.types import ASGIApp
+
 from odoo_mcp.adapters.odoo.connections import (
     ConnectionBinding,
     ConnectionResolver,
     ConnectorAuthorization,
+    DedicatedConnectionResolver,
     EncryptedConnectionRepository,
     SharedHostedConnectionResolver,
     StaticConnectionResolver,
 )
+from odoo_mcp.app.remote_auth import load_dedicated_auth_settings, protect_dedicated_app
 from odoo_mcp.app.settings import (
     DeploymentProfile,
     OdooConnectionSettings,
@@ -89,6 +94,12 @@ def build_resolver(
         return SharedHostedConnectionResolver(repository)
     if settings.connection is None:
         raise SettingsError("The deployment profile has no Odoo connection")
+    if profile is DeploymentProfile.DEDICATED:
+        return DedicatedConnectionResolver(
+            tenant_id="deployment:dedicated",
+            permissions=_permissions(config),
+            connection=settings.connection,
+        )
     return StaticConnectionResolver(
         ConnectionBinding(
             profile=profile,
@@ -121,13 +132,17 @@ def main(argv: list[str] | None = None) -> None:
     if transport == "stdio":
         server.run(transport="stdio")
     else:
-        server.run(
-            transport="streamable-http",
+        app: ASGIApp = server.streamable_http_app(
             host=args.host,
-            port=args.port,
             stateless_http=True,
             json_response=True,
         )
+        if profile is DeploymentProfile.DEDICATED:
+            try:
+                app = protect_dedicated_app(app, load_dedicated_auth_settings())
+            except SettingsError as exc:
+                _fail(parser, str(exc))
+        uvicorn.run(app, host=args.host, port=args.port)
 
 
 if __name__ == "__main__":

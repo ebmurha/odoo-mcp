@@ -11,6 +11,9 @@ services:
       ODOO_MCP_ODOO_API_KEY: "${ODOO_MCP_ODOO_API_KEY:?set in the operator environment}"
       ODOO_MCP_ALLOWED_COMPANY_IDS: "${ODOO_MCP_ALLOWED_COMPANY_IDS:?set in the operator environment}"
       ODOO_MCP_DEFAULT_COMPANY_ID: "${ODOO_MCP_DEFAULT_COMPANY_ID:?set in the operator environment}"
+      ODOO_MCP_AUTH_ISSUER: "${ODOO_MCP_AUTH_ISSUER:?set in the operator environment}"
+      ODOO_MCP_AUTH_AUDIENCE: "${ODOO_MCP_AUTH_AUDIENCE:?set in the operator environment}"
+      ODOO_MCP_AUTH_SIGNING_KEY: "${ODOO_MCP_AUTH_SIGNING_KEY:?set in the operator environment}"
     ports:
       - "127.0.0.1:8000:8000"
     volumes:

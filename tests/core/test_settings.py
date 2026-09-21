@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 
+from odoo_mcp.app.remote_auth import load_dedicated_auth_settings
 from odoo_mcp.app.settings import DeploymentProfile, SettingsError, load_settings
 
 REQUIRED = {
@@ -98,3 +99,15 @@ def test_configured_odoo_version_is_rejected(monkeypatch: pytest.MonkeyPatch) ->
 
     assert "ODOO_MCP_ODOO_VERSION" in str(caught.value)
     assert "19-secret-value" not in str(caught.value)
+
+
+def test_dedicated_auth_settings_fail_safely(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ODOO_MCP_AUTH_ISSUER", "https://identity.invalid")
+    monkeypatch.setenv("ODOO_MCP_AUTH_AUDIENCE", "odoo-mcp")
+    monkeypatch.setenv("ODOO_MCP_AUTH_SIGNING_KEY", "secret-value")
+
+    with pytest.raises(SettingsError) as caught:
+        load_dedicated_auth_settings()
+
+    assert str(caught.value) == "Missing or invalid Dedicated Remote authentication setting"
+    assert "secret-value" not in str(caught.value)

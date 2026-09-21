@@ -18,9 +18,10 @@ Include the affected version, impact, and a minimal synthetic reproduction.
 - Keep Odoo credentials, Shared Hosted encryption keys, and remote-connector
   credentials in an operator-controlled secret store. Never bake them into an
   image, commit them, or place them in command arguments.
-- Terminate TLS and authenticate remote MCP clients before supplying a trusted
-  connector identity. Forwarded identity headers are not trusted by this
-  package.
+- Terminate TLS for remote MCP clients. Dedicated Remote also validates its own
+  deployment-issued HS256 bearer JWT before MCP routing; keep its signing key in
+  a secret store. Shared Hosted must authenticate before supplying a trusted
+  connector identity. Forwarded identity headers are not trusted.
 - Bind the included Dedicated Remote template to loopback and place it behind a
   hardened reverse proxy or private network boundary.
 - Back up SQLite data and Shared Hosted key material separately. A database

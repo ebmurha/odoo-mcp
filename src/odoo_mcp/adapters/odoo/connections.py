@@ -23,6 +23,15 @@ class ConnectorAuthorization(BaseModel):
     permissions: frozenset[str]
 
 
+class RemoteIdentity(BaseModel):
+    """Validated immutable identity for one Dedicated Remote request."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    subject: str = Field(min_length=1)
+    client_id: str = Field(min_length=1)
+
+
 class ConnectionBinding(BaseModel):
     """Resolved isolation identity and normalized Odoo connection."""
 
@@ -52,6 +61,9 @@ _connector_authorization: ContextVar[ConnectorAuthorization | None] = ContextVar
     "odoo_mcp_connector_authorization",
     default=None,
 )
+_remote_identity: ContextVar[RemoteIdentity | None] = ContextVar(
+    "odoo_mcp_remote_identity", default=None
+)
 
 
 def set_connector_authorization(
@@ -64,6 +76,14 @@ def reset_connector_authorization(token: Token[ConnectorAuthorization | None]) -
     _connector_authorization.reset(token)
 
 
+def set_remote_identity(value: RemoteIdentity) -> Token[RemoteIdentity | None]:
+    return _remote_identity.set(value)
+
+
+def reset_remote_identity(token: Token[RemoteIdentity | None]) -> None:
+    _remote_identity.reset(token)
+
+
 class StaticConnectionResolver:
     """Resolver for Local Development and Dedicated Remote."""
 
@@ -74,6 +94,38 @@ class StaticConnectionResolver:
 
     async def resolve(self) -> ConnectionBinding:
         return self._binding
+
+
+class DedicatedConnectionResolver:
+    """Bind a validated remote subject to one deployment-owned connection."""
+
+    def __init__(
+        self,
+        *,
+        tenant_id: str,
+        permissions: frozenset[str],
+        connection: OdooConnectionSettings,
+    ) -> None:
+        self._tenant_id = tenant_id
+        self._permissions = permissions
+        self._connection = connection
+
+    async def resolve(self) -> ConnectionBinding:
+        identity = _remote_identity.get()
+        if identity is None:
+            raise OdooMcpError(
+                ErrorCode.ODOO_AUTH_FAILED,
+                "An authenticated remote identity is required.",
+                "Reconnect with a valid bearer token and retry.",
+            )
+        return ConnectionBinding(
+            profile=DeploymentProfile.DEDICATED,
+            tenant_id=self._tenant_id,
+            authenticated_subject=identity.subject,
+            mcp_client=identity.client_id,
+            permissions=self._permissions,
+            connection=self._connection,
+        )
 
 
 class SharedHostedConnectionResolver:

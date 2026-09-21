@@ -43,6 +43,10 @@ def test_release_documentation_and_deployment_templates_are_present() -> None:
     compose = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
     assert "mcp-name: io.github.ebmurha/odoo-mcp" in readme
     assert "USER odoo-mcp" in dockerfile
+    assert "FROM python:3.11.16-slim@sha256:" in dockerfile
+    assert "uv sync --frozen --no-dev" in dockerfile
+    assert "pip install" not in dockerfile
+    assert "uv.lock pyproject.toml README.md LICENSE NOTICE" in dockerfile
     assert "COPY .env" not in dockerfile
     assert "127.0.0.1:8000:8000" in compose
     assert "ODOO_MCP_ODOO_API_KEY" in compose

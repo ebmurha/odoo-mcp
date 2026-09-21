@@ -6,9 +6,13 @@ from mcp import Client
 from odoo_mcp.adapters.base import CapabilitySnapshot, Company, OdooAdapter
 from odoo_mcp.adapters.odoo.connections import (
     ConnectorAuthorization,
+    DedicatedConnectionResolver,
+    RemoteIdentity,
     SharedHostedConnectionResolver,
     reset_connector_authorization,
+    reset_remote_identity,
     set_connector_authorization,
+    set_remote_identity,
 )
 from odoo_mcp.app.settings import DeploymentProfile, OdooConnectionSettings
 from odoo_mcp.mcp.error_codes import ErrorCode, OdooMcpError
@@ -25,6 +29,43 @@ class Repository:
     ) -> OdooConnectionSettings | None:
         self.seen = authorization
         return self.connection
+
+
+async def test_dedicated_remote_binds_validated_identity(
+    connection: OdooConnectionSettings,
+) -> None:
+    resolver = DedicatedConnectionResolver(
+        tenant_id="deployment:dedicated",
+        permissions=frozenset({"core_read"}),
+        connection=connection,
+    )
+    token = set_remote_identity(RemoteIdentity(subject="subject-a", client_id="client-a"))
+    try:
+        binding = await resolver.resolve()
+    finally:
+        reset_remote_identity(token)
+
+    assert binding.profile is DeploymentProfile.DEDICATED
+    assert binding.tenant_id == "deployment:dedicated"
+    assert binding.authenticated_subject == "subject-a"
+    assert binding.mcp_client == "client-a"
+    assert binding.permissions == frozenset({"core_read"})
+    assert binding.connection is connection
+
+
+async def test_dedicated_remote_fails_closed_without_identity(
+    connection: OdooConnectionSettings,
+) -> None:
+    resolver = DedicatedConnectionResolver(
+        tenant_id="deployment:dedicated",
+        permissions=frozenset({"core_read"}),
+        connection=connection,
+    )
+
+    with pytest.raises(OdooMcpError) as caught:
+        await resolver.resolve()
+
+    assert caught.value.code is ErrorCode.ODOO_AUTH_FAILED
 
 
 async def test_shared_hosted_binds_authorized_connector_to_one_connection(
