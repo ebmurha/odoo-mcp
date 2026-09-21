@@ -37,6 +37,15 @@ docker compose build
 docker compose up -d
 ```
 
+To build and qualify the release image independently of Odoo, run:
+
+```console
+uv run python scripts/verify_docker.py
+```
+
+The check imports the installed package through the image's virtual environment
+and verifies that the container runs as a non-root user.
+
 The Compose template publishes only `127.0.0.1:8000`. Put a TLS-terminating
 reverse proxy or private-network gateway in front of `/mcp`.
 The package does not treat forwarding headers as identity. The unauthenticated

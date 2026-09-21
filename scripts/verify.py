@@ -26,6 +26,7 @@ REQUIRED_SDIST_SUFFIXES = {
     "/docker-compose.yml",
     "/docs/deployment.md",
     "/docs/operations.md",
+    "/scripts/verify_docker.py",
     "/server.json",
 }
 
