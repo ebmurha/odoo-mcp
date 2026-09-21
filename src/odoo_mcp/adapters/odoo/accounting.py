@@ -7,7 +7,7 @@ import binascii
 from collections.abc import Awaitable, Callable, Mapping
 from datetime import date
 from decimal import Decimal, InvalidOperation
-from typing import TypeAlias, TypeVar, cast
+from typing import Literal, TypeAlias, TypeVar, cast
 
 from odoo_mcp.adapters.accounting import (
     DEFAULT_PAGE_REQUEST,
@@ -79,6 +79,7 @@ _ACCOUNT_MOVE_FIELDS = [
 _ACCOUNT_MOVE_LINE_FIELDS = [
     "id",
     "move_id",
+    "parent_state",
     "account_id",
     "journal_id",
     "partner_id",
@@ -213,6 +214,7 @@ _FILTER_FIELDS: dict[str, frozenset[str]] = {
             "id",
             "move_id",
             "move_id.state",
+            "parent_state",
             "account_id",
             "account_id.account_type",
             "journal_id",
@@ -298,6 +300,14 @@ def _text(value: object) -> str:
     if not isinstance(value, str):
         raise _invalid_response()
     return value
+
+
+def _move_state(value: object) -> Literal["draft", "posted"]:
+    if value == "draft":
+        return "draft"
+    if value == "posted":
+        return "posted"
+    raise _invalid_response()
 
 
 def _optional_text(value: object) -> str | None:
@@ -417,6 +427,7 @@ def _normalize_account_move_line(raw: RawRecord) -> AccountMoveLine:
     return AccountMoveLine(
         id=_read_field(raw, "account.move.line", "id", _positive_int),
         move=_read_field(raw, "account.move.line", "move_id", _relation),
+        move_state=_read_field(raw, "account.move.line", "parent_state", _move_state),
         account=_read_field(raw, "account.move.line", "account_id", _relation),
         journal=_read_field(raw, "account.move.line", "journal_id", _relation),
         partner=_read_field(raw, "account.move.line", "partner_id", _optional_relation),

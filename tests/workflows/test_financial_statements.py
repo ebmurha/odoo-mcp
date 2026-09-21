@@ -39,11 +39,13 @@ def _line(
     debit: str = "0",
     credit: str = "0",
     line_date: date = date(2026, 3, 31),
+    move_state: str = "posted",
     analytics: dict[str, Decimal] | None = None,
 ) -> AccountMoveLine:
     return AccountMoveLine(
         id=identifier,
         move=RelatedRecord(id=100 + identifier, name=f"MVE/{identifier}"),
+        move_state=move_state,
         account=RelatedRecord(id=account.id, name=account.name),
         journal=RelatedRecord(id=10, name="General"),
         company_id=1,
@@ -172,13 +174,70 @@ async def test_profit_and_loss_classifies_odoo_types_and_reconciles_totals() -> 
     assert any(clause.field == "date" and clause.operator == "<=" for clause in source_filters)
 
 
-async def test_profit_and_loss_applies_exact_analytic_filter() -> None:
+@pytest.mark.parametrize(
+    "line_date",
+    [date(2025, 12, 31), date(2026, 4, 1)],
+)
+async def test_profit_and_loss_rejects_line_outside_requested_period(line_date: date) -> None:
+    revenue = _account(40, "4000", "Revenue", "income")
+    cash = _account(10, "1000", "Cash", "asset_cash")
+    adapter = StatementAdapter(
+        accounts=[revenue, cash],
+        lines=[
+            _line(1, revenue, credit="100", line_date=line_date),
+            _line(2, cash, debit="100", line_date=line_date),
+        ],
+    )
+
+    with pytest.raises(OdooMcpError) as caught:
+        await get_profit_and_loss(
+            adapter,
+            ProfitAndLossInput(
+                company_id=1,
+                period_start=date(2026, 1, 1),
+                period_end=date(2026, 3, 31),
+            ),
+            company_currency_id=1,
+            company_name="Synthetic Co",
+            request_id="req-out-of-period",
+        )
+
+    assert caught.value.code is ErrorCode.ODOO_API_ERROR
+
+
+async def test_profit_and_loss_rejects_unreconciled_source_ledger() -> None:
     revenue = _account(40, "4000", "Revenue", "income")
     adapter = StatementAdapter(
         accounts=[revenue],
+        lines=[_line(1, revenue, credit="100")],
+    )
+
+    with pytest.raises(OdooMcpError) as caught:
+        await get_profit_and_loss(
+            adapter,
+            ProfitAndLossInput(
+                company_id=1,
+                period_start=date(2026, 1, 1),
+                period_end=date(2026, 3, 31),
+            ),
+            company_currency_id=1,
+            company_name="Synthetic Co",
+            request_id="req-unreconciled-pnl",
+        )
+
+    assert caught.value.code is ErrorCode.ODOO_API_ERROR
+
+
+async def test_profit_and_loss_applies_exact_analytic_filter() -> None:
+    revenue = _account(40, "4000", "Revenue", "income")
+    cash = _account(10, "1000", "Cash", "asset_cash")
+    adapter = StatementAdapter(
+        accounts=[revenue, cash],
         lines=[
             _line(1, revenue, credit="100", analytics={"77,88": Decimal("50")}),
             _line(2, revenue, credit="25", analytics={"99": Decimal("100")}),
+            _line(3, cash, debit="100", analytics={"77,88": Decimal("50")}),
+            _line(4, cash, debit="25", analytics={"99": Decimal("100")}),
         ],
     )
 
@@ -271,6 +330,66 @@ async def test_unfiltered_unbalanced_balance_sheet_fails_explicitly() -> None:
             company_name="Synthetic Co",
             request_id="req-unbalanced",
         )
+
+    assert caught.value.code is ErrorCode.ODOO_API_ERROR
+
+
+async def test_balance_sheet_rejects_line_after_as_of_date() -> None:
+    cash = _account(10, "1000", "Cash", "asset_cash")
+    equity = _account(30, "3000", "Capital", "equity")
+    adapter = StatementAdapter(
+        accounts=[cash, equity],
+        lines=[
+            _line(1, cash, debit="100", line_date=date(2026, 4, 1)),
+            _line(2, equity, credit="100", line_date=date(2026, 4, 1)),
+        ],
+    )
+
+    with pytest.raises(OdooMcpError) as caught:
+        await get_balance_sheet(
+            adapter,
+            BalanceSheetInput(company_id=1, as_of_date=date(2026, 3, 31)),
+            company_currency_id=1,
+            company_name="Synthetic Co",
+            request_id="req-future-balance",
+        )
+
+    assert caught.value.code is ErrorCode.ODOO_API_ERROR
+
+
+@pytest.mark.parametrize("statement", ["profit_and_loss", "balance_sheet"])
+async def test_financial_statements_reject_non_posted_lines(statement: str) -> None:
+    cash = _account(10, "1000", "Cash", "asset_cash")
+    revenue = _account(40, "4000", "Revenue", "income")
+    adapter = StatementAdapter(
+        accounts=[cash, revenue],
+        lines=[
+            _line(1, cash, debit="100", move_state="draft"),
+            _line(2, revenue, credit="100", move_state="draft"),
+        ],
+    )
+
+    with pytest.raises(OdooMcpError) as caught:
+        if statement == "profit_and_loss":
+            await get_profit_and_loss(
+                adapter,
+                ProfitAndLossInput(
+                    company_id=1,
+                    period_start=date(2026, 1, 1),
+                    period_end=date(2026, 3, 31),
+                ),
+                company_currency_id=1,
+                company_name="Synthetic Co",
+                request_id="req-draft-pnl",
+            )
+        else:
+            await get_balance_sheet(
+                adapter,
+                BalanceSheetInput(company_id=1, as_of_date=date(2026, 3, 31)),
+                company_currency_id=1,
+                company_name="Synthetic Co",
+                request_id="req-draft-bs",
+            )
 
     assert caught.value.code is ErrorCode.ODOO_API_ERROR
 

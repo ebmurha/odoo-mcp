@@ -35,6 +35,7 @@ def _line(
     return AccountMoveLine(
         id=identifier,
         move=RelatedRecord(id=100 + identifier, name=f"MVE/{identifier}"),
+        move_state="posted",
         account=RelatedRecord(id=account_id, name=account_name),
         journal=RelatedRecord(id=10, name="General"),
         partner=(None if partner_id is None else RelatedRecord(id=partner_id, name=partner_name)),

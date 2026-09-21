@@ -131,6 +131,7 @@ class BankAdapter:
                 AccountMoveLine(
                     id=2001,
                     move=RelatedRecord(id=3001, name="INV/42"),
+                    move_state="posted",
                     account=RelatedRecord(id=400, name="Receivable"),
                     journal=RelatedRecord(
                         id=journal_id,

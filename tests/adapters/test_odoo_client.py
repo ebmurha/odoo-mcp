@@ -516,10 +516,14 @@ async def test_trial_balance_reconciles_through_both_transport_contracts(
             args = body["params"]["args"]
             if body["params"]["service"] == "common":
                 return httpx.Response(200, json={"result": 7})
+            if args[3] == "account.move.line":
+                assert "parent_state" in args[6]["fields"]
             return httpx.Response(200, json={"result": result_for(args[3])})
         if request.url.path == "/json/2/res.users/context_get":
             return httpx.Response(200, json={"uid": 7})
         model = request.url.path.split("/")[3]
+        if model == "account.move.line":
+            assert "parent_state" in body["fields"]
         return httpx.Response(200, json=result_for(model))
 
     adapter = await OdooClient.connect(
@@ -643,6 +647,98 @@ async def test_financial_statements_reconcile_through_both_transport_contracts(
 
 
 @pytest.mark.parametrize("major", [18, 19])
+@pytest.mark.parametrize("statement", ["profit_and_loss", "balance_sheet"])
+@pytest.mark.parametrize("attack", ["wrong_date", "draft"])
+async def test_financial_statements_reject_malformed_scoped_rows_on_both_transports(
+    connection: OdooConnectionSettings,
+    major: int,
+    statement: str,
+    attack: str,
+) -> None:
+    line_date = "2025-12-31" if statement == "profit_and_loss" else "2026-04-01"
+    if attack == "draft":
+        line_date = "2026-03-01"
+    parent_state = "draft" if attack == "draft" else "posted"
+
+    def move_line(
+        identifier: int,
+        account_id: int,
+        account_name: str,
+        debit: str,
+        credit: str,
+    ) -> dict[str, object]:
+        row = _account_move_line_row()
+        row.update(
+            {
+                "id": identifier,
+                "account_id": [account_id, account_name],
+                "date": line_date,
+                "parent_state": parent_state,
+                "debit": debit,
+                "credit": credit,
+                "balance": str(Decimal(debit) - Decimal(credit)),
+                "amount_currency": str(Decimal(debit) - Decimal(credit)),
+            }
+        )
+        return row
+
+    def result_for(model: str) -> list[dict[str, object]]:
+        if model == "res.company":
+            return [{"id": 1, "name": "Alpha"}, {"id": 2, "name": "Beta"}]
+        if model == "account.move.line":
+            return [
+                move_line(1, 10, "Cash", "100", "0"),
+                move_line(2, 40, "Revenue", "0", "100"),
+            ]
+        if model == "res.currency":
+            return [{"id": 40, "name": "USD", "rounding": "0.01"}]
+        pytest.fail(f"Unexpected model: {model}")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/web/webclient/version_info":
+            return _version_response(major)
+        body: dict[str, Any] = __import__("json").loads(request.content)
+        if major == 18:
+            args = body["params"]["args"]
+            if body["params"]["service"] == "common":
+                return httpx.Response(200, json={"result": 7})
+            return httpx.Response(200, json={"result": result_for(args[3])})
+        if request.url.path == "/json/2/res.users/context_get":
+            return httpx.Response(200, json={"uid": 7})
+        model = request.url.path.split("/")[3]
+        return httpx.Response(200, json=result_for(model))
+
+    adapter = await OdooClient.connect(connection, http_transport=httpx.MockTransport(handler))
+    try:
+        await adapter.get_companies()
+        with pytest.raises(OdooMcpError) as caught:
+            if statement == "profit_and_loss":
+                await get_profit_and_loss(
+                    adapter,
+                    ProfitAndLossInput(
+                        company_id=1,
+                        period_start=date(2026, 1, 1),
+                        period_end=date(2026, 3, 31),
+                    ),
+                    company_currency_id=40,
+                    company_name="Alpha",
+                    request_id="req_malformed_pnl",
+                )
+            else:
+                await get_balance_sheet(
+                    adapter,
+                    BalanceSheetInput(company_id=1, as_of_date=date(2026, 3, 31)),
+                    company_currency_id=40,
+                    company_name="Alpha",
+                    request_id="req_malformed_bs",
+                )
+    finally:
+        await adapter.close()
+
+    assert caught.value.code is ErrorCode.ODOO_API_ERROR
+
+
+@pytest.mark.parametrize("major", [18, 19])
 async def test_accounting_acl_denial_is_safe_and_specific(
     connection: OdooConnectionSettings,
     major: int,
@@ -727,6 +823,7 @@ def _account_move_line_row() -> dict[str, object]:
     return {
         "id": 1,
         "move_id": [2, "MVE/2"],
+        "parent_state": "posted",
         "account_id": [3, "Cash"],
         "journal_id": [4, "General"],
         "partner_id": False,

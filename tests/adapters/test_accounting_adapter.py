@@ -547,6 +547,7 @@ async def test_exact_journal_entry_rejects_line_from_another_move(
     line = {
         "id": 1001,
         "move_id": [202, "MVE/202"],
+        "parent_state": "posted",
         "account_id": [10, "Debit"],
         "journal_id": [30, "Synthetic Journal"],
         "partner_id": False,
@@ -587,6 +588,7 @@ async def test_manual_journal_draft_creation_is_separate_from_posting(
                 {
                     "id": 1001,
                     "move_id": [901, "MVE/901"],
+                    "parent_state": "draft",
                     "account_id": [10, "Debit"],
                     "journal_id": [30, "Synthetic Journal"],
                     "partner_id": [20, "Synthetic Partner"],
@@ -942,6 +944,7 @@ async def test_every_accounting_record_shape_is_normalized(
             {
                 "id": 1,
                 "move_id": [2, "MVE/2"],
+                "parent_state": "posted",
                 "account_id": [3, "1000 Cash"],
                 "journal_id": [4, "Bank"],
                 "partner_id": False,

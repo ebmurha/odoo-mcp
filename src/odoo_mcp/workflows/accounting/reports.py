@@ -477,6 +477,16 @@ def _validate_line_amounts(lines: Iterable[AccountMoveLine], rounding: Decimal) 
         raise _invalid_report_response()
 
 
+def _validate_statement_lines(
+    lines: Iterable[AccountMoveLine], *, start: date | None, end: date
+) -> None:
+    if any(
+        line.move_state != "posted" or line.date > end or (start is not None and line.date < start)
+        for line in lines
+    ):
+        raise _invalid_report_response()
+
+
 def _pnl_artifact(
     request: ProfitAndLossInput,
     company_name: str,
@@ -541,7 +551,14 @@ async def get_profit_and_loss(
             )
         ),
     )
+    _validate_statement_lines(lines, start=request.period_start, end=request.period_end)
     _validate_line_amounts(lines, rounding)
+    if _rounded(sum((line.balance for line in lines), _ZERO), rounding) != _ZERO:
+        raise OdooMcpError(
+            ErrorCode.ODOO_API_ERROR,
+            "The full-company profit and loss source did not reconcile.",
+            "Check Odoo record access and accounting data, then retry.",
+        )
     identifiers = {line.account.id for line in lines}
     accounts = _account_map(
         await _accounts(adapter, request.company_id, tuple(sorted(identifiers))), identifiers
@@ -687,6 +704,7 @@ async def get_balance_sheet(
             )
         ),
     )
+    _validate_statement_lines(lines, start=None, end=request.as_of_date)
     _validate_line_amounts(lines, rounding)
     if _rounded(sum((line.balance for line in lines), _ZERO), rounding) != _ZERO:
         raise OdooMcpError(

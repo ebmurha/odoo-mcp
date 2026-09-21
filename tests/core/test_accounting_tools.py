@@ -34,9 +34,16 @@ class Resolver:
 
 
 class AccountingAdapter:
-    def __init__(self, *, account_available: bool = True, fail_lines: bool = False) -> None:
+    def __init__(
+        self,
+        *,
+        account_available: bool = True,
+        fail_lines: bool = False,
+        partial_ledger: bool = False,
+    ) -> None:
         self.account_available = account_available
         self.fail_lines = fail_lines
+        self.partial_ledger = partial_ledger
         self.closed = False
 
     async def get_companies(self) -> list[Company]:
@@ -65,42 +72,45 @@ class AccountingAdapter:
                 "The accounting read timed out.",
                 "Retry the request.",
             )
-        return RecordPage(
-            items=[
-                AccountMoveLine(
-                    id=1,
-                    move=RelatedRecord(id=2, name="MVE/1"),
-                    account=RelatedRecord(id=3, name="Cash"),
-                    journal=RelatedRecord(id=4, name="General"),
-                    company_id=company_id,
-                    date=date(2026, 1, 15),
-                    debit=Decimal("10"),
-                    credit=Decimal("0"),
-                    balance=Decimal("10"),
-                    amount_currency=Decimal("10"),
-                    residual=Decimal("0"),
-                    residual_currency=Decimal("0"),
-                    reconciled=True,
-                    analytic_distribution={},
-                ),
-                AccountMoveLine(
-                    id=5,
-                    move=RelatedRecord(id=6, name="MVE/1"),
-                    account=RelatedRecord(id=7, name="Revenue"),
-                    journal=RelatedRecord(id=4, name="General"),
-                    company_id=company_id,
-                    date=date(2026, 1, 15),
-                    debit=Decimal("0"),
-                    credit=Decimal("10"),
-                    balance=Decimal("-10"),
-                    amount_currency=Decimal("-10"),
-                    residual=Decimal("0"),
-                    residual_currency=Decimal("0"),
-                    reconciled=True,
-                    analytic_distribution={},
-                ),
-            ]
-        )
+        items = [
+            AccountMoveLine(
+                id=1,
+                move=RelatedRecord(id=2, name="MVE/1"),
+                move_state="posted",
+                account=RelatedRecord(id=3, name="Cash"),
+                journal=RelatedRecord(id=4, name="General"),
+                company_id=company_id,
+                date=date(2026, 1, 15),
+                debit=Decimal("10"),
+                credit=Decimal("0"),
+                balance=Decimal("10"),
+                amount_currency=Decimal("10"),
+                residual=Decimal("0"),
+                residual_currency=Decimal("0"),
+                reconciled=True,
+                analytic_distribution={},
+            ),
+            AccountMoveLine(
+                id=5,
+                move=RelatedRecord(id=6, name="MVE/1"),
+                move_state="posted",
+                account=RelatedRecord(id=7, name="Revenue"),
+                journal=RelatedRecord(id=4, name="General"),
+                company_id=company_id,
+                date=date(2026, 1, 15),
+                debit=Decimal("0"),
+                credit=Decimal("10"),
+                balance=Decimal("-10"),
+                amount_currency=Decimal("-10"),
+                residual=Decimal("0"),
+                residual_currency=Decimal("0"),
+                reconciled=True,
+                analytic_distribution={},
+            ),
+        ]
+        if self.partial_ledger:
+            items = [items[1]]
+        return RecordPage(items=items)
 
     async def get_account_accounts(
         self,
@@ -528,6 +538,40 @@ async def test_financial_statement_invalid_input_and_timeout_are_audited(
     with timeout_storage.database.transaction() as database:
         assert database.execute("SELECT COUNT(*) FROM artifacts").fetchone()[0] == 0
     assert timeout_storage.audit.list_for_tenant("tenant-accounting")[0].final_status == "failed"
+
+
+async def test_unreconciled_profit_and_loss_source_fails_without_artifact(
+    connection: OdooConnectionSettings,
+    tmp_path,
+) -> None:
+    storage = Storage.open(tmp_path / "partial-profit-and-loss.sqlite3")
+    adapter = AccountingAdapter(partial_ledger=True)
+
+    async def factory(_connection: object) -> OdooAdapter:
+        return adapter
+
+    server = create_mcp_server(
+        Resolver(_binding(connection)),
+        adapter_factory=factory,
+        storage=storage,
+    )
+    async with Client(server) as client:
+        result = await client.call_tool(
+            "get_profit_and_loss",
+            {
+                "period_start": "2026-01-01",
+                "period_end": "2026-03-31",
+                "company_id": 1,
+            },
+        )
+
+    assert result.structured_content is not None
+    assert result.structured_content["error_code"] == "ODOO_API_ERROR"
+    with storage.database.transaction() as database:
+        assert database.execute("SELECT COUNT(*) FROM artifacts").fetchone()[0] == 0
+    audit = storage.audit.list_for_tenant("tenant-accounting")[0]
+    assert audit.tool_name == "get_profit_and_loss"
+    assert audit.final_status == "failed"
 
 
 async def test_invalid_aging_filter_is_audited_without_adapter_creation(

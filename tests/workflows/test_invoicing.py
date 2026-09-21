@@ -63,6 +63,7 @@ def _receivable_line() -> AccountMoveLine:
     return AccountMoveLine(
         id=501,
         move=RelatedRecord(id=101, name="INV/101"),
+        move_state="posted",
         account=RelatedRecord(id=60, name="Receivable"),
         journal=RelatedRecord(id=30, name="Sales"),
         partner=RelatedRecord(id=20, name="Synthetic Customer"),

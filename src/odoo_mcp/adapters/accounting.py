@@ -102,6 +102,7 @@ class AccountMove(AdapterValue):
 class AccountMoveLine(AdapterValue):
     id: int = Field(gt=0)
     move: RelatedRecord
+    move_state: Literal["draft", "posted"]
     account: RelatedRecord
     journal: RelatedRecord
     partner: RelatedRecord | None = None
