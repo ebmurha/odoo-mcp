@@ -395,7 +395,7 @@ def _analytic_distribution(value: object) -> dict[str, Decimal]:
 def _normalize_account_move(raw: RawRecord) -> AccountMove:
     return AccountMove(
         id=_positive_int(raw.get("id")),
-        name=_text(raw.get("name")),
+        name=_optional_text(raw.get("name")) or "/",
         move_type=_text(raw.get("move_type")),
         state=_text(raw.get("state")),
         date=_date(raw.get("date")),

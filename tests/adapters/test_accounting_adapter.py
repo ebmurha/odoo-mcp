@@ -515,6 +515,18 @@ async def test_account_moves_are_typed_scoped_and_cursor_paginated(
     assert "password" not in first.items[0].model_dump()
 
 
+async def test_unnumbered_draft_journal_entry_uses_placeholder_name(
+    connection: OdooConnectionSettings,
+) -> None:
+    row = _move(3)
+    row.update({"name": False, "state": "draft"})
+    client = await _validated_client(connection, FakeTransport({"account.move": [row]}))
+
+    result = await client.get_account_moves(1, ReadFilters(), PageRequest(limit=1))
+
+    assert result.items[0].name == "/"
+
+
 async def test_manual_journal_draft_creation_is_separate_from_posting(
     connection: OdooConnectionSettings,
 ) -> None:
