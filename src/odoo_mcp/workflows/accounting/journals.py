@@ -416,6 +416,12 @@ async def prepare_journal_entry_post(
     adapter: OdooAdapter, request: PostJournalEntryInput
 ) -> tuple[JournalEntry, PreparedWrite]:
     entry = await adapter.get_journal_entry(request.company_id, request.move_id)
+    if entry.id != request.move_id:
+        raise _error(
+            ErrorCode.ODOO_API_ERROR,
+            "Odoo returned an invalid journal entry response.",
+            "Retry the request or contact the Odoo administrator.",
+        )
     if entry.move_type != "entry" or entry.state != "draft":
         raise _error(
             ErrorCode.JOURNAL_ENTRY_NOT_DRAFT,
@@ -449,6 +455,12 @@ async def execute_journal_entry_post(
     adapter: OdooAdapter, company_id: int, move_id: int
 ) -> AppliedWrite:
     entry = await adapter.post_journal_entry(company_id, move_id)
+    if entry.id != move_id:
+        raise _error(
+            ErrorCode.ODOO_API_ERROR,
+            "Odoo returned an invalid journal entry response.",
+            "Verify the journal entry in Odoo before retrying.",
+        )
     return AppliedWrite(
         material_effects=_entry_effect(entry), record_refs=(f"account.move:{entry.id}",)
     )

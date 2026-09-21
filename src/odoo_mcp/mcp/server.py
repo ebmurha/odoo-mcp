@@ -1678,7 +1678,13 @@ def create_mcp_server(
         async def execute_op(adapter: OdooAdapter, state: object) -> AppliedWrite:
             if not isinstance(state, JournalEntry):
                 raise RuntimeError("Invalid prepared journal-post state")
-            return await execute_journal_entry_post(adapter, request.company_id, state.id)
+            if state.id != request.move_id:
+                raise OdooMcpError(
+                    ErrorCode.ODOO_STATE_CONFLICT,
+                    "The draft journal entry identity changed before posting.",
+                    "Refresh and retry with a new idempotency key.",
+                )
+            return await execute_journal_entry_post(adapter, request.company_id, request.move_id)
 
         return await accounting_write(
             post_journal_definition,

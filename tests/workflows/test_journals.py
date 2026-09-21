@@ -27,6 +27,7 @@ from odoo_mcp.mcp.schemas import (
     PostJournalEntryInput,
 )
 from odoo_mcp.workflows.accounting.journals import (
+    execute_journal_entry_post,
     list_journal_entries,
     prepare_journal_entry_draft,
     prepare_journal_entry_post,
@@ -135,6 +136,10 @@ class JournalAdapter:
         assert company_id == 1 and move_id == 101
         return self.entry
 
+    async def post_journal_entry(self, company_id: int, move_id: int) -> JournalEntry:
+        assert company_id == 1 and move_id == 101
+        return self.entry
+
 
 def _create_request(debit: str = "100.004", credit: str = "100") -> CreateJournalEntryInput:
     return CreateJournalEntryInput(
@@ -236,6 +241,27 @@ async def test_post_preview_reports_blocking_unbalanced_finding() -> None:
 
     assert preview.needs_input is True
     assert preview.material_effects["blocking_findings"] == ["JOURNAL_ENTRY_UNBALANCED"]
+
+
+async def test_post_preview_rejects_substituted_move_identity() -> None:
+    entry = _entry().model_copy(update={"id": 202})
+
+    with pytest.raises(OdooMcpError) as raised:
+        await prepare_journal_entry_post(
+            JournalAdapter(entry),
+            PostJournalEntryInput(company_id=1, move_id=101),
+        )
+
+    assert raised.value.code is ErrorCode.ODOO_API_ERROR
+
+
+async def test_post_execution_rejects_substituted_read_back_identity() -> None:
+    entry = _entry(state="posted").model_copy(update={"id": 202})
+
+    with pytest.raises(OdooMcpError) as raised:
+        await execute_journal_entry_post(JournalAdapter(entry), 1, 101)
+
+    assert raised.value.code is ErrorCode.ODOO_API_ERROR
 
 
 async def test_post_rejects_non_draft_manual_entry() -> None:

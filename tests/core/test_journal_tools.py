@@ -69,8 +69,9 @@ def _entry(state: str) -> JournalEntry:
 
 
 class JournalAdapter:
-    def __init__(self, state: JournalState) -> None:
+    def __init__(self, state: JournalState, *, returned_move_id: int = 101) -> None:
         self.state = state
+        self.returned_move_id = returned_move_id
 
     async def get_capabilities(self) -> CapabilitySnapshot:
         return CapabilitySnapshot(
@@ -122,12 +123,12 @@ class JournalAdapter:
         return _entry("draft")
 
     async def get_journal_entry(self, company_id: int, move_id: int) -> JournalEntry:
-        return _entry(self.state.state)
+        return _entry(self.state.state).model_copy(update={"id": self.returned_move_id})
 
     async def post_journal_entry(self, company_id: int, move_id: int) -> JournalEntry:
         self.state.post_count += 1
         self.state.state = "posted"
-        return _entry("posted")
+        return _entry("posted").model_copy(update={"id": self.returned_move_id})
 
     async def close(self) -> None:
         return None
@@ -222,3 +223,31 @@ async def test_journal_execution_requires_an_idempotency_key(
 
     assert result.structured_content["error_code"] == "EXECUTION_NOT_EXPLICIT"
     assert state.create_count == 0
+
+
+async def test_post_rejects_substituted_move_before_mutation(
+    connection: OdooConnectionSettings, tmp_path
+) -> None:
+    state = JournalState()
+
+    async def factory(_connection: object) -> OdooAdapter:
+        return JournalAdapter(state, returned_move_id=202)
+
+    server = create_mcp_server(
+        Resolver(_binding(connection)),
+        adapter_factory=factory,
+        storage=Storage.open(tmp_path / "journal-substitution.sqlite3"),
+    )
+    async with Client(server) as client:
+        result = await client.call_tool(
+            "post_journal_entry",
+            {
+                "company_id": 1,
+                "move_id": 101,
+                "dry_run": False,
+                "idempotency_key": "post-101",
+            },
+        )
+
+    assert result.structured_content["error_code"] == "ODOO_API_ERROR"
+    assert state.post_count == 0

@@ -1117,6 +1117,8 @@ class AccountingReader:
                 "Use a journal entry ID from the authorized company.",
             )
         move = moves.items[0]
+        if move.id != move_id:
+            raise _invalid_response()
         lines: list[JournalEntryLine] = []
         cursor: str | None = None
         while True:
@@ -1125,6 +1127,8 @@ class AccountingReader:
                 ReadFilters(clauses=(FilterClause(field="move_id", operator="=", value=move_id),)),
                 PageRequest(limit=500, cursor=cursor),
             )
+            if any(line.move.id != move_id for line in page.items):
+                raise _invalid_response()
             lines.extend(
                 JournalEntryLine(
                     id=line.id,

@@ -527,6 +527,54 @@ async def test_unnumbered_draft_journal_entry_uses_placeholder_name(
     assert result.items[0].name == "/"
 
 
+async def test_exact_journal_entry_rejects_substituted_move(
+    connection: OdooConnectionSettings,
+) -> None:
+    transport = FakeTransport({"account.move": [_move(202)], "account.move.line": []})
+    client = await _validated_client(connection, transport)
+
+    with pytest.raises(OdooMcpError) as raised:
+        await client.get_journal_entry(1, 101)
+
+    assert raised.value.code is ErrorCode.ODOO_API_ERROR
+
+
+async def test_exact_journal_entry_rejects_line_from_another_move(
+    connection: OdooConnectionSettings,
+) -> None:
+    move = _move(101)
+    move["state"] = "draft"
+    line = {
+        "id": 1001,
+        "move_id": [202, "MVE/202"],
+        "account_id": [10, "Debit"],
+        "journal_id": [30, "Synthetic Journal"],
+        "partner_id": False,
+        "company_id": [1, "Synthetic Company"],
+        "currency_id": [40, "Synthetic Currency"],
+        "date": "2026-09-01",
+        "date_maturity": False,
+        "name": "Substituted line",
+        "debit": "100",
+        "credit": "0",
+        "balance": "100",
+        "amount_currency": "100",
+        "amount_residual": "0",
+        "amount_residual_currency": "0",
+        "reconciled": False,
+        "analytic_distribution": {},
+    }
+    client = await _validated_client(
+        connection,
+        FakeTransport({"account.move": [move], "account.move.line": [line]}),
+    )
+
+    with pytest.raises(OdooMcpError) as raised:
+        await client.get_journal_entry(1, 101)
+
+    assert raised.value.code is ErrorCode.ODOO_API_ERROR
+
+
 async def test_manual_journal_draft_creation_is_separate_from_posting(
     connection: OdooConnectionSettings,
 ) -> None:
@@ -603,6 +651,47 @@ async def test_post_adapter_rejects_non_draft_before_action(
 
     assert raised.value.code is ErrorCode.JOURNAL_ENTRY_NOT_DRAFT
     assert transport.executions == []
+
+
+async def test_post_adapter_rejects_substituted_post_action_record(
+    connection: OdooConnectionSettings,
+) -> None:
+    draft = _move(101)
+    draft["state"] = "draft"
+
+    class SubstitutingPostTransport(FakeTransport):
+        async def execute_method(
+            self,
+            model: str,
+            method: str,
+            *,
+            ids: tuple[int, ...] = (),
+            positional: list[Any] | None = None,
+            named: dict[str, Any] | None = None,
+            company_ids: tuple[int, ...],
+        ) -> Any:
+            result = await super().execute_method(
+                model,
+                method,
+                ids=ids,
+                positional=positional,
+                named=named,
+                company_ids=company_ids,
+            )
+            if model == "account.move" and method == "action_post":
+                substituted = _move(202)
+                substituted["state"] = "posted"
+                self.rows["account.move"] = [substituted]
+            return result
+
+    transport = SubstitutingPostTransport({"account.move": [draft], "account.move.line": []})
+    client = await _validated_client(connection, transport)
+
+    with pytest.raises(OdooMcpError) as raised:
+        await client.post_journal_entry(1, 101)
+
+    assert raised.value.code is ErrorCode.ODOO_API_ERROR
+    assert transport.executions[0]["ids"] == (101,)
 
 
 async def test_currencies_return_odoo_rounding_in_authorized_company_context(
