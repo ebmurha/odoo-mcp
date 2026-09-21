@@ -121,6 +121,12 @@ class Storage:
             parse_timestamp(str(row["created_at"]))
         self.connections.verify_all()
 
+    def verify(self) -> None:
+        """Verify migrations and all persisted recovery invariants."""
+
+        apply_migrations(self.database)
+        self._verify_integrity()
+
     @staticmethod
     def _verify_restore_source(path: Path) -> None:
         connection = sqlite3.connect(f"file:{path.as_posix()}?mode=ro", uri=True)

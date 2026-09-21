@@ -38,11 +38,13 @@ async def _factory(_connection: object) -> OdooAdapter:
     return FakeAdapter()
 
 
+@pytest.mark.parametrize("profile", [DeploymentProfile.DEDICATED, DeploymentProfile.SHARED])
 def test_streamable_http_lists_the_shared_registry(
     connection: OdooConnectionSettings,
+    profile: DeploymentProfile,
 ) -> None:
     binding = ConnectionBinding(
-        profile=DeploymentProfile.DEDICATED,
+        profile=profile,
         tenant_id="tenant-http",
         authenticated_subject="synthetic-subject",
         mcp_client="synthetic-client",
@@ -58,6 +60,7 @@ def test_streamable_http_lists_the_shared_registry(
     headers = {"Accept": "application/json, text/event-stream"}
 
     with TestClient(app, base_url="http://127.0.0.1:8000") as client:
+        health = client.get("/healthz")
         initialize = client.post(
             "/mcp",
             headers=headers,
@@ -88,6 +91,8 @@ def test_streamable_http_lists_the_shared_registry(
             },
         )
 
+    assert health.status_code == 200
+    assert health.json() == {"status": "ok"}
     assert initialize.status_code == 200
     assert listed.status_code == 200
     assert [tool["name"] for tool in listed.json()["result"]["tools"]] == [

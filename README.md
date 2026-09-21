@@ -1,9 +1,15 @@
 # Odoo MCP
 
+<!-- mcp-name: io.github.ebmurha/odoo-mcp -->
+
 `odoo-mcp` is a workflow-native MCP server for Odoo Enterprise. It exposes
 read-only capability discovery, trial-balance reporting, aged receivables and
 payables reporting, cashbook visibility, unmatched bank-line detection, and
 proposal-only bank reconciliation.
+
+The initial accounting release also supports bounded invoice, supplier-bill,
+credit-note, payment-registration, and manual-journal workflows. Mutating tools
+are preview-only by default and require explicit execution plus idempotency.
 
 The internal accounting adapter provides bounded, typed, company-scoped read
 primitives for the reporting workflows. It enforces fixed model/action allowlists,
@@ -52,6 +58,11 @@ layer must inject its 256-bit encryption keys from a separate operator-controlle
 secret store. Missing keys, invalid ciphertext, or an unauthorized tenant and
 connection binding fail closed. TLS, public ingress, connector identity issuance,
 and production deployment remain operator responsibilities.
+
+Reproducible Dedicated Remote Docker and systemd templates, Shared Hosted
+integration requirements, and network hardening guidance are in
+[`docs/deployment.md`](docs/deployment.md). Do not expose the example HTTP
+listener directly to the public internet.
 
 ## Durable state
 
@@ -178,3 +189,13 @@ uv run python scripts/verify.py
 Automated tests use synthetic Odoo responses. They do not establish live Odoo
 version compatibility, real permissions, installed modules, or deployment
 networking.
+
+Storage backup, restore, integrity verification, monitoring, upgrade, rollback,
+and incident procedures are documented in
+[`docs/operations.md`](docs/operations.md). See [`SECURITY.md`](SECURITY.md) for
+the security boundary and vulnerability reporting, and [`SUPPORT.md`](SUPPORT.md)
+for supported configurations and support requests.
+
+[`docs/demo.md`](docs/demo.md) provides a bounded accounting demonstration that
+keeps every write-capable call in preview mode unless the operator separately
+authorizes execution in a non-production Odoo environment.

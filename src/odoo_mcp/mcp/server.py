@@ -11,6 +11,8 @@ from typing import Annotated, Literal, TypeAlias
 
 from mcp.server import MCPServer
 from pydantic import Field, ValidationError
+from starlette.requests import Request
+from starlette.responses import JSONResponse
 
 from odoo_mcp.adapters.accounting import (
     InvoiceDraft,
@@ -152,6 +154,13 @@ def create_mcp_server(
     """Build the one server used by every deployment profile."""
 
     server = MCPServer("odoo-mcp")
+
+    @server.custom_route(  # type: ignore[untyped-decorator]
+        "/healthz", methods=["GET"], include_in_schema=False
+    )
+    async def health_check(_request: Request) -> JSONResponse:
+        return JSONResponse({"status": "ok"})
+
     definition = get_tool_definition("get_erp_capabilities")
 
     async def capabilities_tool() -> CapabilitiesToolResponse:

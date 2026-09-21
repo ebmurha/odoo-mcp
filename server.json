@@ -1,0 +1,66 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.ebmurha/odoo-mcp",
+  "description": "Workflow-native accounting MCP server for Odoo Enterprise",
+  "title": "Odoo MCP",
+  "repository": {
+    "url": "https://github.com/ebmurha/odoo-mcp",
+    "source": "github"
+  },
+  "websiteUrl": "https://github.com/ebmurha/odoo-mcp",
+  "version": "0.1.0",
+  "packages": [
+    {
+      "registryType": "pypi",
+      "registryBaseUrl": "https://pypi.org",
+      "identifier": "odoo-mcp",
+      "version": "0.1.0",
+      "runtimeHint": "uvx",
+      "transport": {
+        "type": "stdio"
+      },
+      "packageArguments": [
+        {
+          "type": "named",
+          "name": "--config",
+          "description": "Path to the MCP permission configuration",
+          "format": "filepath",
+          "isRequired": true
+        }
+      ],
+      "environmentVariables": [
+        {
+          "name": "ODOO_MCP_ODOO_URL",
+          "description": "Base URL of the Odoo Enterprise deployment",
+          "isRequired": true
+        },
+        {
+          "name": "ODOO_MCP_ODOO_DATABASE",
+          "description": "Odoo database name",
+          "isRequired": true
+        },
+        {
+          "name": "ODOO_MCP_ODOO_USERNAME",
+          "description": "Dedicated Odoo technical-user login",
+          "isRequired": true
+        },
+        {
+          "name": "ODOO_MCP_ODOO_API_KEY",
+          "description": "API key for the dedicated Odoo technical user",
+          "isRequired": true,
+          "isSecret": true
+        },
+        {
+          "name": "ODOO_MCP_ALLOWED_COMPANY_IDS",
+          "description": "Comma-separated authorized Odoo company IDs",
+          "isRequired": true
+        },
+        {
+          "name": "ODOO_MCP_DEFAULT_COMPANY_ID",
+          "description": "Default authorized Odoo company ID",
+          "isRequired": true
+        }
+      ]
+    }
+  ]
+}

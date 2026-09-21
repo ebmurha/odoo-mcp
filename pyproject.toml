@@ -9,6 +9,7 @@ description = "Workflow-native MCP server for Odoo Enterprise."
 readme = "README.md"
 license = "Apache-2.0"
 license-files = ["LICENSE", "NOTICE"]
+authors = [{ name = "EBMURHA" }]
 requires-python = ">=3.11"
 dependencies = [
     "cryptography==50.0.1",
@@ -31,6 +32,12 @@ dev = [
 
 [project.scripts]
 odoo-mcp = "odoo_mcp.app.main:main"
+odoo-mcp-admin = "odoo_mcp.app.operations:main"
+
+[project.urls]
+Homepage = "https://github.com/ebmurha/odoo-mcp"
+Repository = "https://github.com/ebmurha/odoo-mcp"
+Issues = "https://github.com/ebmurha/odoo-mcp/issues"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/odoo_mcp"]
@@ -43,7 +50,17 @@ include = [
     "/LICENSE",
     "/NOTICE",
     "/README.md",
+    "/SECURITY.md",
+    "/SUPPORT.md",
+    "/CONTRIBUTING.md",
+    "/CHANGELOG.md",
+    "/Dockerfile",
+    "/docker-compose.yml",
+    "/.dockerignore",
     "/config",
+    "/deploy",
+    "/docs",
+    "/server.json",
     "/pyproject.toml",
     "/scripts",
     "/src",
