@@ -117,22 +117,16 @@ class SQLiteEncryptedConnectionRepository:
                 """
                 INSERT INTO erp_connections (
                     id, tenant_id, connection_label, odoo_url, database_name,
-                    username, encrypted_api_key, allowed_company_ids_json,
+                    username, encrypted_api_key, discovered_company_ids_json,
+                    allowed_company_ids_json,
                     default_company_id, detected_version, selected_transport,
-                    key_version, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT (tenant_id, id) DO UPDATE SET
-                    connection_label = excluded.connection_label,
-                    odoo_url = excluded.odoo_url,
-                    database_name = excluded.database_name,
-                    username = excluded.username,
-                    encrypted_api_key = excluded.encrypted_api_key,
-                    allowed_company_ids_json = excluded.allowed_company_ids_json,
-                    default_company_id = excluded.default_company_id,
-                    detected_version = excluded.detected_version,
-                    selected_transport = excluded.selected_transport,
-                    key_version = excluded.key_version,
-                    updated_at = excluded.updated_at
+                    key_version, status, enrollment_handle_hash,
+                    enrollment_expires_at, activated_at, revoked_at,
+                    created_at, updated_at
+                ) VALUES (
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                    'active', NULL, NULL, ?, NULL, ?, ?
+                )
                 """,
                 (
                     connection_id,
@@ -143,10 +137,12 @@ class SQLiteEncryptedConnectionRepository:
                     connection.username,
                     encrypted,
                     canonical_json(connection.allowed_company_ids),
+                    canonical_json(connection.allowed_company_ids),
                     connection.default_company_id,
                     detected_version,
                     selected_transport,
                     key_version,
+                    now,
                     now,
                     now,
                 ),
@@ -193,8 +189,18 @@ class SQLiteEncryptedConnectionRepository:
     ) -> OdooConnectionSettings | None:
         with self._database.transaction() as connection:
             row = connection.execute(
-                "SELECT * FROM erp_connections WHERE tenant_id = ? AND id = ?",
-                (authorization.tenant_id, authorization.connection_id),
+                """
+                SELECT e.* FROM erp_connections e
+                JOIN oauth_grants g
+                  ON g.tenant_id = e.tenant_id AND g.connector_id = e.id
+                WHERE e.tenant_id = ? AND e.id = ? AND e.status = 'active'
+                  AND g.status = 'active' AND g.client_id = ?
+                """,
+                (
+                    authorization.tenant_id,
+                    authorization.connection_id,
+                    authorization.mcp_client,
+                ),
             ).fetchone()
         return None if row is None else self._resolve_row(row)
 
@@ -294,7 +300,14 @@ class SQLiteEncryptedConnectionRepository:
                 "SELECT * FROM erp_connections ORDER BY tenant_id, id"
             ).fetchall()
         for row in rows:
-            self._resolve_row(row)
+            self._require_keyring().decrypt(
+                str(row["tenant_id"]),
+                str(row["id"]),
+                str(row["encrypted_api_key"]),
+                int(row["key_version"]),
+            )
+            if str(row["status"]) == "active":
+                self._resolve_row(row)
 
     def rotate_tenant(
         self,

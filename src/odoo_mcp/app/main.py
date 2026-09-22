@@ -12,7 +12,6 @@ from starlette.types import ASGIApp
 from odoo_mcp.adapters.odoo.connections import (
     ConnectionBinding,
     ConnectionResolver,
-    ConnectorAuthorization,
     DedicatedConnectionResolver,
     EncryptedConnectionRepository,
     SharedHostedConnectionResolver,
@@ -21,23 +20,17 @@ from odoo_mcp.adapters.odoo.connections import (
 from odoo_mcp.app.remote_auth import load_dedicated_auth_settings, protect_dedicated_app
 from odoo_mcp.app.settings import (
     DeploymentProfile,
-    OdooConnectionSettings,
     PermissionConfig,
     SettingsError,
     load_permission_config,
     load_settings,
+    load_shared_settings,
 )
+from odoo_mcp.app.shared import open_shared_app, protect_shared_app
 from odoo_mcp.mcp.registry import TOOL_REGISTRY
 from odoo_mcp.mcp.server import create_mcp_server
 from odoo_mcp.storage import Storage
-
-
-class _UnavailableSharedRepository:
-    async def resolve_authorized(
-        self,
-        authorization: ConnectorAuthorization,
-    ) -> OdooConnectionSettings | None:
-        return None
+from odoo_mcp.storage.errors import StorageError
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -90,8 +83,9 @@ def build_resolver(
 
     settings = load_settings(profile)
     if profile is DeploymentProfile.SHARED:
-        repository = shared_repository or _UnavailableSharedRepository()
-        return SharedHostedConnectionResolver(repository)
+        if shared_repository is None:
+            raise SettingsError("Shared Hosted requires an encrypted connection repository")
+        return SharedHostedConnectionResolver(shared_repository)
     if settings.connection is None:
         raise SettingsError("The deployment profile has no Odoo connection")
     if profile is DeploymentProfile.DEDICATED:
@@ -125,24 +119,38 @@ def main(argv: list[str] | None = None) -> None:
         _fail(parser, "Remote profiles require Streamable HTTP")
     try:
         config = load_permission_config(args.config) if args.config else None
+        if profile is DeploymentProfile.SHARED:
+            shared_settings = load_shared_settings()
+            shared_app, lease = open_shared_app(
+                shared_settings,
+                args.storage,
+                permissions=_permissions(config),
+            )
+            try:
+                uvicorn.run(protect_shared_app(shared_app), host=args.host, port=args.port)
+            finally:
+                lease.release()
+            return
         resolver = build_resolver(profile, config=config)
     except SettingsError as exc:
         _fail(parser, str(exc))
+    except (StorageError, RuntimeError, ValueError):
+        _fail(parser, "Shared Hosted startup failed safely")
     server = create_mcp_server(resolver, storage=Storage.open(args.storage))
     if transport == "stdio":
         server.run(transport="stdio")
     else:
-        app: ASGIApp = server.streamable_http_app(
+        remote_app: ASGIApp = server.streamable_http_app(
             host=args.host,
             stateless_http=True,
             json_response=True,
         )
         if profile is DeploymentProfile.DEDICATED:
             try:
-                app = protect_dedicated_app(app, load_dedicated_auth_settings())
+                remote_app = protect_dedicated_app(remote_app, load_dedicated_auth_settings())
             except SettingsError as exc:
                 _fail(parser, str(exc))
-        uvicorn.run(app, host=args.host, port=args.port)
+        uvicorn.run(remote_app, host=args.host, port=args.port)
 
 
 if __name__ == "__main__":

@@ -1,0 +1,45 @@
+services:
+  odoo-mcp-shared:
+    image: "${ODOO_MCP_IMAGE:?set an immutable image reference}"
+    command:
+      - --profile
+      - shared
+      - --config
+      - /app/config/config.example.yaml
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8000"
+      - --storage
+      - /var/lib/odoo-mcp/state.sqlite3
+    restart: unless-stopped
+    environment:
+      ODOO_MCP_SHARED_ISSUER_URL: "${ODOO_MCP_SHARED_ISSUER_URL:?required}"
+      ODOO_MCP_SHARED_PUBLIC_MCP_URL: "${ODOO_MCP_SHARED_PUBLIC_MCP_URL:?required}"
+      ODOO_MCP_SHARED_STORAGE_KIND: local
+      ODOO_MCP_ACTIVE_KEY_VERSION: "${ODOO_MCP_ACTIVE_KEY_VERSION:?required}"
+      ODOO_MCP_ENCRYPTION_KEYS: "${ODOO_MCP_ENCRYPTION_KEYS:?required}"
+    ports:
+      - "127.0.0.1:8000:8000"
+    volumes:
+      - odoo-mcp-shared-state:/var/lib/odoo-mcp
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    healthcheck:
+      test:
+        - CMD
+        - /app/.venv/bin/python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=3).read()"
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  odoo-mcp-shared-state:

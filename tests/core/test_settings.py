@@ -5,7 +5,12 @@ from pathlib import Path
 import pytest
 
 from odoo_mcp.app.remote_auth import load_dedicated_auth_settings
-from odoo_mcp.app.settings import DeploymentProfile, SettingsError, load_settings
+from odoo_mcp.app.settings import (
+    DeploymentProfile,
+    SettingsError,
+    load_settings,
+    load_shared_settings,
+)
 
 REQUIRED = {
     "ODOO_MCP_ODOO_URL": "https://odoo.invalid",
@@ -111,3 +116,46 @@ def test_dedicated_auth_settings_fail_safely(monkeypatch: pytest.MonkeyPatch) ->
 
     assert str(caught.value) == "Missing or invalid Dedicated Remote authentication setting"
     assert "secret-value" not in str(caught.value)
+
+
+def test_shared_settings_require_complete_local_volume_and_keyring(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import base64
+
+    values = {
+        "ODOO_MCP_SHARED_ISSUER_URL": "https://service.invalid",
+        "ODOO_MCP_SHARED_PUBLIC_MCP_URL": "https://service.invalid/mcp",
+        "ODOO_MCP_SHARED_STORAGE_KIND": "local",
+        "ODOO_MCP_ACTIVE_KEY_VERSION": "2",
+        "ODOO_MCP_ENCRYPTION_KEYS": (
+            "1:" + base64.urlsafe_b64encode(b"a" * 32).decode() + ","
+            "2:" + base64.urlsafe_b64encode(b"b" * 32).decode()
+        ),
+    }
+    for key, value in values.items():
+        monkeypatch.setenv(key, value)
+
+    settings = load_shared_settings()
+
+    assert settings.active_key_version == 2
+    assert settings.encryption_keys == {1: b"a" * 32, 2: b"b" * 32}
+
+
+def test_partial_shared_settings_fail_without_disclosing_values(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("ODOO_MCP_SHARED_ISSUER_URL", "https://secret-host.invalid")
+    for key in (
+        "ODOO_MCP_SHARED_PUBLIC_MCP_URL",
+        "ODOO_MCP_SHARED_STORAGE_KIND",
+        "ODOO_MCP_ACTIVE_KEY_VERSION",
+        "ODOO_MCP_ENCRYPTION_KEYS",
+    ):
+        monkeypatch.delenv(key, raising=False)
+
+    with pytest.raises(SettingsError) as caught:
+        load_shared_settings()
+
+    assert str(caught.value) == "Missing or invalid Shared Hosted configuration"
+    assert "secret-host" not in str(caught.value)

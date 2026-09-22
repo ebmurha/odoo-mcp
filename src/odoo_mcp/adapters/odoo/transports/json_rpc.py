@@ -6,14 +6,18 @@ from typing import Any
 
 import httpx
 
-from odoo_mcp.app.settings import OdooConnectionSettings
+from odoo_mcp.app.settings import OdooConnectionSettings, OdooEnrollmentCredentials
 from odoo_mcp.mcp.error_codes import ErrorCode, OdooMcpError
 
 
 class JsonRpcTransport:
     name = "json_rpc"
 
-    def __init__(self, connection: OdooConnectionSettings, client: httpx.AsyncClient) -> None:
+    def __init__(
+        self,
+        connection: OdooConnectionSettings | OdooEnrollmentCredentials,
+        client: httpx.AsyncClient,
+    ) -> None:
         self._connection = connection
         self._client = client
         self._uid: int | None = None
@@ -155,6 +159,21 @@ class JsonRpcTransport:
                 "Check the database, username, API key, and technical-user access.",
             )
         self._uid = result
+
+    async def discover_companies(self, *, limit: int) -> list[dict[str, Any]]:
+        result = await self._execute_kw(
+            "res.company",
+            "search_read",
+            [[]],
+            {"fields": ["id", "name"], "limit": limit, "order": "id asc"},
+        )
+        if not isinstance(result, list) or not all(isinstance(row, dict) for row in result):
+            raise OdooMcpError(
+                ErrorCode.ODOO_API_ERROR,
+                "Odoo returned an invalid company response.",
+                "Check Odoo compatibility and retry.",
+            )
+        return result
 
     async def _execute_kw(
         self,

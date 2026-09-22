@@ -191,7 +191,167 @@ IDEMPOTENCY_RESPONSE_INVARIANT = Migration(
     ),
 )
 
-MIGRATIONS = (INITIAL_SCHEMA, IDEMPOTENCY_RESPONSE_INVARIANT)
+SHARED_HOSTED_AUTHORITY = Migration(
+    "0003_shared_hosted_authority",
+    (
+        "ALTER TABLE erp_connections RENAME TO _erp_connections_legacy",
+        """
+        CREATE TABLE erp_connections (
+            id TEXT NOT NULL,
+            tenant_id TEXT NOT NULL,
+            connection_label TEXT NOT NULL,
+            odoo_url TEXT NOT NULL,
+            database_name TEXT NOT NULL,
+            username TEXT NOT NULL,
+            encrypted_api_key TEXT NOT NULL,
+            discovered_company_ids_json TEXT NOT NULL,
+            allowed_company_ids_json TEXT,
+            default_company_id INTEGER CHECK (default_company_id > 0),
+            detected_version TEXT,
+            selected_transport TEXT,
+            key_version INTEGER NOT NULL CHECK (key_version > 0),
+            status TEXT NOT NULL CHECK (status IN ('pending', 'active', 'revoked', 'expired')),
+            enrollment_handle_hash TEXT UNIQUE,
+            consumed_enrollment_handle_hash TEXT UNIQUE,
+            enrollment_expires_at TEXT,
+            activated_at TEXT,
+            revoked_at TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY (tenant_id, id),
+            CHECK (
+                (status = 'active' AND allowed_company_ids_json IS NOT NULL
+                    AND default_company_id IS NOT NULL AND enrollment_handle_hash IS NULL)
+                OR status != 'active'
+            )
+        )
+        """,
+        """
+        INSERT INTO erp_connections (
+            id, tenant_id, connection_label, odoo_url, database_name, username,
+            encrypted_api_key, discovered_company_ids_json, allowed_company_ids_json,
+            default_company_id, detected_version, selected_transport, key_version,
+            status, enrollment_handle_hash, consumed_enrollment_handle_hash,
+            enrollment_expires_at, activated_at,
+            revoked_at, created_at, updated_at
+        )
+        SELECT id, tenant_id, connection_label, odoo_url, database_name, username,
+            encrypted_api_key, allowed_company_ids_json, allowed_company_ids_json,
+            default_company_id, detected_version, selected_transport, key_version,
+            'active', NULL, NULL, NULL, created_at, NULL, created_at, updated_at
+        FROM _erp_connections_legacy
+        """,
+        "DROP TABLE _erp_connections_legacy",
+        "CREATE INDEX erp_connections_status ON erp_connections (status, enrollment_expires_at)",
+        """
+        CREATE TABLE oauth_clients (
+            client_id TEXT PRIMARY KEY,
+            registration_method TEXT NOT NULL CHECK (registration_method IN ('dcr', 'cimd')),
+            metadata_json TEXT NOT NULL,
+            client_secret_hash TEXT,
+            metadata_expires_at TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+        """,
+        """
+        CREATE TABLE oauth_authorization_sessions (
+            state_hash TEXT PRIMARY KEY,
+            client_id TEXT NOT NULL REFERENCES oauth_clients(client_id),
+            connector_id TEXT,
+            superseded_connector_id TEXT,
+            redirect_uri TEXT NOT NULL,
+            resource TEXT NOT NULL,
+            scopes_json TEXT NOT NULL,
+            code_challenge TEXT NOT NULL,
+            client_state TEXT,
+            authorization_code_hash TEXT UNIQUE,
+            status TEXT NOT NULL CHECK (
+                status IN ('pending', 'authorized', 'consumed', 'expired', 'denied')
+            ),
+            expires_at TEXT NOT NULL,
+            consumed_at TEXT,
+            created_at TEXT NOT NULL
+        )
+        """,
+        """
+        CREATE TABLE oauth_grants (
+            id TEXT PRIMARY KEY,
+            connector_id TEXT NOT NULL,
+            tenant_id TEXT NOT NULL,
+            client_id TEXT NOT NULL REFERENCES oauth_clients(client_id),
+            resource TEXT NOT NULL,
+            scopes_json TEXT NOT NULL,
+            status TEXT NOT NULL CHECK (status IN ('active', 'revoked')),
+            created_at TEXT NOT NULL,
+            revoked_at TEXT,
+            FOREIGN KEY (tenant_id, connector_id) REFERENCES erp_connections(tenant_id, id)
+        )
+        """,
+        """
+        CREATE TABLE oauth_tokens (
+            token_hash TEXT PRIMARY KEY,
+            grant_id TEXT NOT NULL REFERENCES oauth_grants(id),
+            token_type TEXT NOT NULL CHECK (token_type IN ('access', 'refresh')),
+            expires_at TEXT NOT NULL,
+            rotated_at TEXT,
+            revoked_at TEXT,
+            created_at TEXT NOT NULL
+        )
+        """,
+        "CREATE INDEX oauth_tokens_grant ON oauth_tokens (grant_id, token_type)",
+        """
+        CREATE TRIGGER erp_connection_legal_transition
+        BEFORE UPDATE OF status ON erp_connections
+        WHEN OLD.status != NEW.status AND NOT (
+            (OLD.status = 'pending' AND NEW.status IN ('active', 'expired', 'revoked'))
+            OR (OLD.status = 'active' AND NEW.status = 'revoked')
+        )
+        BEGIN
+            SELECT RAISE(ABORT, 'illegal connector status transition');
+        END
+        """,
+        """
+        CREATE TRIGGER erp_connection_active_authority
+        BEFORE UPDATE OF status ON erp_connections
+        WHEN NEW.status = 'active' AND OLD.status != 'active' AND (
+            NEW.allowed_company_ids_json IS NULL
+            OR NEW.default_company_id IS NULL
+            OR NEW.enrollment_handle_hash IS NOT NULL
+            OR NOT EXISTS (
+                SELECT 1 FROM oauth_grants
+                WHERE connector_id = NEW.id AND tenant_id = NEW.tenant_id
+                    AND status = 'active'
+            )
+        )
+        BEGIN
+            SELECT RAISE(ABORT, 'active connector authority is incomplete');
+        END
+        """,
+        """
+        CREATE TRIGGER oauth_session_legal_transition
+        BEFORE UPDATE OF status ON oauth_authorization_sessions
+        WHEN OLD.status != NEW.status AND NOT (
+            (OLD.status = 'pending' AND NEW.status IN ('authorized', 'expired', 'denied'))
+            OR (OLD.status = 'authorized' AND NEW.status = 'consumed')
+        )
+        BEGIN
+            SELECT RAISE(ABORT, 'illegal authorization-session transition');
+        END
+        """,
+        """
+        CREATE TRIGGER oauth_grant_legal_transition
+        BEFORE UPDATE OF status ON oauth_grants
+        WHEN OLD.status != NEW.status
+            AND NOT (OLD.status = 'active' AND NEW.status = 'revoked')
+        BEGIN
+            SELECT RAISE(ABORT, 'illegal grant status transition');
+        END
+        """,
+    ),
+)
+
+MIGRATIONS = (INITIAL_SCHEMA, IDEMPOTENCY_RESPONSE_INVARIANT, SHARED_HOSTED_AUTHORITY)
 
 
 def _timestamp() -> str:

@@ -6,7 +6,8 @@ import argparse
 import sys
 from pathlib import Path
 
-from odoo_mcp.storage import Storage
+from odoo_mcp.app.settings import load_shared_settings
+from odoo_mcp.storage import EncryptionKeyring, Storage
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -15,32 +16,42 @@ def _parser() -> argparse.ArgumentParser:
 
     verify = commands.add_parser("verify", help="verify storage integrity and recovery state")
     verify.add_argument("--storage", type=Path, required=True)
+    verify.add_argument("--shared", action="store_true")
 
     backup = commands.add_parser("backup", help="create a consistent SQLite backup")
     backup.add_argument("--storage", type=Path, required=True)
     backup.add_argument("--destination", type=Path, required=True)
+    backup.add_argument("--shared", action="store_true")
 
     restore = commands.add_parser("restore", help="restore into a new validated database")
     restore.add_argument("--source", type=Path, required=True)
     restore.add_argument("--storage", type=Path, required=True)
+    restore.add_argument("--shared", action="store_true")
     return parser
+
+
+def _keyring(shared: bool) -> EncryptionKeyring | None:
+    if not shared:
+        return None
+    settings = load_shared_settings()
+    return EncryptionKeyring(settings.active_key_version, settings.encryption_keys)
 
 
 def _run(args: argparse.Namespace) -> str:
     if args.command == "verify":
         if not args.storage.is_file():
             raise FileNotFoundError("Storage database does not exist")
-        Storage.open(args.storage).verify()
+        Storage.open(args.storage, keyring=_keyring(args.shared)).verify()
         return "Storage verification passed."
     if args.command == "backup":
         if not args.storage.is_file():
             raise FileNotFoundError("Storage database does not exist")
-        storage = Storage.open(args.storage)
+        storage = Storage.open(args.storage, keyring=_keyring(args.shared))
         storage.verify()
         storage.backup(args.destination)
         return "Storage backup completed."
     if args.command == "restore":
-        Storage.restore(args.source, args.storage).verify()
+        Storage.restore(args.source, args.storage, keyring=_keyring(args.shared)).verify()
         return "Storage restore validation passed."
     raise RuntimeError("Unsupported storage operation")
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import os
 from enum import StrEnum
 from pathlib import Path
@@ -103,6 +104,101 @@ class OdooConnectionSettings(BaseModel):
         return value
 
 
+class OdooEnrollmentCredentials(BaseModel):
+    """Secret-bearing credentials used only before company selection."""
+
+    model_config = ConfigDict(frozen=True)
+
+    url: HttpUrl
+    database: str = Field(min_length=1)
+    username: str = Field(min_length=1)
+    api_key: SecretStr
+
+    @field_validator("url")
+    @classmethod
+    def validate_enrollment_url(cls, value: HttpUrl) -> HttpUrl:
+        if value.scheme != "https":
+            raise ValueError("must use HTTPS")
+        if value.username or value.password or value.query or value.fragment:
+            raise ValueError("must be a base HTTPS URL without credentials, query, or fragment")
+        if value.path not in {None, "", "/"}:
+            raise ValueError("must be an origin URL without a path")
+        return value
+
+    @field_validator("database", "username")
+    @classmethod
+    def reject_enrollment_blank(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("must not be blank")
+        return value.strip()
+
+    @field_validator("api_key")
+    @classmethod
+    def reject_enrollment_blank_secret(cls, value: SecretStr) -> SecretStr:
+        if not value.get_secret_value().strip():
+            raise ValueError("must not be blank")
+        return value
+
+
+class SharedHostedSettings(BaseModel):
+    """Complete hosting-neutral Shared Hosted configuration."""
+
+    model_config = ConfigDict(frozen=True)
+
+    issuer_url: HttpUrl
+    public_mcp_url: HttpUrl
+    active_key_version: int = Field(gt=0)
+    encryption_keys: dict[int, bytes]
+    storage_kind: str
+
+    @field_validator("issuer_url")
+    @classmethod
+    def require_issuer_origin(cls, value: HttpUrl) -> HttpUrl:
+        if (
+            value.scheme != "https"
+            or value.username
+            or value.password
+            or value.query
+            or value.fragment
+            or value.path not in {None, "", "/"}
+        ):
+            raise ValueError("must be a canonical HTTPS origin")
+        return value
+
+    @field_validator("public_mcp_url")
+    @classmethod
+    def require_public_mcp_url(cls, value: HttpUrl) -> HttpUrl:
+        if (
+            value.scheme != "https"
+            or value.username
+            or value.password
+            or value.query
+            or value.fragment
+            or value.path in {None, "", "/"}
+        ):
+            raise ValueError("must be a canonical HTTPS MCP URL")
+        return value
+
+    @field_validator("storage_kind")
+    @classmethod
+    def require_local_storage(cls, value: str) -> str:
+        if value != "local":
+            raise ValueError("must be local")
+        return value
+
+    @field_validator("encryption_keys")
+    @classmethod
+    def validate_encryption_keys(
+        cls, value: dict[int, bytes], info: ValidationInfo
+    ) -> dict[int, bytes]:
+        if not value or any(version <= 0 or len(key) != 32 for version, key in value.items()):
+            raise ValueError("must contain versioned 256-bit keys")
+        active = info.data.get("active_key_version")
+        if active not in value:
+            raise ValueError("must include the active key version")
+        return value
+
+
 class RuntimeSettings(BaseModel):
     """Profile-level settings consumed by the application factory."""
 
@@ -184,6 +280,33 @@ def load_settings(
     except PydanticSettingsError as exc:
         raise SettingsError("Missing or invalid Odoo MCP setting") from exc
     return RuntimeSettings(profile=profile, connection=connection)
+
+
+def load_shared_settings() -> SharedHostedSettings:
+    """Load complete Shared Hosted settings without exposing configured values."""
+
+    try:
+        raw_keys = os.environ.get("ODOO_MCP_ENCRYPTION_KEYS", "")
+        keys: dict[int, bytes] = {}
+        for item in raw_keys.split(","):
+            version_text, separator, encoded = item.strip().partition(":")
+            if separator != ":":
+                raise ValueError
+            padded = encoded + "=" * (-len(encoded) % 4)
+            keys[int(version_text)] = base64.b64decode(
+                padded.encode(), altchars=b"-_", validate=True
+            )
+        return SharedHostedSettings.model_validate(
+            {
+                "issuer_url": os.environ.get("ODOO_MCP_SHARED_ISSUER_URL", ""),
+                "public_mcp_url": os.environ.get("ODOO_MCP_SHARED_PUBLIC_MCP_URL", ""),
+                "active_key_version": int(os.environ.get("ODOO_MCP_ACTIVE_KEY_VERSION", "0")),
+                "encryption_keys": keys,
+                "storage_kind": os.environ.get("ODOO_MCP_SHARED_STORAGE_KIND", ""),
+            }
+        )
+    except (ValidationError, ValueError, TypeError):
+        raise SettingsError("Missing or invalid Shared Hosted configuration") from None
 
 
 class PermissionConfig(BaseModel):

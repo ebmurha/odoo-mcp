@@ -2,18 +2,23 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Protocol
 
 import httpx
+from pydantic import HttpUrl
 
-from odoo_mcp.app.settings import OdooConnectionSettings
 from odoo_mcp.mcp.error_codes import ErrorCode, OdooMcpError
+
+
+class VersionCredentials(Protocol):
+    url: HttpUrl
+
 
 VERSION_PATH = "/web/webclient/version_info"
 
 
 async def detect_major_version(
-    connection: OdooConnectionSettings,
+    connection: VersionCredentials,
     client: httpx.AsyncClient,
 ) -> int:
     """Detect and validate the Odoo major version from the public web endpoint."""

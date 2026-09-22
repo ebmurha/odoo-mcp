@@ -56,13 +56,20 @@ HS256 bearer JWT. The server validates its signature, fixed issuer, fixed
 audience, expiry, issued-at time, subject, and client ID before MCP routing;
 permissions and company grants remain server-owned. Configure
 `ODOO_MCP_AUTH_ISSUER`, `ODOO_MCP_AUTH_AUDIENCE`, and a secret-store supplied
-`ODOO_MCP_AUTH_SIGNING_KEY` of at least 32 characters. Shared Hosted requires an authenticated connector
-context and an encrypted connection repository supplied by the hosting layer.
-The package supplies a SQLite repository for that integration, but the hosting
-layer must inject its 256-bit encryption keys from a separate operator-controlled
-secret store. Missing keys, invalid ciphertext, or an unauthorized tenant and
-connection binding fail closed. TLS, public ingress, connector identity issuance,
-and production deployment remain operator responsibilities.
+`ODOO_MCP_AUTH_SIGNING_KEY` of at least 32 characters.
+
+Shared Hosted is a runnable open-enrollment application in the same image. It
+serves OAuth discovery, dynamic client registration, authorization, token,
+revocation, browser enrollment, protected-resource metadata, and MCP routes.
+The application verifies each Odoo connection, lets the user select from the
+companies that Odoo returned, stores the credential encrypted, and binds every
+token to exactly one active connector. Configure it from
+`.env.shared.example`; its versioned 256-bit encryption keys must come from an
+operator-controlled secret store. Missing configuration, invalid ciphertext,
+inactive grants, unsafe Odoo destinations, and unauthorized connector bindings
+fail closed. It requires one writable process and a durable local SQLite
+volume. TLS, public ingress, monitoring, and production deployment remain
+operator responsibilities.
 
 Reproducible Dedicated Remote Docker and systemd templates, Shared Hosted
 integration requirements, and network hardening guidance are in
@@ -118,7 +125,8 @@ statement line in Odoo.
 
 ## Configuration
 
-The supported Odoo settings are documented in `.env.example`. Do not configure
+Local and Dedicated Odoo settings are documented in `.env.example`; Shared
+Hosted operator settings are documented in `.env.shared.example`. Do not configure
 an Odoo version: the adapter detects it and fails explicitly for unsupported or
 malformed responses. `config/config.example.yaml` is the safe MCP permission-map
 example and enables the current read tools. A tool is authorized only when it is

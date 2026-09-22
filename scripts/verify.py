@@ -20,14 +20,18 @@ REQUIRED_SDIST_SUFFIXES = {
     "/CHANGELOG.md",
     "/CONTRIBUTING.md",
     "/Dockerfile",
+    "/.env.shared.example",
     "/SECURITY.md",
     "/SUPPORT.md",
     "/deploy/odoo-mcp.service",
+    "/deploy/reverse-proxy/nginx.conf",
+    "/deploy/shared-compose.yml",
     "/docker-compose.yml",
     "/docs/deployment.md",
     "/docs/operations.md",
     "/scripts/verify_docker.py",
     "/scripts/verify_live_invoicing_odoo19.py",
+    "/scripts/verify_shared.py",
     "/server.json",
 }
 

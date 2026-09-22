@@ -6,14 +6,18 @@ from typing import Any
 
 import httpx
 
-from odoo_mcp.app.settings import OdooConnectionSettings
+from odoo_mcp.app.settings import OdooConnectionSettings, OdooEnrollmentCredentials
 from odoo_mcp.mcp.error_codes import ErrorCode, OdooMcpError
 
 
 class Json2Transport:
     name = "json2"
 
-    def __init__(self, connection: OdooConnectionSettings, client: httpx.AsyncClient) -> None:
+    def __init__(
+        self,
+        connection: OdooConnectionSettings | OdooEnrollmentCredentials,
+        client: httpx.AsyncClient,
+    ) -> None:
         self._client = client
         self._headers = {
             "Authorization": f"bearer {connection.api_key.get_secret_value()}",
@@ -68,6 +72,25 @@ class Json2Transport:
                 "Odoo authentication failed.",
                 "Check the database, API key, and technical-user access.",
             )
+
+    async def discover_companies(self, *, limit: int) -> list[dict[str, Any]]:
+        result = await self._call(
+            "res.company",
+            "search_read",
+            {
+                "domain": [],
+                "fields": ["id", "name"],
+                "limit": limit,
+                "order": "id asc",
+            },
+        )
+        if not isinstance(result, list) or not all(isinstance(row, dict) for row in result):
+            raise OdooMcpError(
+                ErrorCode.ODOO_API_ERROR,
+                "Odoo returned an invalid company response.",
+                "Check Odoo compatibility and retry.",
+            )
+        return result
 
     async def probe_model(self, model: str, *, company_ids: tuple[int, ...]) -> bool:
         try:

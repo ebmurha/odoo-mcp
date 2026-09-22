@@ -142,6 +142,10 @@ def test_schema_contains_only_server_owned_state(tmp_path) -> None:
         "capabilities_cache",
         "erp_connections",
         "idempotency_keys",
+        "oauth_authorization_sessions",
+        "oauth_clients",
+        "oauth_grants",
+        "oauth_tokens",
         "proposals",
         "schema_migrations",
     }

@@ -13,6 +13,7 @@ authors = [{ name = "EBMURHA" }]
 requires-python = ">=3.11"
 dependencies = [
     "cryptography==50.0.1",
+    "httpcore==1.0.9",
     "httpx==0.28.1",
     "mcp==2.2.0",
     "pydantic==2.13.5",
@@ -47,6 +48,7 @@ packages = ["src/odoo_mcp"]
 [tool.hatch.build.targets.sdist]
 include = [
     "/.env.example",
+    "/.env.shared.example",
     "/.github",
     "/.gitignore",
     "/LICENSE",

@@ -37,8 +37,11 @@ def test_release_documentation_and_deployment_templates_are_present() -> None:
         "docker-compose.yml",
         ".dockerignore",
         "deploy/odoo-mcp.service",
+        "deploy/shared-compose.yml",
+        "deploy/reverse-proxy/nginx.conf",
         "scripts/verify_docker.py",
         "scripts/verify_live_invoicing_odoo19.py",
+        "scripts/verify_shared.py",
     )
     assert all((ROOT / path).is_file() for path in required)
 

@@ -22,6 +22,7 @@ def test_environment_files_and_build_outputs_are_ignored() -> None:
     assert ".env" in patterns
     assert ".env.*" in patterns
     assert "!.env.example" in patterns
+    assert "!.env.shared.example" in patterns
     assert ".venv/" in patterns
     assert "dist/" in patterns
 
@@ -31,6 +32,7 @@ def test_public_files_do_not_contain_private_control_material() -> None:
         ROOT / "README.md",
         ROOT / "pyproject.toml",
         ROOT / ".env.example",
+        ROOT / ".env.shared.example",
         ROOT / "config" / "config.example.yaml",
         ROOT / "SECURITY.md",
         ROOT / "SUPPORT.md",
@@ -42,6 +44,8 @@ def test_public_files_do_not_contain_private_control_material() -> None:
         ROOT / "Dockerfile",
         ROOT / "docker-compose.yml",
         ROOT / "deploy" / "odoo-mcp.service",
+        ROOT / "deploy" / "shared-compose.yml",
+        ROOT / "deploy" / "reverse-proxy" / "nginx.conf",
         ROOT / "server.json",
         *sorted((ROOT / "src").rglob("*.py")),
         *sorted((ROOT / "scripts").rglob("*.py")),

@@ -17,6 +17,12 @@ For Dedicated Remote authentication failures, report only whether the token was
 missing or rejected and the configured package version. Never send the token,
 signing key, or decoded claims.
 
+For Shared Hosted, report only the package version, whether startup,
+registration, enrollment, token exchange, or MCP authorization failed, and the
+fixed error class. Never send Odoo credentials, connector handles, OAuth codes
+or tokens, cookies, client secrets, database files, encryption keys, customer
+hostnames, or decoded token data.
+
 Supported targets are Python 3.11 or newer, Odoo Enterprise 18 via JSON-RPC,
 and Odoo Enterprise 19 via JSON-2 on Odoo.sh or self-hosted deployments. Odoo 19
 is live-qualified; Odoo 18 is implemented and fixture-tested. Odoo Online,

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -22,10 +23,11 @@ class FakeServer:
 
 @pytest.mark.parametrize(
     ("profile", "expected_transport"),
-    [("local", "stdio"), ("dedicated", "streamable-http"), ("shared", "streamable-http")],
+    [("local", "stdio"), ("dedicated", "streamable-http")],
 )
 def test_profile_selects_approved_transport(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
     profile: str,
     expected_transport: str,
 ) -> None:
@@ -45,7 +47,7 @@ def test_profile_selects_approved_transport(
     monkeypatch.setattr(main_module, "create_mcp_server", lambda _resolver, **_kwargs: fake)
     monkeypatch.setattr(main_module.uvicorn, "run", lambda *_args, **_kwargs: None)
 
-    main_module.main(["--profile", profile])
+    main_module.main(["--profile", profile, "--storage", str(tmp_path / f"{profile}.sqlite3")])
 
     assert fake.calls[0][0] == expected_transport
     if expected_transport == "streamable-http":
@@ -54,6 +56,33 @@ def test_profile_selects_approved_transport(
             "stateless_http": True,
             "json_response": True,
         }
+
+
+def test_shared_profile_uses_complete_shared_application(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Lease:
+        released = False
+
+        def release(self) -> None:
+            self.released = True
+
+    lease = Lease()
+    shared_app = object()
+    seen: list[object] = []
+    monkeypatch.setattr(main_module, "load_shared_settings", lambda: object())
+    monkeypatch.setattr(
+        main_module,
+        "open_shared_app",
+        lambda *_args, **_kwargs: (shared_app, lease),
+    )
+    monkeypatch.setattr(main_module, "protect_shared_app", lambda app: app)
+    monkeypatch.setattr(main_module.uvicorn, "run", lambda app, **_kwargs: seen.append(app))
+
+    main_module.main(["--profile", "shared"])
+
+    assert seen == [shared_app]
+    assert lease.released is True
 
 
 @pytest.mark.parametrize(
@@ -77,6 +106,7 @@ def test_empty_permission_mapping_grants_no_permissions() -> None:
 
 def test_dedicated_profile_rejects_missing_authentication_settings(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     for key, value in {
         "ODOO_MCP_ODOO_URL": "https://odoo.invalid",
@@ -97,7 +127,7 @@ def test_dedicated_profile_rejects_missing_authentication_settings(
     monkeypatch.setattr(main_module, "create_mcp_server", lambda _resolver, **_kwargs: fake)
 
     with pytest.raises(SystemExit):
-        main_module.main(["--profile", "dedicated"])
+        main_module.main(["--profile", "dedicated", "--storage", str(tmp_path / "state.sqlite3")])
 
 
 @pytest.mark.parametrize(

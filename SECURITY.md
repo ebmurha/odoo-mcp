@@ -21,7 +21,12 @@ Include the affected version, impact, and a minimal synthetic reproduction.
 - Terminate TLS for remote MCP clients. Dedicated Remote also validates its own
   deployment-issued HS256 bearer JWT before MCP routing; keep its signing key in
   a secret store. Shared Hosted must authenticate before supplying a trusted
-  connector identity. Forwarded identity headers are not trusted.
+  connector identity. Shared Hosted supplies its own OAuth authorization and
+  enrollment routes, stores opaque token hashes, and derives connector identity
+  only from its active grant. Forwarded identity headers are not trusted.
+- Shared Hosted rejects non-HTTPS, private, loopback, link-local, multicast,
+  reserved, mapped-private, mixed-answer, redirecting, rebinding, or excessive
+  outbound destinations before Odoo or CIMD access.
 - Bind the included Dedicated Remote template to loopback and place it behind a
   hardened reverse proxy or private network boundary.
 - Back up SQLite data and Shared Hosted key material separately. A database

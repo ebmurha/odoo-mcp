@@ -10,6 +10,8 @@ from decimal import Decimal
 from typing import Annotated, Literal, TypeAlias
 
 from mcp.server import MCPServer
+from mcp.server.auth.provider import TokenVerifier
+from mcp.server.auth.settings import AuthSettings
 from pydantic import Field, ValidationError
 from starlette.requests import Request
 from starlette.responses import JSONResponse
@@ -150,10 +152,16 @@ def create_mcp_server(
     *,
     adapter_factory: AdapterFactory = _default_adapter_factory,
     storage: Storage | None = None,
+    auth: AuthSettings | None = None,
+    token_verifier: TokenVerifier | None = None,
 ) -> MCPServer:
     """Build the one server used by every deployment profile."""
 
-    server = MCPServer("odoo-mcp")
+    server = MCPServer(
+        "odoo-mcp",
+        auth=auth,
+        token_verifier=token_verifier,
+    )
 
     @server.custom_route(  # type: ignore[untyped-decorator]
         "/healthz", methods=["GET"], include_in_schema=False

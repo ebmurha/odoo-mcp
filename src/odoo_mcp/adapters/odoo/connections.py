@@ -5,6 +5,7 @@ from __future__ import annotations
 from contextvars import ContextVar, Token
 from typing import Protocol
 
+from mcp.server.auth.middleware.auth_context import get_access_token
 from pydantic import BaseModel, ConfigDict, Field
 
 from odoo_mcp.app.settings import DeploymentProfile, OdooConnectionSettings
@@ -136,6 +137,20 @@ class SharedHostedConnectionResolver:
 
     async def resolve(self) -> ConnectionBinding:
         authorization = _connector_authorization.get()
+        if authorization is None:
+            access_token = get_access_token()
+            claims = None if access_token is None else access_token.claims
+            if access_token is not None and isinstance(claims, dict):
+                try:
+                    authorization = ConnectorAuthorization(
+                        tenant_id=claims["tenant_id"],
+                        connection_id=claims["connection_id"],
+                        authenticated_subject=access_token.subject or "connector",
+                        mcp_client=access_token.client_id,
+                        permissions=claims["permissions"],
+                    )
+                except (KeyError, ValueError):
+                    authorization = None
         if authorization is None:
             raise OdooMcpError(
                 ErrorCode.ODOO_AUTH_FAILED,

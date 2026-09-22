@@ -15,8 +15,12 @@ odoo-mcp-admin verify --storage /var/lib/odoo-mcp/state.sqlite3
 The command checks migrations, SQLite integrity, tenant audit chains,
 idempotency replay state, capabilities, proposals, artifacts, and encrypted
 connections. It prints a fixed success or failure message and suppresses paths
-and exception details. Shared Hosted operators must run the equivalent
-`Storage.verify()` call with their external encryption keyring injected.
+and exception details. Shared Hosted operators load the versioned keyring from
+their secret environment and add `--shared`:
+
+```console
+odoo-mcp-admin verify --shared --storage /var/lib/odoo-mcp/state.sqlite3
+```
 
 Send process logs to the deployment's normal stderr collector. Alert on process
 exit, repeated structured MCP errors, audit-chain verification failure, disk
@@ -30,6 +34,7 @@ database-consistent snapshot without overwriting an existing file:
 
 ```console
 odoo-mcp-admin backup \
+  --shared \
   --storage /var/lib/odoo-mcp/state.sqlite3 \
   --destination /var/backups/odoo-mcp/state-YYYYMMDD.sqlite3
 ```
@@ -38,15 +43,24 @@ Restore always targets a new path and validates before acceptance:
 
 ```console
 odoo-mcp-admin restore \
+  --shared \
   --source /var/backups/odoo-mcp/state-YYYYMMDD.sqlite3 \
   --storage /var/lib/odoo-mcp/restored.sqlite3
 ```
 
 For Shared Hosted, preserve the matching key versions in a separate secret
-backup and call `Storage.restore(..., keyring=keyring)`. A restore without the
-required key fails closed. Keep the original database and backup until MCP
-startup, audit verification, capability discovery, and one idempotent replay
-have been checked against the restored destination.
+backup. A restore without every required key fails closed. Keep the original
+database and backup until MCP startup, audit verification, capability discovery,
+and one idempotent replay have been checked against the restored destination.
+
+Shared Hosted upgrades and restarts must retain the same durable volume. The
+writer lock prevents a second application process from serving the database.
+To rotate encryption keys, add the new version to the secret, select it as
+active, rotate stored connections through the storage maintenance API, verify
+the database, and only then retire an unused old key. OAuth access tokens expire
+after one hour; refresh tokens rotate on every use and are revoked with their
+connector grant. Connector credential replacement always creates a new
+connector and atomically revokes the superseded connector, grant, and tokens.
 
 ## Non-production live qualification
 

@@ -187,6 +187,31 @@ async def test_restore_requires_the_separate_connection_key_material(tmp_path) -
             default_company_id=1,
         ),
     )
+    with source.database.transaction(write=True) as connection:
+        connection.execute(
+            """
+            INSERT INTO oauth_clients (
+                client_id, registration_method, metadata_json, client_secret_hash,
+                metadata_expires_at, created_at, updated_at
+            ) VALUES (
+                'test-client', 'dcr',
+                '{"client_id":"test-client","redirect_uris":["https://client.invalid/callback"],"token_endpoint_auth_method":"none"}',
+                NULL, NULL, '2026-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00'
+            )
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO oauth_grants (
+                id, connector_id, tenant_id, client_id, resource, scopes_json,
+                status, created_at, revoked_at
+            ) VALUES (
+                'grant-a', 'connection-a', 'tenant-a', 'test-client',
+                'https://service.invalid/mcp', '["core_read"]', 'active',
+                '2026-01-01T00:00:00+00:00', NULL
+            )
+            """
+        )
     backup = tmp_path / "backup.sqlite3"
     source.backup(backup)
 
