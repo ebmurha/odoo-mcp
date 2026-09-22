@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
 import logging
+import re
 import sys
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
@@ -12,10 +14,11 @@ from datetime import date
 from decimal import Decimal
 from pathlib import Path
 from typing import Any, NoReturn
+from uuid import uuid4
 
 from mcp import Client
 
-from odoo_mcp.adapters.accounting import FilterClause, PageRequest, ReadFilters
+from odoo_mcp.adapters.accounting import FilterClause, InvoiceEffect, PageRequest, ReadFilters
 from odoo_mcp.adapters.odoo.client import OdooClient
 from odoo_mcp.adapters.odoo.connections import ConnectionBinding, StaticConnectionResolver
 from odoo_mcp.app.settings import (
@@ -27,13 +30,13 @@ from odoo_mcp.app.settings import (
 from odoo_mcp.mcp.error_codes import OdooMcpError
 from odoo_mcp.mcp.server import create_mcp_server
 from odoo_mcp.storage import Storage
-from odoo_mcp.storage.json_support import parse_mapping
+from odoo_mcp.storage.json_support import canonical_json, parse_mapping
 
-TENANT_ID = "live-invoicing-qualification"
 PERMISSIONS = frozenset({"accounting_propose"})
 SUCCESS = "Live Odoo 19 invoicing qualification passed."
 STATE_PATH = Path(".odoo-mcp/live-invoicing-qualification.sqlite3")
-MARKER = "ODOO-MCP-LIVE-0.1.0"
+CAMPAIGN_PATH = Path(".odoo-mcp/live-invoicing-qualification.json")
+_MARKER_PATTERN = re.compile(r"ODOO-MCP-LIVE-[0-9A-F]{32}")
 _check_stage = "startup"
 
 
@@ -57,6 +60,13 @@ class References:
     expense_account_id: int
 
 
+@dataclass(frozen=True, slots=True)
+class Campaign:
+    marker: str
+    tenant_id: str
+    connection_fingerprint: str
+
+
 def _fail(stage: str, error_class: str) -> NoReturn:
     raise QualificationFailure(stage, error_class)
 
@@ -64,6 +74,73 @@ def _fail(stage: str, error_class: str) -> NoReturn:
 def _stage(value: str) -> None:
     global _check_stage
     _check_stage = value
+
+
+def _connection_fingerprint(connection: OdooConnectionSettings) -> str:
+    identity = {
+        "url": str(connection.url).rstrip("/"),
+        "database": connection.database,
+        "username": connection.username,
+        "allowed_company_ids": list(connection.allowed_company_ids),
+        "default_company_id": connection.default_company_id,
+    }
+    return hashlib.sha256(canonical_json(identity).encode()).hexdigest()
+
+
+def _campaign_from_payload(payload: Mapping[str, object], connection_fingerprint: str) -> Campaign:
+    if set(payload) != {"version", "connection_fingerprint", "marker"}:
+        _fail("campaign_binding", "invalid_campaign")
+    marker = payload.get("marker")
+    stored_fingerprint = payload.get("connection_fingerprint")
+    if (
+        payload.get("version") != 1
+        or not isinstance(marker, str)
+        or _MARKER_PATTERN.fullmatch(marker) is None
+        or not isinstance(stored_fingerprint, str)
+        or len(stored_fingerprint) != 64
+    ):
+        _fail("campaign_binding", "invalid_campaign")
+    if stored_fingerprint != connection_fingerprint:
+        _fail("campaign_binding", "connection_mismatch")
+    tenant_suffix = hashlib.sha256(marker.encode()).hexdigest()[:24]
+    return Campaign(
+        marker=marker,
+        tenant_id=f"live-invoicing-qualification-{tenant_suffix}",
+        connection_fingerprint=stored_fingerprint,
+    )
+
+
+def _load_campaign(connection: OdooConnectionSettings) -> Campaign:
+    fingerprint = _connection_fingerprint(connection)
+    if CAMPAIGN_PATH.exists():
+        if not STATE_PATH.exists():
+            _fail("campaign_binding", "campaign_state_missing")
+        try:
+            existing_payload = parse_mapping(CAMPAIGN_PATH.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            _fail("campaign_binding", "invalid_campaign")
+        return _campaign_from_payload(existing_payload, fingerprint)
+    if STATE_PATH.exists():
+        _fail("campaign_binding", "campaign_binding_missing")
+    CAMPAIGN_PATH.parent.mkdir(parents=True, exist_ok=True)
+    payload: dict[str, object] = {
+        "version": 1,
+        "connection_fingerprint": fingerprint,
+        "marker": f"ODOO-MCP-LIVE-{uuid4().hex.upper()}",
+    }
+    try:
+        with CAMPAIGN_PATH.open("x", encoding="utf-8", newline="\n") as campaign_file:
+            campaign_file.write(canonical_json(payload) + "\n")
+    except FileExistsError:
+        if not STATE_PATH.exists():
+            _fail("campaign_binding", "campaign_state_missing")
+        try:
+            payload = parse_mapping(CAMPAIGN_PATH.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            _fail("campaign_binding", "invalid_campaign")
+    except OSError:
+        _fail("campaign_binding", "campaign_storage")
+    return _campaign_from_payload(payload, fingerprint)
 
 
 def _content(result: object, stage: str) -> dict[str, Any]:
@@ -141,7 +218,13 @@ async def _execute_and_replay(
     return first
 
 
-def _stored_success(storage: Storage, tool: str, key: str) -> dict[str, Any] | None:
+def _stored_checkpoint(
+    storage: Storage,
+    campaign: Campaign,
+    company_id: int,
+    tool: str,
+    key: str,
+) -> tuple[str, dict[str, Any] | None] | None:
     with storage.database.transaction() as connection:
         row = connection.execute(
             """
@@ -149,32 +232,29 @@ def _stored_success(storage: Storage, tool: str, key: str) -> dict[str, Any] | N
             FROM idempotency_keys
             WHERE tenant_id = ? AND tool_name = ? AND idempotency_key = ?
             """,
-            (TENANT_ID, tool, key),
+            (campaign.tenant_id, tool, key),
         ).fetchone()
-    if row is None or str(row["state"]) != "succeeded":
+    if row is None:
         return None
+    if row["company_id"] != company_id:
+        _fail("local_recovery", "checkpoint_company_mismatch")
+    state = str(row["state"])
     if row["response_json"] is None:
+        if state == "in_progress":
+            return state, None
         _fail("local_recovery", "invalid_checkpoint")
-    response = parse_mapping(str(row["response_json"]))
-    if response.get("status") != "succeeded":
+    try:
+        response = parse_mapping(str(row["response_json"]))
+    except ValueError:
         _fail("local_recovery", "invalid_checkpoint")
-    return dict(response)
-
-
-def _stored_state(storage: Storage, tool: str, key: str) -> str | None:
-    with storage.database.transaction() as connection:
-        row = connection.execute(
-            """
-            SELECT state FROM idempotency_keys
-            WHERE tenant_id = ? AND tool_name = ? AND idempotency_key = ?
-            """,
-            (TENANT_ID, tool, key),
-        ).fetchone()
-    return None if row is None else str(row["state"])
+    if state == "succeeded" and response.get("status") != "succeeded":
+        _fail("local_recovery", "invalid_checkpoint")
+    return state, dict(response)
 
 
 async def _resume_or_execute(
     storage: Storage,
+    campaign: Campaign,
     client: Client,
     tool: str,
     arguments: dict[str, object],
@@ -183,10 +263,18 @@ async def _resume_or_execute(
     stage: str,
     recover_unknown: Callable[[], Awaitable[dict[str, Any]]] | None = None,
 ) -> dict[str, Any]:
-    stored = _stored_success(storage, tool, key)
-    if stored is not None:
+    company_id = arguments.get("company_id")
+    if not isinstance(company_id, int) or isinstance(company_id, bool) or company_id <= 0:
+        _fail(stage, "invalid_company")
+    checkpoint = _stored_checkpoint(storage, campaign, company_id, tool, key)
+    if checkpoint is not None and checkpoint[0] == "succeeded":
         _stage(f"{stage}_checkpoint")
-        return stored
+        execution = {**arguments, "dry_run": False, "idempotency_key": key}
+        replay = _content(await client.call_tool(tool, execution), _check_stage)
+        _require_status(replay, "succeeded", _check_stage)
+        if replay != checkpoint[1]:
+            _fail(_check_stage, "checkpoint_response_mismatch")
+        return replay
     return await _execute_and_replay(
         client,
         tool,
@@ -259,6 +347,7 @@ async def _matching_credit_notes(
 
 async def _execute_credit_note(
     storage: Storage,
+    campaign: Campaign,
     client: Client,
     adapter: OdooClient,
     references: References,
@@ -268,12 +357,30 @@ async def _execute_credit_note(
     description: str,
 ) -> dict[str, Any]:
     recovery_key = f"{key}-reconciled"
-    recovered = _stored_success(storage, "create_credit_note", recovery_key)
-    if recovered is not None:
-        return recovered
-    if _stored_state(storage, "create_credit_note", key) != "unknown":
+    recovered = _stored_checkpoint(
+        storage,
+        campaign,
+        references.company_id,
+        "create_credit_note",
+        recovery_key,
+    )
+    if recovered is not None and recovered[0] == "succeeded":
         return await _resume_or_execute(
             storage,
+            campaign,
+            client,
+            "create_credit_note",
+            arguments,
+            key=recovery_key,
+            stage="credit_note_create",
+        )
+    original = _stored_checkpoint(
+        storage, campaign, references.company_id, "create_credit_note", key
+    )
+    if original is None or original[0] != "unknown":
+        return await _resume_or_execute(
+            storage,
+            campaign,
             client,
             "create_credit_note",
             arguments,
@@ -291,6 +398,7 @@ async def _execute_credit_note(
         _fail("credit_note_create_recovery", "ambiguous_outcome")
     return await _resume_or_execute(
         storage,
+        campaign,
         client,
         "create_credit_note",
         arguments,
@@ -431,8 +539,45 @@ async def _verify_state(
         _fail(stage, "unexpected_payment_state")
 
 
+async def _verify_synthetic_invoice(
+    adapter: OdooClient,
+    company_id: int,
+    move_id: int,
+    *,
+    partner_id: int,
+    move_type: str,
+    description: str,
+    allowed_states: frozenset[str],
+    stage: str,
+    paid: bool = False,
+) -> InvoiceEffect:
+    _stage(stage)
+    effect = await adapter.get_invoice_effect(company_id, move_id)
+    if (
+        effect.company_id != company_id
+        or effect.partner.id != partner_id
+        or effect.move_type != move_type
+        or effect.state not in allowed_states
+        or effect.invoice_date != date.today()
+        or len(effect.lines) != 1
+        or effect.lines[0].description != description
+        or effect.lines[0].quantity != Decimal("1")
+        or effect.lines[0].unit_price != Decimal("1")
+        or abs(effect.lines[0].subtotal) != Decimal("1")
+        or abs(effect.amount_untaxed) != Decimal("1")
+        or effect.taxes
+    ):
+        _fail(stage, "synthetic_record_mismatch")
+    if paid and (
+        effect.amount_residual != Decimal("0") or effect.payment_state not in {"paid", "in_payment"}
+    ):
+        _fail(stage, "unexpected_payment_state")
+    return effect
+
+
 async def _register_manual_payment(
     storage: Storage,
+    campaign: Campaign,
     client: Client,
     adapter: OdooClient,
     references: References,
@@ -441,24 +586,49 @@ async def _register_manual_payment(
     key: str,
     stage: str,
     move_type: str,
+    partner_id: int,
+    description: str,
 ) -> None:
-    stored = _stored_success(storage, "register_payment", key)
-    if stored is not None:
-        await _verify_state(
-            adapter,
-            references.company_id,
-            move_id,
-            move_type=move_type,
-            state="posted",
-            stage=f"{stage}_checkpoint_state",
-            paid=True,
-        )
-        return
+    await _verify_synthetic_invoice(
+        adapter,
+        references.company_id,
+        move_id,
+        partner_id=partner_id,
+        move_type=move_type,
+        description=description,
+        allowed_states=frozenset({"posted"}),
+        stage=f"{stage}_identity",
+    )
+    checkpoint = _stored_checkpoint(
+        storage, campaign, references.company_id, "register_payment", key
+    )
     arguments: dict[str, object] = {
         "company_id": references.company_id,
         "invoice_id": move_id,
         "payment_date": date.today().isoformat(),
     }
+    if checkpoint is not None and checkpoint[0] == "succeeded":
+        if checkpoint[1] is None:
+            _fail(f"{stage}_checkpoint", "invalid_checkpoint")
+        route = _manual_route(checkpoint[1])
+        if route is None:
+            _fail(f"{stage}_checkpoint", "invalid_checkpoint")
+        arguments.update(journal_id=route[0], payment_method_line_id=route[1])
+        await _resume_or_execute(
+            storage, campaign, client, "register_payment", arguments, key=key, stage=stage
+        )
+        await _verify_synthetic_invoice(
+            adapter,
+            references.company_id,
+            move_id,
+            partner_id=partner_id,
+            move_type=move_type,
+            description=description,
+            allowed_states=frozenset({"posted"}),
+            stage=f"{stage}_checkpoint_state",
+            paid=True,
+        )
+        return
     _stage(f"{stage}_route")
     route_preview = _content(
         await client.call_tool("register_payment", {**arguments, "dry_run": True}),
@@ -470,13 +640,17 @@ async def _register_manual_payment(
     if route is None:
         raise PrerequisiteUnavailable(stage, "manual_payment_route")
     arguments.update(journal_id=route[0], payment_method_line_id=route[1])
-    await _resume_or_execute(storage, client, "register_payment", arguments, key=key, stage=stage)
-    await _verify_state(
+    await _resume_or_execute(
+        storage, campaign, client, "register_payment", arguments, key=key, stage=stage
+    )
+    await _verify_synthetic_invoice(
         adapter,
         references.company_id,
         move_id,
+        partner_id=partner_id,
         move_type=move_type,
-        state="posted",
+        description=description,
+        allowed_states=frozenset({"posted"}),
         stage=f"{stage}_state",
         paid=True,
     )
@@ -488,11 +662,12 @@ async def _qualify() -> None:
     if settings.connection is None:
         _fail("startup", "missing_connection")
     connection = settings.connection
+    campaign = _load_campaign(connection)
     adapter, references = await _preflight(connection)
-    marker = MARKER
+    marker = campaign.marker
     binding = ConnectionBinding(
         profile=DeploymentProfile.LOCAL,
-        tenant_id=TENANT_ID,
+        tenant_id=campaign.tenant_id,
         authenticated_subject="local-qualification",
         mcp_client="live-invoicing-qualifier",
         permissions=PERMISSIONS,
@@ -518,6 +693,7 @@ async def _qualify() -> None:
             }
             customer = await _resume_or_execute(
                 storage,
+                campaign,
                 client,
                 "create_customer_invoice",
                 customer_arguments,
@@ -533,7 +709,16 @@ async def _qualify() -> None:
                 ),
             )
             customer_id = _record_id(customer, "customer_invoice_create")
-            customer_effect = await adapter.get_invoice_effect(references.company_id, customer_id)
+            customer_effect = await _verify_synthetic_invoice(
+                adapter,
+                references.company_id,
+                customer_id,
+                partner_id=references.customer_id,
+                move_type="out_invoice",
+                description=f"{marker}-CUSTOMER",
+                allowed_states=frozenset({"draft", "posted"}),
+                stage="customer_invoice_identity",
+            )
             if customer_effect.state == "draft":
                 await _verify_state(
                     adapter,
@@ -545,6 +730,7 @@ async def _qualify() -> None:
                 )
             await _resume_or_execute(
                 storage,
+                campaign,
                 client,
                 "validate_invoice",
                 {"company_id": references.company_id, "invoice_id": customer_id},
@@ -561,6 +747,7 @@ async def _qualify() -> None:
             )
             await _register_manual_payment(
                 storage,
+                campaign,
                 client,
                 adapter,
                 references,
@@ -568,6 +755,8 @@ async def _qualify() -> None:
                 key=f"{marker}-customer-payment",
                 stage="customer_payment",
                 move_type="out_invoice",
+                partner_id=references.customer_id,
+                description=f"{marker}-CUSTOMER",
             )
 
             bill_arguments: dict[str, object] = {
@@ -586,6 +775,7 @@ async def _qualify() -> None:
             }
             bill = await _resume_or_execute(
                 storage,
+                campaign,
                 client,
                 "create_supplier_bill",
                 bill_arguments,
@@ -593,7 +783,16 @@ async def _qualify() -> None:
                 stage="supplier_bill_create",
             )
             bill_id = _record_id(bill, "supplier_bill_create")
-            bill_effect = await adapter.get_invoice_effect(references.company_id, bill_id)
+            bill_effect = await _verify_synthetic_invoice(
+                adapter,
+                references.company_id,
+                bill_id,
+                partner_id=references.supplier_id,
+                move_type="in_invoice",
+                description=f"{marker}-SUPPLIER",
+                allowed_states=frozenset({"draft", "posted"}),
+                stage="supplier_bill_identity",
+            )
             if bill_effect.state == "draft":
                 await _verify_state(
                     adapter,
@@ -605,6 +804,7 @@ async def _qualify() -> None:
                 )
             await _resume_or_execute(
                 storage,
+                campaign,
                 client,
                 "validate_invoice",
                 {"company_id": references.company_id, "invoice_id": bill_id},
@@ -621,6 +821,7 @@ async def _qualify() -> None:
             )
             await _register_manual_payment(
                 storage,
+                campaign,
                 client,
                 adapter,
                 references,
@@ -628,6 +829,8 @@ async def _qualify() -> None:
                 key=f"{marker}-bill-payment",
                 stage="supplier_payment",
                 move_type="in_invoice",
+                partner_id=references.supplier_id,
+                description=f"{marker}-SUPPLIER",
             )
 
             source_arguments = {
@@ -643,6 +846,7 @@ async def _qualify() -> None:
             }
             source = await _resume_or_execute(
                 storage,
+                campaign,
                 client,
                 "create_customer_invoice",
                 source_arguments,
@@ -650,8 +854,19 @@ async def _qualify() -> None:
                 stage="credit_source_create",
             )
             source_id = _record_id(source, "credit_source_create")
+            await _verify_synthetic_invoice(
+                adapter,
+                references.company_id,
+                source_id,
+                partner_id=references.customer_id,
+                move_type="out_invoice",
+                description=f"{marker}-CREDIT-SOURCE",
+                allowed_states=frozenset({"draft", "posted"}),
+                stage="credit_source_identity",
+            )
             await _resume_or_execute(
                 storage,
+                campaign,
                 client,
                 "validate_invoice",
                 {"company_id": references.company_id, "invoice_id": source_id},
@@ -666,8 +881,19 @@ async def _qualify() -> None:
                 state="posted",
                 stage="credit_source_posted_state",
             )
+            await _verify_synthetic_invoice(
+                adapter,
+                references.company_id,
+                source_id,
+                partner_id=references.customer_id,
+                move_type="out_invoice",
+                description=f"{marker}-CREDIT-SOURCE",
+                allowed_states=frozenset({"posted"}),
+                stage="credit_source_pre_reversal_identity",
+            )
             credit = await _execute_credit_note(
                 storage,
+                campaign,
                 client,
                 adapter,
                 references,
@@ -681,7 +907,16 @@ async def _qualify() -> None:
                 description=f"{marker}-CREDIT-SOURCE",
             )
             credit_id = _record_id(credit, "credit_note_create")
-            credit_effect = await adapter.get_invoice_effect(references.company_id, credit_id)
+            credit_effect = await _verify_synthetic_invoice(
+                adapter,
+                references.company_id,
+                credit_id,
+                partner_id=references.customer_id,
+                move_type="out_refund",
+                description=f"{marker}-CREDIT-SOURCE",
+                allowed_states=frozenset({"draft", "posted"}),
+                stage="credit_note_identity",
+            )
             if credit_effect.state == "draft":
                 await _verify_state(
                     adapter,
@@ -693,6 +928,7 @@ async def _qualify() -> None:
                 )
             await _resume_or_execute(
                 storage,
+                campaign,
                 client,
                 "validate_invoice",
                 {"company_id": references.company_id, "invoice_id": credit_id},
@@ -708,7 +944,7 @@ async def _qualify() -> None:
                 stage="credit_note_posted_state",
             )
         _stage("local_audit_verification")
-        storage.audit.verify_chain(TENANT_ID)
+        storage.audit.verify_chain(campaign.tenant_id)
         storage.verify()
     finally:
         await adapter.close()

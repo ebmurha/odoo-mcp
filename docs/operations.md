@@ -59,7 +59,9 @@ uv run python scripts/verify_live_invoicing_odoo19.py --execute-authorized-write
 
 It emits fixed pass/fail classes, never configuration or business values. It
 does not change Odoo configuration, invoke an external payment provider, or
-delete the synthetic records it creates.
+delete the synthetic records it creates. Its local campaign binding and SQLite
+state must be retained together for safe restart; a changed Odoo connection or
+request fails closed before a stored checkpoint can authorize a later action.
 
 ## Upgrade
 
