@@ -122,6 +122,7 @@ class PaymentWizardTransport(FakeTransport):
         self.wizard_values: dict[int, dict[str, Any]] = {}
         self.next_wizard_id = 5000
         self.available_journal_ids = [10, 20]
+        self.currency_by_journal: dict[int, list[object]] = {}
 
     async def execute_method(
         self,
@@ -167,7 +168,7 @@ class PaymentWizardTransport(FakeTransport):
                 "payment_method_line_id": [method_id, method_name],
                 "payment_method_code": method_code,
                 "amount": values["amount"],
-                "currency_id": [40, "USD"],
+                "currency_id": self.currency_by_journal.get(journal_id, [40, "USD"]),
                 "payment_date": values["payment_date"],
                 "payment_type": "inbound",
                 "partner_type": "customer",
@@ -175,6 +176,73 @@ class PaymentWizardTransport(FakeTransport):
                 "can_edit_wizard": True,
             }
         ]
+
+
+class ReversalTransport(FakeTransport):
+    def __init__(self) -> None:
+        super().__init__({})
+        self.reversed = False
+
+    async def search_read(
+        self,
+        model: str,
+        domain: list[Any],
+        fields: list[str],
+        *,
+        limit: int,
+        offset: int = 0,
+        order: str = "id",
+        company_ids: tuple[int, ...],
+    ) -> list[dict[str, Any]]:
+        self.calls.append(
+            {
+                "model": model,
+                "domain": domain,
+                "fields": fields,
+                "limit": limit,
+                "offset": offset,
+                "order": order,
+                "company_ids": company_ids,
+            }
+        )
+        if model == "res.company":
+            return self.rows.get(model, [])[:limit]
+        if model == "account.move.line":
+            return []
+        if any(term[:2] == ["reversed_entry_id", "="] for term in domain):
+            return [{"id": 902}] if self.reversed else []
+        identifier = next(term[2] for term in domain if term[:2] == ["id", "="])
+        row = _invoice_effect_row(identifier)
+        if identifier == 902:
+            row.update({"move_type": "out_refund", "state": "draft", "name": False})
+        else:
+            row.update({"state": "posted", "name": "INV/901"})
+        return [row]
+
+    async def execute_method(
+        self,
+        model: str,
+        method: str,
+        *,
+        ids: tuple[int, ...] = (),
+        positional: list[Any] | None = None,
+        named: dict[str, Any] | None = None,
+        company_ids: tuple[int, ...],
+    ) -> Any:
+        self.executions.append(
+            {
+                "model": model,
+                "method": method,
+                "ids": ids,
+                "positional": positional,
+                "named": named,
+                "company_ids": company_ids,
+            }
+        )
+        if method == "create":
+            return 5000
+        self.reversed = True
+        return {"res_id": 902}
 
 
 def _move(identifier: int) -> dict[str, Any]:
@@ -339,6 +407,41 @@ async def test_draft_invoice_creation_uses_allowlisted_create_and_reads_back_eff
     assert effect.payment_schedule[0].amount == Decimal("23.20")
 
 
+async def test_draft_invoice_effect_uses_placeholder_for_unassigned_number(
+    connection: OdooConnectionSettings,
+) -> None:
+    invoice = _invoice_effect_row(901)
+    invoice.update({"name": False, "state": "draft"})
+    client = await _validated_client(
+        connection,
+        FakeTransport({"account.move": [invoice], "account.move.line": []}),
+    )
+
+    effect = await client.get_invoice_effect(1, 901)
+
+    assert effect.name == "/"
+
+
+async def test_credit_note_wizard_receives_required_company_and_journal(
+    connection: OdooConnectionSettings,
+) -> None:
+    transport = ReversalTransport()
+    client = await _validated_client(connection, transport)
+
+    effect = await client.create_credit_note(
+        1,
+        901,
+        date(2026, 9, 20),
+        "Synthetic reversal",
+    )
+
+    values = transport.executions[0]["named"]["vals_list"]
+    assert values["company_id"] == 1
+    assert values["journal_id"] == 30
+    assert effect.id == 902
+    assert effect.move_type == "out_refund"
+
+
 async def test_payment_preview_uses_only_bounded_wizard_create_read_routes(
     connection: OdooConnectionSettings,
 ) -> None:
@@ -408,6 +511,30 @@ async def test_payment_preview_uses_only_bounded_wizard_create_read_routes(
     assert not {"search", "search_read", "write", "unlink", "action_create_payments"} & {
         call["method"] for call in transport.executions
     }
+
+
+async def test_payment_preview_excludes_route_that_changes_payment_currency(
+    connection: OdooConnectionSettings,
+) -> None:
+    invoice = _invoice_effect_row(101)
+    invoice.update({"state": "posted", "amount_residual": "100"})
+    transport = PaymentWizardTransport({"account.move": [invoice], "account.move.line": []})
+    transport.currency_by_journal[20] = [41, "EUR"]
+    client = await _validated_client(connection, transport)
+
+    preview = await client.get_payment_registration_preview(
+        PaymentPreviewRequest(
+            invoice_id=101,
+            company_id=1,
+            payment_date=date(2026, 9, 20),
+            amount=Decimal("100"),
+        )
+    )
+
+    assert [(route.journal.id, route.payment_method_line.id) for route in preview.routes] == [
+        (10, 100),
+        (10, 101),
+    ]
 
 
 async def test_payment_execution_uses_fresh_wizard_read_before_standard_action(

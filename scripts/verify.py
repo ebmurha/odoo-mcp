@@ -27,6 +27,7 @@ REQUIRED_SDIST_SUFFIXES = {
     "/docs/deployment.md",
     "/docs/operations.md",
     "/scripts/verify_docker.py",
+    "/scripts/verify_live_invoicing_odoo19.py",
     "/server.json",
 }
 

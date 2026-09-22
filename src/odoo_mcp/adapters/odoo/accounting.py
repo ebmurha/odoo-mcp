@@ -1037,7 +1037,7 @@ class AccountingReader:
                 )
         return InvoiceEffect(
             id=_positive_int(raw.get("id")),
-            name=_text(raw.get("name")),
+            name=_optional_text(raw.get("name")) or "/",
             move_type=_text(raw.get("move_type")),
             state=_text(raw.get("state")),
             company_id=_company_id(raw.get("company_id")),
@@ -1253,6 +1253,12 @@ class AccountingReader:
         self._require_company(company_id)
         ensure_accounting_action_allowed("account.move", "reverse_existing_move")
         ensure_accounting_action_allowed("account.move.reversal", "create_transient")
+        original = await self.get_invoice_effect(company_id, original_move_id)
+        if original.state != "posted" or original.move_type not in {"out_invoice", "in_invoice"}:
+            raise _invalid_input(
+                "The source document is not eligible for reversal.",
+                "Use a posted customer invoice or supplier bill.",
+            )
         context = {
             "allowed_company_ids": [company_id],
             "active_model": "account.move",
@@ -1283,6 +1289,8 @@ class AccountingReader:
                         "move_ids": [[6, 0, [original_move_id]]],
                         "date": credit_date.isoformat(),
                         "reason": reason,
+                        "company_id": company_id,
+                        "journal_id": original.journal.id,
                     },
                     "context": context,
                 },
@@ -1384,14 +1392,16 @@ class AccountingReader:
     @staticmethod
     def _payment_row_signature(row: RawRecord) -> tuple[object, ...]:
         return (
-            _decimal(row.get("amount")),
-            _relation(row.get("currency_id")),
             _text(row.get("payment_type")),
             _text(row.get("partner_type")),
             _company_id(row.get("company_id")),
             _boolean(row.get("can_edit_wizard")),
             _positive_ids(row.get("available_journal_ids"), maximum=_MAX_PAYMENT_JOURNALS),
         )
+
+    @staticmethod
+    def _payment_value_signature(row: RawRecord) -> tuple[Decimal, RelatedRecord]:
+        return _decimal(row.get("amount")), _relation(row.get("currency_id"))
 
     @staticmethod
     def _payment_route(row: RawRecord, journal_id: int, method_id: int) -> PaymentRoute:
@@ -1424,6 +1434,7 @@ class AccountingReader:
             )
         _default_id, default_row = await self._payment_wizard_row(request)
         default_signature = self._payment_row_signature(default_row)
+        default_value_signature = self._payment_value_signature(default_row)
         journal_ids = _positive_ids(
             default_row.get("available_journal_ids"), maximum=_MAX_PAYMENT_JOURNALS
         )
@@ -1447,6 +1458,8 @@ class AccountingReader:
                 or _relation(journal_row.get("journal_id")).id != journal_id
             ):
                 raise _invalid_response()
+            if self._payment_value_signature(journal_row) != default_value_signature:
+                continue
             method_ids = _positive_ids(
                 journal_row.get("available_payment_method_line_ids"),
                 maximum=_MAX_PAYMENT_METHODS,
@@ -1468,6 +1481,8 @@ class AccountingReader:
                     )
                     if self._payment_row_signature(method_row) != default_signature:
                         raise _invalid_response()
+                    if self._payment_value_signature(method_row) != default_value_signature:
+                        continue
                 routes.append(self._payment_route(method_row, journal_id, method_id))
         route_ids = [(item.journal.id, item.payment_method_line.id) for item in routes]
         default_route = (

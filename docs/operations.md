@@ -48,6 +48,19 @@ required key fails closed. Keep the original database and backup until MCP
 startup, audit verification, capability discovery, and one idempotent replay
 have been checked against the restored destination.
 
+## Non-production live qualification
+
+The live Odoo 19 invoicing qualifier performs bounded synthetic accounting
+writes and must be used only against an authorized non-production database:
+
+```console
+uv run python scripts/verify_live_invoicing_odoo19.py --execute-authorized-writes
+```
+
+It emits fixed pass/fail classes, never configuration or business values. It
+does not change Odoo configuration, invoke an external payment provider, or
+delete the synthetic records it creates.
+
 ## Upgrade
 
 1. Drain traffic and finish or investigate every in-progress/unknown execution.

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import subprocess
+import sys
 import tomllib
 from pathlib import Path
 
@@ -36,6 +38,7 @@ def test_release_documentation_and_deployment_templates_are_present() -> None:
         ".dockerignore",
         "deploy/odoo-mcp.service",
         "scripts/verify_docker.py",
+        "scripts/verify_live_invoicing_odoo19.py",
     )
     assert all((ROOT / path).is_file() for path in required)
 
@@ -53,3 +56,19 @@ def test_release_documentation_and_deployment_templates_are_present() -> None:
     assert "127.0.0.1:8000:8000" in compose
     assert "ODOO_MCP_ODOO_API_KEY" in compose
     assert '"/app/.venv/bin/python"' in docker_verifier
+
+
+def test_live_invoicing_qualifier_requires_explicit_write_flag() -> None:
+    completed = subprocess.run(
+        [sys.executable, "scripts/verify_live_invoicing_odoo19.py"],
+        cwd=ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode == 2
+    assert completed.stdout == ""
+    assert completed.stderr == (
+        "Live Odoo 19 invoicing qualification refused: explicit write flag required.\n"
+    )
