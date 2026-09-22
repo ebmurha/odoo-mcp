@@ -117,8 +117,10 @@ class Storage:
             ).fetchall()
             oauth_token_rows = connection.execute(
                 """
-                SELECT token_hash, token_type, expires_at, rotated_at, revoked_at, created_at
-                FROM oauth_tokens
+                SELECT t.token_hash, t.token_type, t.scopes_json, t.expires_at,
+                    t.rotated_at, t.revoked_at, t.created_at,
+                    g.scopes_json AS grant_scopes_json
+                FROM oauth_tokens t JOIN oauth_grants g ON g.id = t.grant_id
                 """
             ).fetchall()
         for tenant_id in self.audit.tenant_ids():
@@ -175,6 +177,7 @@ class Storage:
                     or not set(allowed).issubset(discovered)
                     or row["default_company_id"] not in allowed
                     or int(row["active_grants"]) < 1
+                    or row["consumed_enrollment_handle_hash"] is None
                 ):
                     raise StorageCorruptionError("Stored connector authority is invalid")
         for row in oauth_client_rows:
@@ -199,6 +202,10 @@ class Storage:
                 parse_timestamp(str(row["revoked_at"]))
         for row in oauth_token_rows:
             self._verify_hash(str(row["token_hash"]), "OAuth token")
+            scopes = set(parse_string_tuple(str(row["scopes_json"])))
+            grant_scopes = set(parse_string_tuple(str(row["grant_scopes_json"])))
+            if not scopes or not scopes.issubset(grant_scopes):
+                raise StorageCorruptionError("Stored OAuth token scope is invalid")
             parse_timestamp(str(row["expires_at"]))
             parse_timestamp(str(row["created_at"]))
             if row["rotated_at"] is not None:

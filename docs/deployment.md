@@ -85,6 +85,12 @@ account: successful Odoo verification, company selection, and explicit consent
 create the connector grant. Confidential DCR clients are rejected; use a public
 S256-PKCE client or validated HTTPS CIMD metadata.
 
+Registered callbacks must be HTTPS web URLs, HTTP loopback URLs for native
+clients (`localhost`, `127.0.0.1`, or `::1`), or reverse-domain private-use URI
+schemes such as `com.example.app:/callback`. User information and fragments are
+forbidden, and other HTTP or executable schemes are rejected. The same policy
+applies to DCR and CIMD before metadata is stored.
+
 Run exactly one writable application process against one durable, locally
 mounted SQLite volume. Active-active replicas, multiple workers, and network or
 shared filesystems are unsupported. A stateless proxy may scale independently.

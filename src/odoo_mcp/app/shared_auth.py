@@ -41,6 +41,7 @@ ACCESS_TOKEN_TTL = timedelta(hours=1)
 REFRESH_TOKEN_TTL = timedelta(days=30)
 MAX_CIMD_BYTES = 64 * 1024
 VALID_SCOPES = frozenset(tool.required_permission for tool in TOOL_REGISTRY)
+LOOPBACK_REDIRECT_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
 
 
 def _hash(value: str) -> str:
@@ -60,6 +61,22 @@ def _redirect(url: str, **parameters: str | None) -> str:
     query = parse_qsl(parsed.query, keep_blank_values=True)
     query.extend((key, value) for key, value in parameters.items() if value is not None)
     return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, urlencode(query), ""))
+
+
+def _redirect_uris_are_safe(redirect_uris: list[AnyUrl]) -> bool:
+    for redirect_uri in redirect_uris:
+        parsed = urlsplit(str(redirect_uri))
+        if parsed.fragment or parsed.username is not None or parsed.password is not None:
+            return False
+        if parsed.scheme == "https":
+            if parsed.hostname is None:
+                return False
+        elif parsed.scheme == "http":
+            if parsed.hostname not in LOOPBACK_REDIRECT_HOSTS:
+                return False
+        elif "." not in parsed.scheme or parsed.netloc or not parsed.path:
+            return False
+    return True
 
 
 class CimdFetcher:
@@ -94,10 +111,11 @@ class CimdFetcher:
             if not isinstance(raw, dict) or raw.get("client_id") != client_id:
                 return None
             metadata = OAuthClientInformationFull.model_validate(raw)
-            if not metadata.redirect_uris or metadata.token_endpoint_auth_method not in {
-                None,
-                "none",
-            }:
+            if (
+                not metadata.redirect_uris
+                or not _redirect_uris_are_safe(metadata.redirect_uris)
+                or metadata.token_endpoint_auth_method not in {None, "none"}
+            ):
                 return None
             return metadata.model_copy(update={"token_endpoint_auth_method": "none"})
         except (ValueError, httpx.HTTPError, OdooMcpError):
@@ -171,7 +189,7 @@ class SharedOAuthProvider:
                 error="invalid_client_metadata",
                 error_description="Shared Hosted accepts public PKCE clients only",
             )
-        if not client_info.redirect_uris:
+        if not client_info.redirect_uris or not _redirect_uris_are_safe(client_info.redirect_uris):
             raise RegistrationError(
                 error="invalid_redirect_uri",
                 error_description="At least one exact redirect URI is required",
@@ -369,7 +387,7 @@ class SharedOAuthProvider:
                 """
                 UPDATE erp_connections
                 SET status = 'active', enrollment_handle_hash = NULL,
-                    consumed_enrollment_handle_hash = NULL, activated_at = ?, updated_at = ?
+                    activated_at = ?, updated_at = ?
                 WHERE tenant_id = ? AND id = ? AND status = 'pending'
                 """,
                 (now.isoformat(), now.isoformat(), tenant_id, connector_id),
@@ -454,6 +472,7 @@ class SharedOAuthProvider:
     async def exchange_authorization_code(
         self, client: OAuthClientInformationFull, authorization_code: AuthorizationCode
     ) -> OAuthToken:
+        issued: OAuthToken | None = None
         with self._database.transaction(write=True) as connection:
             row = connection.execute(
                 """
@@ -465,17 +484,21 @@ class SharedOAuthProvider:
                 """,
                 (_hash(authorization_code.code), client.client_id),
             ).fetchone()
-            if row is None:
-                raise TokenError(error="invalid_grant", error_description="Invalid code")
-            connection.execute(
-                """
-                UPDATE oauth_authorization_sessions
-                SET status = 'consumed', consumed_at = ?
-                WHERE state_hash = ? AND status = 'authorized'
-                """,
-                (timestamp(), str(row["state_hash"])),
-            )
-            return self._issue_tokens(connection, str(row["grant_id"]), authorization_code.scopes)
+            if row is not None:
+                connection.execute(
+                    """
+                    UPDATE oauth_authorization_sessions
+                    SET status = 'consumed', consumed_at = ?
+                    WHERE state_hash = ? AND status = 'authorized'
+                    """,
+                    (timestamp(), str(row["state_hash"])),
+                )
+                issued = self._issue_tokens(
+                    connection, str(row["grant_id"]), authorization_code.scopes
+                )
+        if issued is None:
+            raise TokenError(error="invalid_grant", error_description="Invalid code")
+        return issued
 
     async def load_refresh_token(
         self, client: OAuthClientInformationFull, refresh_token: str
@@ -501,23 +524,36 @@ class SharedOAuthProvider:
         requested = scopes or refresh_token.scopes
         if not set(requested).issubset(refresh_token.scopes):
             raise TokenError(error="invalid_scope", error_description="Invalid scope")
+        invalid_grant = False
+        invalid_scope = False
+        issued: OAuthToken | None = None
         with self._database.transaction(write=True) as connection:
             row = self._token_row(connection, refresh_token.token, "refresh", client.client_id)
             if row is None:
-                raise TokenError(error="invalid_grant", error_description="Invalid refresh token")
-            now = timestamp()
-            connection.execute(
-                "UPDATE oauth_tokens SET rotated_at = ? WHERE token_hash = ?",
-                (now, _hash(refresh_token.token)),
-            )
-            connection.execute(
-                """
-                UPDATE oauth_tokens SET revoked_at = ?
-                WHERE grant_id = ? AND token_type = 'access' AND revoked_at IS NULL
-                """,
-                (now, str(row["grant_id"])),
-            )
-            return self._issue_tokens(connection, str(row["grant_id"]), requested)
+                invalid_grant = True
+            elif not set(requested).issubset(set(json.loads(str(row["scopes_json"])))):
+                invalid_scope = True
+            else:
+                now = timestamp()
+                connection.execute(
+                    "UPDATE oauth_tokens SET rotated_at = ? WHERE token_hash = ?",
+                    (now, _hash(refresh_token.token)),
+                )
+                connection.execute(
+                    """
+                    UPDATE oauth_tokens SET revoked_at = ?
+                    WHERE grant_id = ? AND token_type = 'access' AND revoked_at IS NULL
+                    """,
+                    (now, str(row["grant_id"])),
+                )
+                issued = self._issue_tokens(connection, str(row["grant_id"]), requested)
+        if invalid_grant:
+            raise TokenError(error="invalid_grant", error_description="Invalid refresh token")
+        if invalid_scope:
+            raise TokenError(error="invalid_scope", error_description="Invalid scope")
+        if issued is None:  # pragma: no cover - defensive transaction invariant
+            raise RuntimeError("Token rotation produced no result")
+        return issued
 
     async def load_access_token(self, token: str) -> AccessToken | None:
         row = self._load_token(token, "access", None)
@@ -610,14 +646,16 @@ class SharedOAuthProvider:
         connection.executemany(
             """
             INSERT INTO oauth_tokens (
-                token_hash, grant_id, token_type, expires_at, rotated_at, revoked_at, created_at
-            ) VALUES (?, ?, ?, ?, NULL, NULL, ?)
+                token_hash, grant_id, token_type, scopes_json, expires_at,
+                rotated_at, revoked_at, created_at
+            ) VALUES (?, ?, ?, ?, ?, NULL, NULL, ?)
             """,
             (
                 (
                     _hash(access),
                     grant_id,
                     "access",
+                    canonical_json(scopes),
                     (now + ACCESS_TOKEN_TTL).isoformat(),
                     now.isoformat(),
                 ),
@@ -625,6 +663,7 @@ class SharedOAuthProvider:
                     _hash(refresh),
                     grant_id,
                     "refresh",
+                    canonical_json(scopes),
                     (now + REFRESH_TOKEN_TTL).isoformat(),
                     now.isoformat(),
                 ),
@@ -650,8 +689,7 @@ class SharedOAuthProvider:
     ) -> sqlite3.Row | None:
         row = connection.execute(
             """
-            SELECT t.*, g.client_id, g.connector_id, g.tenant_id, g.resource,
-                g.scopes_json
+            SELECT t.*, g.client_id, g.connector_id, g.tenant_id, g.resource
             FROM oauth_tokens t
             JOIN oauth_grants g ON g.id = t.grant_id
             JOIN erp_connections e

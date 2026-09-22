@@ -351,7 +351,139 @@ SHARED_HOSTED_AUTHORITY = Migration(
     ),
 )
 
-MIGRATIONS = (INITIAL_SCHEMA, IDEMPOTENCY_RESPONSE_INVARIANT, SHARED_HOSTED_AUTHORITY)
+SHARED_HOSTED_AUTHORITY_INVARIANTS = Migration(
+    "0004_shared_hosted_authority_invariants",
+    (
+        "ALTER TABLE oauth_tokens ADD COLUMN scopes_json TEXT",
+        """
+        UPDATE oauth_tokens
+        SET scopes_json = (
+            SELECT scopes_json FROM oauth_grants WHERE oauth_grants.id = oauth_tokens.grant_id
+        )
+        """,
+        """
+        UPDATE erp_connections
+        SET status = 'revoked', revoked_at = COALESCE(revoked_at, updated_at)
+        WHERE status = 'active' AND NOT EXISTS (
+            SELECT 1 FROM oauth_grants
+            WHERE connector_id = erp_connections.id
+              AND tenant_id = erp_connections.tenant_id
+              AND status = 'active'
+        )
+        """,
+        """
+        UPDATE erp_connections
+        SET consumed_enrollment_handle_hash = COALESCE(
+            consumed_enrollment_handle_hash, lower(hex(randomblob(32)))
+        )
+        WHERE status = 'active'
+        """,
+        "DROP TRIGGER erp_connection_active_authority",
+        """
+        CREATE TRIGGER erp_connection_active_authority
+        BEFORE UPDATE OF status ON erp_connections
+        WHEN NEW.status = 'active' AND OLD.status != 'active' AND (
+            NEW.allowed_company_ids_json IS NULL
+            OR NEW.default_company_id IS NULL
+            OR NEW.enrollment_handle_hash IS NOT NULL
+            OR NEW.consumed_enrollment_handle_hash IS NULL
+            OR NOT EXISTS (
+                SELECT 1 FROM oauth_grants
+                WHERE connector_id = NEW.id AND tenant_id = NEW.tenant_id
+                    AND status = 'active'
+            )
+        )
+        BEGIN
+            SELECT RAISE(ABORT, 'active connector authority is incomplete');
+        END
+        """,
+        """
+        CREATE TRIGGER erp_connection_active_insert_authority
+        BEFORE INSERT ON erp_connections
+        WHEN NEW.status = 'active'
+        BEGIN
+            SELECT RAISE(ABORT, 'active connector authority must be activated transactionally');
+        END
+        """,
+        """
+        CREATE TRIGGER erp_connection_active_update_authority
+        BEFORE UPDATE ON erp_connections
+        WHEN OLD.status = 'active' AND NEW.status = 'active' AND (
+            NEW.allowed_company_ids_json IS NULL
+            OR NEW.default_company_id IS NULL
+            OR NEW.enrollment_handle_hash IS NOT NULL
+            OR NEW.consumed_enrollment_handle_hash IS NULL
+        )
+        BEGIN
+            SELECT RAISE(ABORT, 'active connector authority is incomplete');
+        END
+        """,
+        """
+        CREATE TRIGGER oauth_grant_active_revoke_authority
+        BEFORE UPDATE OF status ON oauth_grants
+        WHEN OLD.status = 'active' AND NEW.status != 'active' AND EXISTS (
+            SELECT 1 FROM erp_connections
+            WHERE id = OLD.connector_id AND tenant_id = OLD.tenant_id
+              AND status = 'active'
+        )
+        BEGIN
+            SELECT RAISE(ABORT, 'active connector grant must be revoked transactionally');
+        END
+        """,
+        """
+        CREATE TRIGGER oauth_grant_active_delete_authority
+        BEFORE DELETE ON oauth_grants
+        WHEN OLD.status = 'active' AND EXISTS (
+            SELECT 1 FROM erp_connections
+            WHERE id = OLD.connector_id AND tenant_id = OLD.tenant_id
+              AND status = 'active'
+        )
+        BEGIN
+            SELECT RAISE(ABORT, 'active connector grant cannot be deleted');
+        END
+        """,
+        """
+        CREATE TRIGGER oauth_token_scope_invariant
+        BEFORE INSERT ON oauth_tokens
+        WHEN NEW.scopes_json IS NULL
+          OR json_valid(NEW.scopes_json) = 0
+          OR json_type(NEW.scopes_json) != 'array'
+          OR json_array_length(NEW.scopes_json) = 0
+          OR EXISTS (
+              SELECT 1 FROM json_each(NEW.scopes_json) token_scope
+              WHERE token_scope.type != 'text' OR token_scope.value NOT IN (
+                  SELECT grant_scope.value
+                  FROM oauth_grants, json_each(oauth_grants.scopes_json) grant_scope
+                  WHERE oauth_grants.id = NEW.grant_id
+              )
+          )
+        BEGIN
+            SELECT RAISE(ABORT, 'OAuth token scope invariant failed');
+        END
+        """,
+        """
+        CREATE TRIGGER oauth_token_scope_immutable
+        BEFORE UPDATE OF scopes_json ON oauth_tokens
+        BEGIN
+            SELECT RAISE(ABORT, 'OAuth token scopes are immutable');
+        END
+        """,
+        """
+        CREATE TRIGGER oauth_grant_scope_immutable
+        BEFORE UPDATE OF scopes_json ON oauth_grants
+        BEGIN
+            SELECT RAISE(ABORT, 'OAuth grant scopes are immutable');
+        END
+        """,
+    ),
+)
+
+MIGRATIONS = (
+    INITIAL_SCHEMA,
+    IDEMPOTENCY_RESPONSE_INVARIANT,
+    SHARED_HOSTED_AUTHORITY,
+    SHARED_HOSTED_AUTHORITY_INVARIANTS,
+)
 
 
 def _timestamp() -> str:

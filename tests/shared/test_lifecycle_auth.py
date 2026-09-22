@@ -4,7 +4,7 @@ import sqlite3
 from urllib.parse import parse_qs, urlsplit
 
 import pytest
-from mcp.server.auth.provider import AuthorizationParams, AuthorizeError
+from mcp.server.auth.provider import AuthorizationParams, AuthorizeError, TokenError
 from mcp.shared.auth import OAuthClientInformationFull
 from pydantic import AnyUrl
 
@@ -205,7 +205,23 @@ async def test_grant_token_refresh_and_revocation_are_connector_bound(tmp_path) 
     assert refresh is not None
     rotated = await provider.exchange_refresh_token(client, refresh, ["core_read"])
     assert await provider.load_refresh_token(client, token.refresh_token) is None
-    assert await provider.verify_token(rotated.access_token) is not None
+    narrowed_access = await provider.verify_token(rotated.access_token)
+    assert narrowed_access is not None
+    assert narrowed_access.scopes == ["core_read"]
+    assert narrowed_access.claims["permissions"] == ["core_read"]
+    assert rotated.refresh_token is not None
+    narrowed_refresh = await provider.load_refresh_token(client, rotated.refresh_token)
+    assert narrowed_refresh is not None
+    assert narrowed_refresh.scopes == ["core_read"]
+    forged_refresh = narrowed_refresh.model_copy(
+        update={"scopes": ["core_read", "accounting_read"]}
+    )
+    with pytest.raises(TokenError) as error:
+        await provider.exchange_refresh_token(
+            client, forged_refresh, ["core_read", "accounting_read"]
+        )
+    assert error.value.error == "invalid_scope"
+    assert error.value.error_description == "Invalid scope"
 
     trusted = provider.authorization_for_access_token(rotated.access_token)
     assert trusted is not None
@@ -218,7 +234,9 @@ async def test_grant_token_refresh_and_revocation_are_connector_bound(tmp_path) 
         keyring=EncryptionKeyring(1, {1: b"a" * 32}),
     )
     restored_provider = _provider(restored)
-    assert await restored_provider.verify_token(rotated.access_token) is not None
+    restored_access = await restored_provider.verify_token(rotated.access_token)
+    assert restored_access is not None
+    assert restored_access.claims["permissions"] == ["core_read"]
     assert await restored.connections.resolve_authorized(trusted) is not None
 
     provider.revoke_connector(trusted)

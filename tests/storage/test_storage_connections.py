@@ -37,7 +37,76 @@ def _connection() -> OdooConnectionSettings:
     )
 
 
-def _grant(storage: Storage, tenant_id: str, connection_id: str) -> None:
+def test_direct_save_cannot_create_grantless_active_connector(tmp_path) -> None:
+    storage = Storage.open(
+        tmp_path / "state.sqlite3",
+        keyring=EncryptionKeyring(active_version=1, keys={1: b"a" * 32}),
+    )
+
+    with pytest.raises(ValueError, match="OAuth enrollment"):
+        storage.connections.save("tenant-a", "connection-a", "A", _connection())
+
+    storage.verify()
+    with storage.database.transaction() as database:
+        assert database.execute("SELECT count(*) FROM erp_connections").fetchone()[0] == 0
+
+
+def test_database_rejects_direct_active_connector_insert(tmp_path) -> None:
+    storage = Storage.open(
+        tmp_path / "state.sqlite3",
+        keyring=EncryptionKeyring(active_version=1, keys={1: b"a" * 32}),
+    )
+    with pytest.raises(sqlite3.IntegrityError, match="activated transactionally"):
+        with storage.database.transaction(write=True) as database:
+            database.execute(
+                """
+                INSERT INTO erp_connections (
+                    id, tenant_id, connection_label, odoo_url, database_name, username,
+                    encrypted_api_key, discovered_company_ids_json,
+                    allowed_company_ids_json, default_company_id, key_version, status,
+                    enrollment_handle_hash, consumed_enrollment_handle_hash,
+                    created_at, updated_at
+                ) VALUES (
+                    'connection-a', 'tenant-a', 'A', 'https://odoo.invalid',
+                    'synthetic-db', 'synthetic-user', 'ciphertext', '[1]', '[1]', 1,
+                    1, 'active', NULL, ?,
+                    '2026-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00'
+                )
+                """,
+                ("a" * 64,),
+            )
+
+
+def test_database_preserves_active_connector_grant_invariant(tmp_path) -> None:
+    storage = Storage.open(
+        tmp_path / "state.sqlite3",
+        keyring=EncryptionKeyring(active_version=1, keys={1: b"a" * 32}),
+    )
+    _save_active(storage, "tenant-a", "connection-a")
+
+    with pytest.raises(sqlite3.IntegrityError, match="revoked transactionally"):
+        with storage.database.transaction(write=True) as database:
+            database.execute(
+                "UPDATE oauth_grants SET status = 'revoked' WHERE connector_id = 'connection-a'"
+            )
+    with pytest.raises(sqlite3.IntegrityError, match="authority is incomplete"):
+        with storage.database.transaction(write=True) as database:
+            database.execute(
+                """
+                UPDATE erp_connections SET consumed_enrollment_handle_hash = NULL
+                WHERE id = 'connection-a'
+                """
+            )
+
+    storage.verify()
+
+
+def _save_active(storage: Storage, tenant_id: str, connection_id: str) -> None:
+    assert storage.keyring is not None
+    settings = _connection()
+    encrypted, key_version = storage.keyring.encrypt(
+        tenant_id, connection_id, settings.api_key.get_secret_value()
+    )
     with storage.database.transaction(write=True) as database:
         database.execute(
             """
@@ -61,6 +130,30 @@ def _grant(storage: Storage, tenant_id: str, connection_id: str) -> None:
         )
         database.execute(
             """
+            INSERT INTO erp_connections (
+                id, tenant_id, connection_label, odoo_url, database_name, username,
+                encrypted_api_key, discovered_company_ids_json,
+                allowed_company_ids_json, default_company_id, detected_version,
+                selected_transport, key_version, status, enrollment_handle_hash,
+                consumed_enrollment_handle_hash, enrollment_expires_at, activated_at,
+                revoked_at, created_at, updated_at
+            ) VALUES (?, ?, 'Synthetic', ?, ?, ?, ?, '[1,2]', '[1,2]', 1, '19',
+                'json2', ?, 'pending', NULL, ?, '2099-01-01T00:00:00+00:00', NULL,
+                NULL, '2026-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00')
+            """,
+            (
+                connection_id,
+                tenant_id,
+                str(settings.url),
+                settings.database,
+                settings.username,
+                encrypted,
+                key_version,
+                uuid4().hex * 2,
+            ),
+        )
+        database.execute(
+            """
             INSERT INTO oauth_grants (
                 id, connector_id, tenant_id, client_id, resource, scopes_json,
                 status, created_at, revoked_at
@@ -69,19 +162,20 @@ def _grant(storage: Storage, tenant_id: str, connection_id: str) -> None:
             """,
             (str(uuid4()), connection_id, tenant_id),
         )
+        database.execute(
+            """
+            UPDATE erp_connections SET status = 'active', activated_at = updated_at
+            WHERE tenant_id = ? AND id = ?
+            """,
+            (tenant_id, connection_id),
+        )
 
 
 @pytest.mark.asyncio
 async def test_connections_are_encrypted_bound_and_redacted(tmp_path) -> None:
     keyring = EncryptionKeyring(active_version=1, keys={1: b"a" * 32})
     storage = Storage.open(tmp_path / "state.sqlite3", keyring=keyring)
-    storage.connections.save(
-        tenant_id="tenant-a",
-        connection_id="connection-a",
-        connection_label="Synthetic",
-        connection=_connection(),
-    )
-    _grant(storage, "tenant-a", "connection-a")
+    _save_active(storage, "tenant-a", "connection-a")
 
     stored = (
         sqlite3.connect(tmp_path / "state.sqlite3")
@@ -113,8 +207,7 @@ async def test_encrypted_repository_drives_the_shared_hosted_resolver(tmp_path) 
         tmp_path / "state.sqlite3",
         keyring=EncryptionKeyring(active_version=1, keys={1: b"a" * 32}),
     )
-    storage.connections.save("tenant-a", "connection-a", "A", _connection())
-    _grant(storage, "tenant-a", "connection-a")
+    _save_active(storage, "tenant-a", "connection-a")
     authorization = _authorization("tenant-a", "connection-a")
     token = set_connector_authorization(authorization)
     try:
@@ -131,10 +224,8 @@ async def test_encrypted_repository_drives_the_shared_hosted_resolver(tmp_path) 
 async def test_ciphertext_cannot_move_between_tenants_or_connections(tmp_path) -> None:
     keyring = EncryptionKeyring(active_version=1, keys={1: b"a" * 32})
     storage = Storage.open(tmp_path / "state.sqlite3", keyring=keyring)
-    storage.connections.save("tenant-a", "connection-a", "A", _connection())
-    storage.connections.save("tenant-b", "connection-b", "B", _connection())
-    _grant(storage, "tenant-a", "connection-a")
-    _grant(storage, "tenant-b", "connection-b")
+    _save_active(storage, "tenant-a", "connection-a")
+    _save_active(storage, "tenant-b", "connection-b")
     database = sqlite3.connect(storage.database.path)
     database.execute(
         """
@@ -158,8 +249,7 @@ async def test_key_rotation_is_atomic_idempotent_and_audited(tmp_path) -> None:
     old = EncryptionKeyring(active_version=1, keys={1: b"a" * 32})
     path = tmp_path / "state.sqlite3"
     storage = Storage.open(path, keyring=old)
-    storage.connections.save("tenant-a", "connection-a", "A", _connection())
-    _grant(storage, "tenant-a", "connection-a")
+    _save_active(storage, "tenant-a", "connection-a")
 
     rotated = Storage.open(
         path,
@@ -205,8 +295,7 @@ async def test_key_rotation_is_atomic_idempotent_and_audited(tmp_path) -> None:
 async def test_rotation_rolls_back_when_its_audit_event_cannot_persist(tmp_path) -> None:
     path = tmp_path / "state.sqlite3"
     original = Storage.open(path, keyring=EncryptionKeyring(1, {1: b"a" * 32}))
-    original.connections.save("tenant-a", "connection-a", "A", _connection())
-    _grant(original, "tenant-a", "connection-a")
+    _save_active(original, "tenant-a", "connection-a")
     rotating = Storage.open(
         path,
         keyring=EncryptionKeyring(2, {1: b"a" * 32, 2: b"b" * 32}),
@@ -244,8 +333,8 @@ async def test_rotation_rolls_back_when_its_audit_event_cannot_persist(tmp_path)
 def test_tenant_rotation_is_resumable_after_a_partial_failure(tmp_path) -> None:
     path = tmp_path / "state.sqlite3"
     original = Storage.open(path, keyring=EncryptionKeyring(1, {1: b"a" * 32}))
-    original.connections.save("tenant-a", "connection-a", "A", _connection())
-    original.connections.save("tenant-a", "connection-b", "B", _connection())
+    _save_active(original, "tenant-a", "connection-a")
+    _save_active(original, "tenant-a", "connection-b")
     rotating = Storage.open(
         path,
         keyring=EncryptionKeyring(2, {1: b"a" * 32, 2: b"b" * 32}),

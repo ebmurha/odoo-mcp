@@ -105,48 +105,9 @@ class SQLiteEncryptedConnectionRepository:
         detected_version: str | None = None,
         selected_transport: str | None = None,
     ) -> None:
-        if not tenant_id.strip() or not connection_id.strip() or not connection_label.strip():
-            raise ValueError("Connection identifiers and label are required")
-        keyring = self._require_keyring()
-        encrypted, key_version = keyring.encrypt(
-            tenant_id, connection_id, connection.api_key.get_secret_value()
-        )
-        now = timestamp()
-        with self._database.transaction(write=True) as database_connection:
-            database_connection.execute(
-                """
-                INSERT INTO erp_connections (
-                    id, tenant_id, connection_label, odoo_url, database_name,
-                    username, encrypted_api_key, discovered_company_ids_json,
-                    allowed_company_ids_json,
-                    default_company_id, detected_version, selected_transport,
-                    key_version, status, enrollment_handle_hash,
-                    enrollment_expires_at, activated_at, revoked_at,
-                    created_at, updated_at
-                ) VALUES (
-                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                    'active', NULL, NULL, ?, NULL, ?, ?
-                )
-                """,
-                (
-                    connection_id,
-                    tenant_id,
-                    connection_label,
-                    str(connection.url),
-                    connection.database,
-                    connection.username,
-                    encrypted,
-                    canonical_json(connection.allowed_company_ids),
-                    canonical_json(connection.allowed_company_ids),
-                    connection.default_company_id,
-                    detected_version,
-                    selected_transport,
-                    key_version,
-                    now,
-                    now,
-                    now,
-                ),
-            )
+        del tenant_id, connection_id, connection_label, connection
+        del detected_version, selected_transport
+        raise ValueError("Active connections must be created through OAuth enrollment")
 
     @staticmethod
     def _allowed_companies(value: str) -> tuple[int, ...]:

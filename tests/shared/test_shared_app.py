@@ -61,7 +61,7 @@ def test_complete_shared_hosted_flow_and_fail_closed_mcp(tmp_path) -> None:
         storage,
         validator=Validator(),
         adapter_factory=_adapter_factory,
-        permissions=frozenset({"core_read"}),
+        permissions=frozenset({"core_read", "accounting_read"}),
     )
     verifier = "v" * 64
     challenge = (
@@ -85,9 +85,43 @@ def test_complete_shared_hosted_flow_and_fail_closed_mcp(tmp_path) -> None:
                 "token_endpoint_auth_method": "none",
                 "grant_types": ["authorization_code", "refresh_token"],
                 "response_types": ["code"],
-                "scope": "core_read",
+                "scope": "core_read accounting_read",
             },
         )
+        unsafe_registrations = [
+            client.post(
+                "/register",
+                json={
+                    "client_name": "Unsafe client",
+                    "redirect_uris": [redirect_uri],
+                    "token_endpoint_auth_method": "none",
+                    "grant_types": ["authorization_code"],
+                    "response_types": ["code"],
+                    "scope": "core_read",
+                },
+            )
+            for redirect_uri in (
+                "javascript:alert(1)",
+                "https://client.invalid/callback#fragment",
+            )
+        ]
+        native_registrations = [
+            client.post(
+                "/register",
+                json={
+                    "client_name": "Native client",
+                    "redirect_uris": [redirect_uri],
+                    "token_endpoint_auth_method": "none",
+                    "grant_types": ["authorization_code"],
+                    "response_types": ["code"],
+                    "scope": "core_read",
+                },
+            )
+            for redirect_uri in (
+                "http://127.0.0.1:8123/callback",
+                "com.example.app:/callback",
+            )
+        ]
         client_id = registration.json()["client_id"]
         wrong_redirect = client.get(
             "/authorize",
@@ -97,7 +131,7 @@ def test_complete_shared_hosted_flow_and_fail_closed_mcp(tmp_path) -> None:
                 "response_type": "code",
                 "code_challenge": challenge,
                 "code_challenge_method": "S256",
-                "scope": "core_read",
+                "scope": "core_read accounting_read",
                 "resource": "https://testserver/mcp",
             },
             follow_redirects=False,
@@ -110,7 +144,7 @@ def test_complete_shared_hosted_flow_and_fail_closed_mcp(tmp_path) -> None:
                 "response_type": "code",
                 "code_challenge": challenge,
                 "code_challenge_method": "plain",
-                "scope": "core_read",
+                "scope": "core_read accounting_read",
                 "resource": "https://testserver/mcp",
             },
             follow_redirects=False,
@@ -123,7 +157,7 @@ def test_complete_shared_hosted_flow_and_fail_closed_mcp(tmp_path) -> None:
                 "response_type": "code",
                 "code_challenge": challenge,
                 "code_challenge_method": "S256",
-                "scope": "core_read",
+                "scope": "core_read accounting_read",
                 "resource": "https://testserver/mcp",
                 "state": "client-state",
             },
@@ -210,6 +244,37 @@ def test_complete_shared_hosted_flow_and_fail_closed_mcp(tmp_path) -> None:
                 "params": {"name": "get_erp_capabilities", "arguments": {}},
             },
         )
+        narrowed_tokens = client.post(
+            "/token",
+            data={
+                "grant_type": "refresh_token",
+                "client_id": client_id,
+                "refresh_token": tokens.json()["refresh_token"],
+                "scope": "core_read",
+                "resource": "https://testserver/mcp",
+            },
+        )
+        narrowed_headers = {
+            **mcp_headers,
+            "Authorization": f"Bearer {narrowed_tokens.json()['access_token']}",
+        }
+        denied_accounting = client.post(
+            "/mcp",
+            headers=narrowed_headers,
+            json={
+                "jsonrpc": "2.0",
+                "id": 4,
+                "method": "tools/call",
+                "params": {
+                    "name": "get_trial_balance",
+                    "arguments": {
+                        "company_id": 1,
+                        "period_start": "2026-01-01",
+                        "period_end": "2026-01-31",
+                    },
+                },
+            },
+        )
         reset_context = client.post(
             "/mcp",
             headers=mcp_headers,
@@ -220,6 +285,8 @@ def test_complete_shared_hosted_flow_and_fail_closed_mcp(tmp_path) -> None:
     assert resource.status_code == 200
     assert unauthorized.status_code == 401
     assert registration.status_code == 201
+    assert [response.status_code for response in unsafe_registrations] == [400, 400]
+    assert [response.status_code for response in native_registrations] == [201, 201]
     assert wrong_redirect.status_code == 400
     assert plain_pkce.status_code == 400
     assert authorization.status_code == 302
@@ -242,6 +309,12 @@ def test_complete_shared_hosted_flow_and_fail_closed_mcp(tmp_path) -> None:
     assert initialize.status_code == 200
     assert called.status_code == 200
     assert called.json()["result"]["structuredContent"]["status"] == "ok"
+    assert narrowed_tokens.status_code == 200
+    assert narrowed_tokens.json()["scope"] == "core_read"
+    assert denied_accounting.status_code == 200
+    assert (
+        denied_accounting.json()["result"]["structuredContent"]["error_code"] == "ODOO_AUTH_FAILED"
+    )
     assert reset_context.status_code == 401
 
 

@@ -12,7 +12,11 @@ from odoo_mcp.storage import (
     StorageCorruptionError,
 )
 from odoo_mcp.storage.database import SQLiteDatabase
-from odoo_mcp.storage.migrations import INITIAL_SCHEMA, apply_migrations
+from odoo_mcp.storage.migrations import (
+    IDEMPOTENCY_RESPONSE_INVARIANT,
+    INITIAL_SCHEMA,
+    apply_migrations,
+)
 from odoo_mcp.storage.repositories import IdempotencyRepository
 
 
@@ -84,6 +88,38 @@ def test_response_invariant_migration_upgrades_valid_legacy_state(tmp_path) -> N
 
     replay = repository.reserve("tenant-a", 1, "tool", "key", {"value": 1}, "req_2")
     assert replay.response == {"status": "succeeded"}
+
+
+def test_legacy_connection_migrates_without_grantless_active_authority(tmp_path) -> None:
+    path = tmp_path / "legacy.sqlite3"
+    database = SQLiteDatabase(path)
+    apply_migrations(database, (INITIAL_SCHEMA, IDEMPOTENCY_RESPONSE_INVARIANT))
+    keyring = EncryptionKeyring(1, {1: b"a" * 32})
+    encrypted, key_version = keyring.encrypt("tenant-a", "connection-a", "synthetic-secret")
+    with database.transaction(write=True) as connection:
+        connection.execute(
+            """
+            INSERT INTO erp_connections (
+                id, tenant_id, connection_label, odoo_url, database_name, username,
+                encrypted_api_key, allowed_company_ids_json, default_company_id,
+                key_version, created_at, updated_at
+            ) VALUES (
+                'connection-a', 'tenant-a', 'Legacy', 'https://odoo.invalid',
+                'synthetic-db', 'synthetic-user', ?, '[1]', 1, ?,
+                '2026-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00'
+            )
+            """,
+            (encrypted, key_version),
+        )
+
+    migrated = Storage.open(path, keyring=keyring)
+    migrated.verify()
+    with migrated.database.transaction() as connection:
+        row = connection.execute(
+            "SELECT status, revoked_at FROM erp_connections WHERE id = 'connection-a'"
+        ).fetchone()
+    assert row is not None
+    assert tuple(row) == ("revoked", "2026-01-01T00:00:00+00:00")
 
 
 def test_backup_restore_validates_state_and_preserves_source(tmp_path) -> None:
@@ -167,50 +203,27 @@ def test_restore_rejects_final_idempotency_state_without_response(tmp_path) -> N
     assert not (tmp_path / "restored.sqlite3").exists()
 
 
-@pytest.mark.asyncio
-async def test_restore_requires_the_separate_connection_key_material(tmp_path) -> None:
-    from odoo_mcp.adapters.odoo.connections import ConnectorAuthorization
-    from odoo_mcp.app.settings import OdooConnectionSettings
-
+def test_restore_requires_the_separate_connection_key_material(tmp_path) -> None:
     keyring = EncryptionKeyring(1, {1: b"a" * 32})
     source = Storage.open(tmp_path / "source.sqlite3", keyring=keyring)
-    source.connections.save(
-        "tenant-a",
-        "connection-a",
-        "Synthetic",
-        OdooConnectionSettings(
-            url="https://odoo.invalid",
-            database="synthetic-db",
-            username="synthetic-user",
-            api_key="synthetic-secret",
-            allowed_company_ids=(1,),
-            default_company_id=1,
-        ),
-    )
+    encrypted, key_version = keyring.encrypt("tenant-a", "connection-a", "synthetic-secret")
     with source.database.transaction(write=True) as connection:
         connection.execute(
             """
-            INSERT INTO oauth_clients (
-                client_id, registration_method, metadata_json, client_secret_hash,
-                metadata_expires_at, created_at, updated_at
+            INSERT INTO erp_connections (
+                id, tenant_id, connection_label, odoo_url, database_name, username,
+                encrypted_api_key, discovered_company_ids_json,
+                allowed_company_ids_json, default_company_id, key_version, status,
+                enrollment_handle_hash, consumed_enrollment_handle_hash,
+                enrollment_expires_at, activated_at, revoked_at, created_at, updated_at
             ) VALUES (
-                'test-client', 'dcr',
-                '{"client_id":"test-client","redirect_uris":["https://client.invalid/callback"],"token_endpoint_auth_method":"none"}',
-                NULL, NULL, '2026-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00'
+                'connection-a', 'tenant-a', 'Synthetic', 'https://odoo.invalid',
+                'synthetic-db', 'synthetic-user', ?, '[1]', '[1]', 1, ?, 'revoked',
+                NULL, NULL, NULL, NULL, '2026-01-01T00:00:00+00:00',
+                '2026-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00'
             )
-            """
-        )
-        connection.execute(
-            """
-            INSERT INTO oauth_grants (
-                id, connector_id, tenant_id, client_id, resource, scopes_json,
-                status, created_at, revoked_at
-            ) VALUES (
-                'grant-a', 'connection-a', 'tenant-a', 'test-client',
-                'https://service.invalid/mcp', '["core_read"]', 'active',
-                '2026-01-01T00:00:00+00:00', NULL
-            )
-            """
+            """,
+            (encrypted, key_version),
         )
     backup = tmp_path / "backup.sqlite3"
     source.backup(backup)
@@ -225,14 +238,4 @@ async def test_restore_requires_the_separate_connection_key_material(tmp_path) -
         tmp_path / "restored.sqlite3",
         keyring=keyring,
     )
-    resolved = await restored.connections.resolve_authorized(
-        ConnectorAuthorization(
-            tenant_id="tenant-a",
-            connection_id="connection-a",
-            authenticated_subject="subject-a",
-            mcp_client="test-client",
-            permissions=frozenset({"core_read"}),
-        )
-    )
-    assert resolved is not None
-    assert resolved.api_key.get_secret_value() == "synthetic-secret"
+    restored.verify()

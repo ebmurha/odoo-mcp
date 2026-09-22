@@ -78,3 +78,26 @@ async def test_cimd_rejects_redirects_oversize_and_forbidden_destination() -> No
         ).fetch("https://127.0.0.1/metadata.json")
         is None
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "redirect_uri",
+    ("javascript:alert(1)", "https://client.invalid/callback#fragment"),
+)
+async def test_cimd_rejects_unsafe_redirect_uris(redirect_uri: str) -> None:
+    client_id = "https://client.invalid/metadata.json"
+
+    def unsafe(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "client_id": client_id,
+                "redirect_uris": [redirect_uri],
+                "token_endpoint_auth_method": "none",
+            },
+            request=request,
+        )
+
+    fetcher = CimdFetcher(SharedOutboundPolicy(_public), transport=httpx.MockTransport(unsafe))
+    assert await fetcher.fetch(client_id) is None
