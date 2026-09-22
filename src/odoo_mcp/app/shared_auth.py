@@ -79,6 +79,16 @@ def _redirect_uris_are_safe(redirect_uris: list[AnyUrl]) -> bool:
     return True
 
 
+def _client_metadata_is_safe(metadata: OAuthClientInformationFull) -> bool:
+    redirect_uris = metadata.redirect_uris
+    return (
+        redirect_uris is not None
+        and bool(redirect_uris)
+        and _redirect_uris_are_safe(redirect_uris)
+        and metadata.token_endpoint_auth_method in {None, "none"}
+    )
+
+
 class CimdFetcher:
     """Fetch bounded HTTPS client metadata through the Shared outbound policy."""
 
@@ -111,11 +121,7 @@ class CimdFetcher:
             if not isinstance(raw, dict) or raw.get("client_id") != client_id:
                 return None
             metadata = OAuthClientInformationFull.model_validate(raw)
-            if (
-                not metadata.redirect_uris
-                or not _redirect_uris_are_safe(metadata.redirect_uris)
-                or metadata.token_endpoint_auth_method not in {None, "none"}
-            ):
+            if not _client_metadata_is_safe(metadata):
                 return None
             return metadata.model_copy(update={"token_endpoint_auth_method": "none"})
         except (ValueError, httpx.HTTPError, OdooMcpError):
@@ -150,7 +156,26 @@ class SharedOAuthProvider:
         if row is not None:
             expiry = row["metadata_expires_at"]
             if expiry is None or parse_timestamp(str(expiry)) > _now():
-                return OAuthClientInformationFull.model_validate_json(str(row["metadata_json"]))
+                try:
+                    metadata = OAuthClientInformationFull.model_validate_json(
+                        str(row["metadata_json"])
+                    )
+                except ValueError:
+                    metadata = None
+                if metadata is not None and _client_metadata_is_safe(metadata):
+                    return metadata
+                invalidated_at = timestamp()
+                with self._database.transaction(write=True) as connection:
+                    connection.execute(
+                        """
+                        UPDATE oauth_clients
+                        SET metadata_expires_at = ?, updated_at = ?
+                        WHERE client_id = ?
+                        """,
+                        (invalidated_at, invalidated_at, client_id),
+                    )
+            if str(row["registration_method"]) != "cimd":
+                return None
         if not client_id.startswith("https://"):
             return None
         metadata = await self._cimd_fetcher.fetch(client_id)
@@ -189,10 +214,10 @@ class SharedOAuthProvider:
                 error="invalid_client_metadata",
                 error_description="Shared Hosted accepts public PKCE clients only",
             )
-        if not client_info.redirect_uris or not _redirect_uris_are_safe(client_info.redirect_uris):
+        if not _client_metadata_is_safe(client_info):
             raise RegistrationError(
                 error="invalid_redirect_uri",
-                error_description="At least one exact redirect URI is required",
+                error_description="Every redirect URI must satisfy the callback policy",
             )
         now = timestamp()
         with self._database.transaction(write=True) as connection:
