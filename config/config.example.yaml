@@ -1,0 +1,23 @@
+permissions:
+  core_read:
+    - get_erp_capabilities
+  accounting_read:
+    - get_trial_balance
+    - get_profit_and_loss
+    - get_balance_sheet
+    - get_aged_receivables
+    - get_aged_payables
+    - get_cashbook
+    - flag_unmatched_statement_lines
+    - list_open_invoices
+    - list_open_bills
+    - list_journal_entries
+  accounting_propose:
+    - reconcile_bank_statement_lines
+    - create_customer_invoice
+    - create_supplier_bill
+    - create_credit_note
+    - validate_invoice
+    - register_payment
+    - create_journal_entry
+    - post_journal_entry

@@ -1,0 +1,40 @@
+services:
+  odoo-mcp:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      ODOO_MCP_ODOO_URL: "${ODOO_MCP_ODOO_URL:?set in the operator environment}"
+      ODOO_MCP_ODOO_DATABASE: "${ODOO_MCP_ODOO_DATABASE:?set in the operator environment}"
+      ODOO_MCP_ODOO_USERNAME: "${ODOO_MCP_ODOO_USERNAME:?set in the operator environment}"
+      ODOO_MCP_ODOO_API_KEY: "${ODOO_MCP_ODOO_API_KEY:?set in the operator environment}"
+      ODOO_MCP_ALLOWED_COMPANY_IDS: "${ODOO_MCP_ALLOWED_COMPANY_IDS:?set in the operator environment}"
+      ODOO_MCP_DEFAULT_COMPANY_ID: "${ODOO_MCP_DEFAULT_COMPANY_ID:?set in the operator environment}"
+      ODOO_MCP_AUTH_ISSUER: "${ODOO_MCP_AUTH_ISSUER:?set in the operator environment}"
+      ODOO_MCP_AUTH_AUDIENCE: "${ODOO_MCP_AUTH_AUDIENCE:?set in the operator environment}"
+      ODOO_MCP_AUTH_SIGNING_KEY: "${ODOO_MCP_AUTH_SIGNING_KEY:?set in the operator environment}"
+    ports:
+      - "127.0.0.1:8000:8000"
+    volumes:
+      - odoo-mcp-state:/var/lib/odoo-mcp
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=3).read()"
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  odoo-mcp-state:

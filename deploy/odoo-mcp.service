@@ -1,0 +1,21 @@
+[Unit]
+Description=Odoo MCP Dedicated Remote service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=odoo-mcp
+Group=odoo-mcp
+EnvironmentFile=/etc/odoo-mcp/odoo-mcp.env
+ExecStart=/opt/odoo-mcp/.venv/bin/odoo-mcp --profile dedicated --config /etc/odoo-mcp/config.yaml --host 127.0.0.1 --port 8000 --storage /var/lib/odoo-mcp/state.sqlite3
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/odoo-mcp
+
+[Install]
+WantedBy=multi-user.target

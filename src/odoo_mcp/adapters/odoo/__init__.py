@@ -1,0 +1,1 @@
+"""Concrete Odoo integration boundary."""
