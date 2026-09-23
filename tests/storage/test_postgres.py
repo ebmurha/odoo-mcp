@@ -340,7 +340,7 @@ def test_postgres_runs_the_accepted_shared_oauth_mcp_flow(
 
     monkeypatch.setattr(Storage, "open", classmethod(open_postgres))
     shared_tests = runpy.run_path(str(Path(__file__).parents[1] / "shared" / "test_shared_app.py"))
-    shared_tests["test_complete_shared_hosted_flow_and_fail_closed_mcp"](tmp_path)
+    shared_tests["test_complete_shared_hosted_flow_and_fail_closed_mcp"](tmp_path, "/odoo", "/odoo")
 
 
 @pytest.mark.asyncio
