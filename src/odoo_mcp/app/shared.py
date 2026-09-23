@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import html
+import logging
 import secrets
 import sys
 import time
@@ -46,6 +49,158 @@ from odoo_mcp.storage.errors import StorageError
 
 SESSION_COOKIE = "__Secure-odoo-mcp-session"
 ENROLLMENT_COOKIE = "__Secure-odoo-mcp-enrollment"
+LOGGER = logging.getLogger(__name__)
+
+ENROLLMENT_CSS = """
+:root {
+  color-scheme: light;
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
+    "Segoe UI", sans-serif;
+  color: #271b2d;
+  background: #f6f2f8;
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  padding: 32px 18px;
+  background:
+    radial-gradient(circle at top left, #f0dff4 0, transparent 34rem),
+    #f6f2f8;
+}
+main {
+  width: min(100%, 640px);
+  overflow: hidden;
+  background: #fff;
+  border: 1px solid #e8ddea;
+  border-radius: 20px;
+  box-shadow: 0 24px 70px rgb(66 36 75 / 12%);
+}
+.masthead { padding: 28px 32px 0; }
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: #5f2867;
+  font-size: 15px;
+  font-weight: 750;
+  letter-spacing: .01em;
+}
+.brand-mark {
+  width: 30px;
+  height: 30px;
+  display: grid;
+  place-items: center;
+  border-radius: 10px;
+  color: #fff;
+  background: linear-gradient(145deg, #71347b, #a34da4);
+  box-shadow: 0 6px 16px rgb(113 52 123 / 24%);
+}
+.steps {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  margin-top: 24px;
+}
+.step { height: 4px; border-radius: 999px; background: #eadfeb; }
+.step.active { background: linear-gradient(90deg, #73347c, #b24c9b); }
+.content { padding: 28px 32px 32px; }
+.eyebrow {
+  margin: 0 0 8px;
+  color: #7b4a82;
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: .12em;
+  text-transform: uppercase;
+}
+h1 { margin: 0; font-size: clamp(26px, 5vw, 34px); line-height: 1.15; }
+.intro { margin: 12px 0 26px; color: #6c6070; line-height: 1.6; }
+.field { display: grid; gap: 7px; margin-top: 18px; }
+.field-label, legend { font-size: 14px; font-weight: 750; }
+.hint { color: #7b707f; font-size: 12px; line-height: 1.45; }
+input, select {
+  width: 100%;
+  min-height: 46px;
+  padding: 10px 12px;
+  color: #271b2d;
+  background: #fff;
+  border: 1px solid #cfc1d2;
+  border-radius: 10px;
+  font: inherit;
+}
+input:focus, select:focus {
+  outline: 3px solid rgb(154 72 157 / 16%);
+  border-color: #8a3f92;
+}
+fieldset { min-width: 0; margin: 22px 0 0; padding: 0; border: 0; }
+legend { margin-bottom: 6px; }
+.choices { display: grid; gap: 10px; margin-top: 12px; }
+.choice {
+  display: flex;
+  align-items: flex-start;
+  gap: 11px;
+  padding: 13px 14px;
+  border: 1px solid #ded2e0;
+  border-radius: 12px;
+  background: #fcfafc;
+}
+.choice input { width: 18px; min-height: 18px; margin: 2px 0 0; accent-color: #7b3484; }
+.choice strong, .choice small { display: block; }
+.choice small { margin-top: 3px; color: #7b707f; }
+.meta {
+  display: grid;
+  gap: 8px;
+  margin: 20px 0 0;
+  padding: 14px;
+  border-radius: 12px;
+  background: #f7f2f8;
+  color: #5f5263;
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+.meta code { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; }
+.notice {
+  margin: 0 0 22px;
+  padding: 13px 14px;
+  border-left: 4px solid #a33d62;
+  border-radius: 8px;
+  color: #70253f;
+  background: #fff1f5;
+  line-height: 1.5;
+}
+.consent { margin-top: 22px; }
+.actions { display: flex; align-items: center; gap: 14px; margin-top: 26px; }
+button, .button {
+  min-height: 46px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 11px 18px;
+  border: 0;
+  border-radius: 11px;
+  color: #fff;
+  background: linear-gradient(135deg, #71347b, #9e438e);
+  box-shadow: 0 8px 20px rgb(113 52 123 / 20%);
+  font: inherit;
+  font-weight: 750;
+  text-decoration: none;
+  cursor: pointer;
+}
+button:hover, .button:hover { background: #642d6d; }
+.privacy { margin: 22px 0 0; color: #817486; font-size: 12px; line-height: 1.5; }
+@media (max-width: 520px) {
+  body { padding: 0; place-items: stretch; }
+  main { min-height: 100vh; border: 0; border-radius: 0; }
+  .masthead { padding: 24px 22px 0; }
+  .content { padding: 26px 22px; }
+  .actions, button, .button { width: 100%; }
+}
+""".strip()
+ENROLLMENT_STYLE_HASH = base64.b64encode(
+    hashlib.sha256(ENROLLMENT_CSS.encode()).digest()
+).decode()
 CSRF_COOKIE = "__Secure-odoo-mcp-csrf"
 MAX_FORM_BYTES = 32 * 1024
 SHARED_DATABASE_ERRORS = (StorageError, *DATABASE_ERRORS)
@@ -163,18 +318,60 @@ def _secure_cookie(response: Response, name: str, value: str, path: str) -> None
     )
 
 
-def _html_response(content: str) -> HTMLResponse:
+def _html_response(content: str, *, status_code: int = 200) -> HTMLResponse:
     return HTMLResponse(
         content,
+        status_code=status_code,
         headers={
             "Cache-Control": "no-store",
             "Content-Security-Policy": (
-                "default-src 'none'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'"
+                "default-src 'none'; "
+                f"style-src 'sha256-{ENROLLMENT_STYLE_HASH}'; "
+                "form-action 'self'; base-uri 'none'; frame-ancestors 'none'"
             ),
             "Referrer-Policy": "no-referrer",
             "X-Content-Type-Options": "nosniff",
         },
     )
+
+
+def _page(
+    *,
+    step: int,
+    eyebrow: str,
+    title: str,
+    introduction: str,
+    body: str,
+    error: str | None = None,
+) -> str:
+    error_html = f'<div class="notice" role="alert">{html.escape(error)}</div>' if error else ""
+    second_step = " active" if step == 2 else ""
+    return f"""<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{html.escape(title)} · Odoo MCP</title>
+<style>{ENROLLMENT_CSS}</style>
+</head>
+<body>
+<main>
+<div class="masthead">
+<div class="brand"><span class="brand-mark" aria-hidden="true">O</span> Odoo MCP</div>
+<div class="steps" aria-label="Enrollment progress">
+<span class="step active"></span><span class="step{second_step}"></span>
+</div>
+</div>
+<div class="content">
+<p class="eyebrow">{html.escape(eyebrow)}</p>
+<h1>{html.escape(title)}</h1>
+<p class="intro">{html.escape(introduction)}</p>
+{error_html}
+{body}
+</div>
+</main>
+</body>
+</html>"""
 
 
 def _csrf(request: Request, form: dict[str, list[str]]) -> None:
@@ -184,18 +381,42 @@ def _csrf(request: Request, form: dict[str, list[str]]) -> None:
         raise ValueError("The authorization session is invalid")
 
 
-def _credentials_form(csrf: str, base_path: str) -> str:
+def _credentials_form(csrf: str, base_path: str, *, error: str | None = None) -> str:
     escaped = html.escape(csrf, quote=True)
-    return f"""<!doctype html><html><body><main>
-<h1>Connect Odoo</h1>
-<form method="post" action="{base_path}/enroll/prepare" autocomplete="off">
+    action = html.escape(f"{base_path}/enroll/prepare", quote=True)
+    body = f"""
+<form method="post" action="{action}" autocomplete="off">
 <input type="hidden" name="csrf" value="{escaped}">
-<label>Odoo URL <input name="url" type="url" required></label>
-<label>Database <input name="database" required></label>
-<label>Username <input name="username" required></label>
-<label>API key <input name="api_key" type="password" required></label>
-<button type="submit">Verify connection</button>
-</form></main></body></html>"""
+<label class="field" for="url">
+<span class="field-label">Odoo URL</span>
+<input id="url" name="url" type="url" placeholder="https://your-company.odoo.com"
+  autocomplete="url" required>
+</label>
+<label class="field" for="database">
+<span class="field-label">Database</span>
+<input id="database" name="database" autocomplete="organization" required>
+</label>
+<label class="field" for="username">
+<span class="field-label">Username</span>
+<input id="username" name="username" autocomplete="username" required>
+</label>
+<label class="field" for="api-key">
+<span class="field-label">API key</span>
+<input id="api-key" name="api_key" type="password" autocomplete="current-password" required>
+<span class="hint">Use an Odoo API key, not your account password.</span>
+</label>
+<div class="actions"><button type="submit">Verify and continue</button></div>
+</form>
+<p class="privacy">Your credentials are verified directly against Odoo and stored encrypted
+while you review company access.</p>"""
+    return _page(
+        step=1,
+        eyebrow="Step 1 of 2",
+        title="Connect your Odoo workspace",
+        introduction="Enter the Odoo connection this assistant is allowed to use.",
+        body=body,
+        error=error,
+    )
 
 
 def _company_form(
@@ -204,26 +425,73 @@ def _company_form(
     scopes: tuple[str, ...],
     companies: tuple[tuple[int, str], ...],
     base_path: str,
+    *,
+    error: str | None = None,
 ) -> str:
-    options = "".join(
-        f'<label><input type="checkbox" name="company_id" value="{identifier}">'
-        f"{html.escape(name)}</label>"
-        for identifier, name in companies
+    choices = "".join(
+        f'<label class="choice"><input type="checkbox" name="company_id" '
+        f'value="{identifier}"{" checked" if index == 0 else ""}>'
+        f"<span><strong>{html.escape(name)}</strong>"
+        f"<small>Company ID {identifier}</small></span></label>"
+        for index, (identifier, name) in enumerate(companies)
     )
     defaults = "".join(
         f'<option value="{identifier}">{html.escape(name)}</option>'
         for identifier, name in companies
     )
-    return f"""<!doctype html><html><body><main>
-<h1>Authorize Odoo MCP</h1>
-<p>Client: {html.escape(client_id)}</p>
-<p>Scopes: {html.escape(", ".join(scopes))}</p>
-<form method="post" action="{base_path}/enroll/commit">
+    action = html.escape(f"{base_path}/enroll/commit", quote=True)
+    body = f"""
+<form method="post" action="{action}">
 <input type="hidden" name="csrf" value="{html.escape(csrf, quote=True)}">
-{options}<label>Default company <select name="default_company_id">{defaults}</select></label>
-<label><input type="checkbox" name="consent" value="yes" required>Approve this connector</label>
-<button type="submit">Authorize</button>
-</form></main></body></html>"""
+<fieldset>
+<legend>Company access</legend>
+<span class="hint">Select every company the assistant may access.</span>
+<div class="choices">{choices}</div>
+</fieldset>
+<label class="field" for="default-company">
+<span class="field-label">Default company (always authorized)</span>
+<select id="default-company" name="default_company_id" required>{defaults}</select>
+<span class="hint">Used when a request does not specify another authorized company.</span>
+</label>
+<div class="meta">
+<span><strong>Client</strong> <code>{html.escape(client_id)}</code></span>
+<span><strong>Permissions</strong> {html.escape(", ".join(scopes))}</span>
+</div>
+<label class="choice consent">
+<input type="checkbox" name="consent" value="yes" required>
+<span><strong>Approve this connector</strong>
+<small>Allow this client to use the companies and permissions shown above.</small></span>
+</label>
+<div class="actions"><button type="submit">Authorize connector</button></div>
+</form>
+<p class="privacy">You can revoke this connector later. Odoo access remains limited by the
+permissions of the Odoo user and API key supplied in step 1.</p>"""
+    return _page(
+        step=2,
+        eyebrow="Step 2 of 2",
+        title="Choose company access",
+        introduction="Review the client, permissions, and companies before authorizing.",
+        body=body,
+        error=error,
+    )
+
+
+def _authorization_error(base_path: str, message: str, reference: str) -> str:
+    body = f"""
+<div class="actions">
+<a class="button" href="{html.escape(f'{base_path}/enroll', quote=True)}">
+Return to company selection
+</a>
+</div>
+<p class="privacy">Reference: <code>{html.escape(reference)}</code></p>"""
+    return _page(
+        step=2,
+        eyebrow="Authorization not completed",
+        title="We couldn't authorize this connector",
+        introduction="Nothing was activated. Review the message below and try again.",
+        body=body,
+        error=message,
+    )
 
 
 def create_shared_app(
@@ -336,11 +604,14 @@ def create_shared_app(
 
     async def prepare(request: Request) -> Response:
         prepared_connector: tuple[str, str] | None = None
+        failure_stage = "request"
         try:
             form = await _form(request)
             _csrf(request, form)
+            failure_stage = "session"
             session = request.cookies[SESSION_COOKIE]
             provider.session_summary(session)
+            failure_stage = "verification"
             credentials = OdooEnrollmentCredentials.model_validate(
                 {
                     "url": _one(form, "url"),
@@ -368,26 +639,63 @@ def create_shared_app(
             )
             _secure_cookie(response, ENROLLMENT_COOKIE, prepared.enrollment_handle, cookie_path)
             return response
-        except (KeyError, ValueError, ValidationError, OdooMcpError, *SHARED_DATABASE_ERRORS):
+        except (
+            KeyError,
+            ValueError,
+            ValidationError,
+            OdooMcpError,
+            *SHARED_DATABASE_ERRORS,
+        ) as exc:
             if prepared_connector is not None:
                 lifecycle.discard_pending(*prepared_connector)
-            return JSONResponse({"error": "enrollment_failed"}, status_code=400)
+            reference = secrets.token_hex(4)
+            LOGGER.warning(
+                "Enrollment preparation failed [reference=%s, stage=%s, error_type=%s]",
+                reference,
+                failure_stage,
+                type(exc).__name__,
+            )
+            if failure_stage in {"request", "session"}:
+                message = (
+                    "Your secure session is no longer valid. Return to your assistant and "
+                    "start the connection again."
+                )
+            else:
+                message = (
+                    "We couldn't verify those Odoo details. Check the URL, database, username, "
+                    "and API key, then try again."
+                )
+            csrf = request.cookies.get(CSRF_COOKIE, "")
+            return _html_response(
+                _credentials_form(csrf, base_path, error=f"{message} Reference: {reference}"),
+                status_code=400,
+            )
 
     async def commit(request: Request) -> Response:
+        failure_stage = "request"
         try:
             form = await _form(request)
             _csrf(request, form)
+            failure_stage = "session"
             session = request.cookies[SESSION_COOKIE]
             handle = f"enroll:{session}"
             cookie_handle = request.cookies.get(ENROLLMENT_COOKIE)
             if cookie_handle is not None and not secrets.compare_digest(cookie_handle, handle):
                 raise ValueError("The enrollment handle is invalid")
-            selected = tuple(int(value) for value in form.get("company_id", ()))
+            failure_stage = "selection"
             default = int(_one(form, "default_company_id"))
+            selected = tuple(
+                dict.fromkeys(
+                    [*(int(value) for value in form.get("company_id", ())), default]
+                )
+            )
+            failure_stage = "consent"
             consent = _one(form, "consent") == "yes"
             if not consent:
                 raise ValueError("Explicit consent is required")
+            failure_stage = "commit"
             lifecycle.commit_enrollment(handle, selected, default)
+            failure_stage = "activation"
             location = provider.activate_connector(session, consent=consent)
             response = RedirectResponse(location, status_code=303)
             for name in (SESSION_COOKIE, ENROLLMENT_COOKIE, CSRF_COOKIE):
@@ -395,8 +703,33 @@ def create_shared_app(
                     name, path=cookie_path, secure=True, httponly=True, samesite="lax"
                 )
             return response
-        except (KeyError, TypeError, ValueError, *SHARED_DATABASE_ERRORS):
-            return JSONResponse({"error": "authorization_failed"}, status_code=400)
+        except (KeyError, TypeError, ValueError, *SHARED_DATABASE_ERRORS) as exc:
+            reference = secrets.token_hex(4)
+            LOGGER.warning(
+                "Enrollment authorization failed [reference=%s, stage=%s, error_type=%s]",
+                reference,
+                failure_stage,
+                type(exc).__name__,
+            )
+            if failure_stage == "consent":
+                message = "Approve the connector to continue. No authorization was created."
+            elif failure_stage == "selection":
+                message = "Choose a valid default company, then try again."
+            elif failure_stage in {"request", "session", "activation"}:
+                message = (
+                    "Your authorization session is invalid or expired. Return to your assistant "
+                    "and start the connection again."
+                )
+            else:
+                message = (
+                    "We couldn't save that company authorization. Return to company selection "
+                    "and try again."
+                )
+            status_code = 503 if isinstance(exc, SHARED_DATABASE_ERRORS) else 400
+            return _html_response(
+                _authorization_error(base_path, message, reference),
+                status_code=status_code,
+            )
 
     async def revoke(request: Request) -> Response:
         try:

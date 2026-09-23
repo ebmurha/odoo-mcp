@@ -206,11 +206,19 @@ def test_complete_shared_hosted_flow_and_fail_closed_mcp(
             },
             follow_redirects=False,
         )
+        rejected_company = client.post(
+            endpoint("/enroll/commit"),
+            data={
+                "csrf": csrf,
+                "default_company_id": "99",
+                "consent": "yes",
+            },
+            follow_redirects=False,
+        )
         completed = client.post(
             endpoint("/enroll/commit"),
             data={
                 "csrf": csrf,
-                "company_id": "1",
                 "default_company_id": "1",
                 "consent": "yes",
             },
@@ -324,13 +332,27 @@ def test_complete_shared_hosted_flow_and_fail_closed_mcp(
         for header in cookie_headers
     )
     assert enrollment.status_code == 200
+    assert "Connect your Odoo workspace" in enrollment.text
+    assert "<style>" in enrollment.text
+    assert "style-src 'sha256-" in enrollment.headers["content-security-policy"]
+    assert "'unsafe-inline'" not in enrollment.headers["content-security-policy"]
     assert f'action="{endpoint("/enroll/prepare")}"' in enrollment.text
     assert "synthetic-secret" not in enrollment.text
     assert rejected_csrf.status_code == 400
+    assert rejected_csrf.headers["content-type"].startswith("text/html")
+    assert "Your secure session is no longer valid" in rejected_csrf.text
+    assert "synthetic-secret" not in rejected_csrf.text
     assert prepared.status_code == 200
+    assert "Choose company access" in prepared.text
+    assert "Default company (always authorized)" in prepared.text
     assert f'action="{endpoint("/enroll/commit")}"' in prepared.text
     assert "synthetic-secret" not in prepared.text
     assert rejected_consent.status_code == 400
+    assert rejected_consent.headers["content-type"].startswith("text/html")
+    assert "Approve the connector to continue" in rejected_consent.text
+    assert rejected_company.status_code == 400
+    assert rejected_company.headers["content-type"].startswith("text/html")
+    assert "save that company authorization" in rejected_company.text
     assert completed.status_code == 303
     completed_redirect = urlsplit(completed.headers["location"])
     assert (completed_redirect.scheme, completed_redirect.netloc, completed_redirect.path) == (
