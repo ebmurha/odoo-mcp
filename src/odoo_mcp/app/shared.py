@@ -14,7 +14,8 @@ from typing import Any, cast
 from urllib.parse import parse_qs, urlsplit
 
 from mcp.server.auth.handlers.authorize import AuthorizationHandler
-from mcp.server.auth.routes import create_auth_routes
+from mcp.server.auth.handlers.metadata import MetadataHandler
+from mcp.server.auth.routes import build_metadata, create_auth_routes
 from mcp.server.auth.settings import AuthSettings as McpAuthSettings
 from mcp.server.auth.settings import ClientRegistrationOptions, RevocationOptions
 from pydantic import AnyHttpUrl, ValidationError
@@ -420,16 +421,28 @@ def create_shared_app(
             return JSONResponse({"error": "invalid_session"}, status_code=400)
         return RedirectResponse(f"{base_path}/enroll", status_code=303)
 
+    issuer_url = AnyHttpUrl(str(settings.issuer_url))
+    registration_options = ClientRegistrationOptions(
+        enabled=True,
+        valid_scopes=sorted(permissions),
+        default_scopes=["core_read"],
+    )
+    revocation_options = RevocationOptions(enabled=True)
     auth_routes = create_auth_routes(
         provider,
-        AnyHttpUrl(str(settings.issuer_url)),
-        client_registration_options=ClientRegistrationOptions(
-            enabled=True,
-            valid_scopes=sorted(permissions),
-            default_scopes=["core_read"],
-        ),
-        revocation_options=RevocationOptions(enabled=True),
+        issuer_url,
+        client_registration_options=registration_options,
+        revocation_options=revocation_options,
     )
+    oauth_metadata = build_metadata(
+        issuer_url,
+        None,
+        registration_options,
+        revocation_options,
+    )
+    oauth_metadata.token_endpoint_auth_methods_supported = ["none"]
+    oauth_metadata.revocation_endpoint_auth_methods_supported = ["none"]
+    metadata_handler = MetadataHandler(oauth_metadata)
     authorization_handler = AuthorizationHandler(provider)
 
     async def authorize(request: Request) -> Response:
@@ -448,14 +461,17 @@ def create_shared_app(
     scoped_auth_routes: list[Route] = []
     for route in auth_routes:
         path = route.path
-        if path == "/.well-known/oauth-authorization-server" and base_path:
-            path = f"{path}{base_path}"
+        endpoint = route.endpoint
+        if path == "/.well-known/oauth-authorization-server":
+            endpoint = metadata_handler.handle
+            if base_path:
+                path = f"{path}{base_path}"
         elif not path.startswith("/.well-known/"):
             path = f"{base_path}{path}"
         scoped_auth_routes.append(
             Route(
                 path,
-                endpoint=route.endpoint,
+                endpoint=endpoint,
                 methods=route.methods,
                 name=route.name,
                 include_in_schema=route.include_in_schema,

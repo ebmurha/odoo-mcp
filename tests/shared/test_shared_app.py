@@ -454,5 +454,8 @@ def test_path_scoped_shared_app_owns_only_the_configured_surface(tmp_path) -> No
     assert metadata.json()["authorization_endpoint"] == "https://testserver/odoo/authorize"
     assert metadata.json()["token_endpoint"] == "https://testserver/odoo/token"
     assert metadata.json()["registration_endpoint"] == "https://testserver/odoo/register"
+    assert metadata.json()["token_endpoint_auth_methods_supported"] == ["none"]
+    assert metadata.json()["revocation_endpoint_auth_methods_supported"] == ["none"]
+    assert "client_id_metadata_document_supported" not in metadata.json()
     assert resource.status_code == 200
     assert resource.json()["resource"] == "https://testserver/odoo"
