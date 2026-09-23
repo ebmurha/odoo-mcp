@@ -5,7 +5,6 @@ from __future__ import annotations
 import hashlib
 import json
 import secrets
-import sqlite3
 from datetime import UTC, datetime, timedelta
 from typing import cast
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
@@ -31,7 +30,7 @@ from odoo_mcp.mcp.error_codes import OdooMcpError
 from odoo_mcp.mcp.registry import TOOL_REGISTRY
 from odoo_mcp.mcp.request_ids import new_request_id
 from odoo_mcp.storage.audit import AuditRepository
-from odoo_mcp.storage.database import SQLiteDatabase
+from odoo_mcp.storage.database import Connection, Database, Row
 from odoo_mcp.storage.json_support import canonical_json, parse_timestamp, timestamp
 from odoo_mcp.storage.models import AuditEvent
 
@@ -133,7 +132,7 @@ class SharedOAuthProvider:
 
     def __init__(
         self,
-        database: SQLiteDatabase,
+        database: Database,
         *,
         issuer_url: str,
         resource_url: str,
@@ -662,9 +661,7 @@ class SharedOAuthProvider:
             permissions=scopes.intersection(self._valid_scopes),
         )
 
-    def _issue_tokens(
-        self, connection: sqlite3.Connection, grant_id: str, scopes: list[str]
-    ) -> OAuthToken:
+    def _issue_tokens(self, connection: Connection, grant_id: str, scopes: list[str]) -> OAuthToken:
         access = _random_value()
         refresh = _random_value()
         now = _now()
@@ -701,17 +698,17 @@ class SharedOAuthProvider:
             scope=" ".join(scopes),
         )
 
-    def _load_token(self, token: str, token_type: str, client_id: str | None) -> sqlite3.Row | None:
+    def _load_token(self, token: str, token_type: str, client_id: str | None) -> Row | None:
         with self._database.transaction() as connection:
             return self._token_row(connection, token, token_type, client_id)
 
     @staticmethod
     def _token_row(
-        connection: sqlite3.Connection,
+        connection: Connection,
         token: str,
         token_type: str,
         client_id: str | None,
-    ) -> sqlite3.Row | None:
+    ) -> Row | None:
         row = connection.execute(
             """
             SELECT t.*, g.client_id, g.connector_id, g.tenant_id, g.resource
@@ -727,11 +724,11 @@ class SharedOAuthProvider:
         ).fetchone()
         if row is not None and client_id is not None and str(row["client_id"]) != client_id:
             return None
-        return cast(sqlite3.Row | None, row)
+        return cast(Row | None, row)
 
     @staticmethod
     def _revoke_connector_in_transaction(
-        connection: sqlite3.Connection, connector_id: str, now: str
+        connection: Connection, connector_id: str, now: str
     ) -> None:
         grants = connection.execute(
             "SELECT id FROM oauth_grants WHERE connector_id = ? AND status = 'active'",
@@ -763,7 +760,7 @@ class SharedOAuthProvider:
 
     def _append_audit(
         self,
-        connection: sqlite3.Connection,
+        connection: Connection,
         tenant_id: str,
         operation: str,
         connector_id: str,

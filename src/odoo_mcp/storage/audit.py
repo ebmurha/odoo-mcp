@@ -3,10 +3,9 @@
 from __future__ import annotations
 
 import hashlib
-import sqlite3
 
 from odoo_mcp.mcp.error_codes import ErrorCode
-from odoo_mcp.storage.database import SQLiteDatabase
+from odoo_mcp.storage.database import Connection, Database, Row
 from odoo_mcp.storage.errors import AuditIntegrityError
 from odoo_mcp.storage.json_support import (
     canonical_json,
@@ -76,7 +75,7 @@ def _event_values(
     }
 
 
-def _row_to_record(row: sqlite3.Row) -> AuditRecord:
+def _row_to_record(row: Row) -> AuditRecord:
     proposed = None if row["proposed_action"] is None else parse_mapping(row["proposed_action"])
     actual = None if row["actual_result"] is None else parse_mapping(row["actual_result"])
     return AuditRecord(
@@ -108,7 +107,7 @@ def _row_to_record(row: sqlite3.Row) -> AuditRecord:
 
 
 class AuditRepository:
-    def __init__(self, database: SQLiteDatabase) -> None:
+    def __init__(self, database: Database) -> None:
         self._database = database
 
     def append(self, event: AuditEvent) -> AuditRecord:
@@ -117,7 +116,7 @@ class AuditRepository:
 
     def append_in_transaction(
         self,
-        connection: sqlite3.Connection,
+        connection: Connection,
         event: AuditEvent,
     ) -> AuditRecord:
         required_values = (
@@ -134,6 +133,7 @@ class AuditRepository:
             raise ValueError("Audit identity and status fields are required")
         if event.company_id is not None and event.company_id <= 0:
             raise ValueError("Audit company_id must be positive")
+        self._database.lock(connection, f"audit:{event.tenant_id}")
         row = connection.execute(
             "SELECT entry_hash FROM audit_log WHERE tenant_id = ? ORDER BY id DESC LIMIT 1",
             (event.tenant_id,),

@@ -1,7 +1,8 @@
 # Deployment
 
 All deployment profiles run the same Python package, MCP server, registry,
-workflows, Odoo adapter, and SQLite storage implementation.
+workflows, and Odoo adapter. Storage is selected explicitly as SQLite or
+PostgreSQL without changing those application contracts.
 
 ## Local Development
 
@@ -91,9 +92,12 @@ schemes such as `com.example.app:/callback`. User information and fragments are
 forbidden, and other HTTP or executable schemes are rejected. The same policy
 applies to DCR and CIMD before metadata is stored.
 
-Run exactly one writable application process against one durable, locally
-mounted SQLite volume. Active-active replicas, multiple workers, and network or
-shared filesystems are unsupported. A stateless proxy may scale independently.
+For SQLite, run exactly one writable application process against one durable,
+locally mounted volume; network/shared filesystems remain unsupported. For
+PostgreSQL, set `ODOO_MCP_SHARED_STORAGE_KIND=postgresql`, use a pooled TLS
+`DATABASE_URL` for runtime traffic, and a direct TLS
+`DATABASE_MIGRATION_URL` for serialized startup migrations and database
+operations. A stateless proxy may scale independently.
 The optional `deploy/reverse-proxy/nginx.conf` is routing guidance only; it owns
 no identity or application state. Forwarded host, scheme, path, and identity
 headers never change the configured issuer, resource, connector, company, or
@@ -118,9 +122,10 @@ revocation, restart, and encrypted-state verification without contacting Odoo.
 
 ## Secrets and persistent data
 
-Never bake environment files, API keys, SQLite databases, or encryption keys
-into an image. Mount `.odoo-mcp/state.sqlite3` on durable storage. For Shared
-Hosted, back up the encrypted database and the operator key material separately.
+Never bake environment files, API keys, databases, or encryption keys into an
+image. Mount `.odoo-mcp/state.sqlite3` on durable storage when SQLite is
+selected. For Shared Hosted, back up the selected database and operator key
+material separately.
 See [`operations.md`](operations.md) before upgrades or recovery.
 
 Production deployment, public endpoint publication, and client-directory

@@ -18,6 +18,7 @@ from pydantic import (
     ValidationError,
     ValidationInfo,
     field_validator,
+    model_validator,
 )
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from pydantic_settings.exceptions import SettingsError as PydanticSettingsError
@@ -29,6 +30,11 @@ class DeploymentProfile(StrEnum):
     LOCAL = "local"
     DEDICATED = "dedicated"
     SHARED = "shared"
+
+
+class StorageKind(StrEnum):
+    LOCAL = "local"
+    POSTGRESQL = "postgresql"
 
 
 class SettingsError(RuntimeError):
@@ -149,20 +155,21 @@ class SharedHostedSettings(BaseModel):
     public_mcp_url: HttpUrl
     active_key_version: int = Field(gt=0)
     encryption_keys: dict[int, bytes]
-    storage_kind: str
+    storage_kind: StorageKind
+    database_url: SecretStr | None = None
+    database_migration_url: SecretStr | None = None
 
     @field_validator("issuer_url")
     @classmethod
-    def require_issuer_origin(cls, value: HttpUrl) -> HttpUrl:
+    def require_issuer_url(cls, value: HttpUrl) -> HttpUrl:
         if (
             value.scheme != "https"
             or value.username
             or value.password
             or value.query
             or value.fragment
-            or value.path not in {None, "", "/"}
         ):
-            raise ValueError("must be a canonical HTTPS origin")
+            raise ValueError("must be a canonical HTTPS URL")
         return value
 
     @field_validator("public_mcp_url")
@@ -179,12 +186,25 @@ class SharedHostedSettings(BaseModel):
             raise ValueError("must be a canonical HTTPS MCP URL")
         return value
 
-    @field_validator("storage_kind")
-    @classmethod
-    def require_local_storage(cls, value: str) -> str:
-        if value != "local":
-            raise ValueError("must be local")
-        return value
+    @model_validator(mode="after")
+    def validate_storage_and_authority(self) -> SharedHostedSettings:
+        issuer = str(self.issuer_url).rstrip("/")
+        resource = str(self.public_mcp_url).rstrip("/")
+        issuer_path = self.issuer_url.path or "/"
+        if issuer_path != "/" and issuer != resource:
+            raise ValueError("path-bearing issuer and MCP resource must match")
+        has_runtime = self.database_url is not None
+        has_migration = self.database_migration_url is not None
+        if self.storage_kind is StorageKind.POSTGRESQL and not (has_runtime and has_migration):
+            raise ValueError("PostgreSQL storage requires runtime and migration URLs")
+        if self.storage_kind is StorageKind.LOCAL and (has_runtime or has_migration):
+            raise ValueError("Local storage cannot include PostgreSQL URLs")
+        return self
+
+    @property
+    def base_path(self) -> str:
+        path = self.issuer_url.path or "/"
+        return "" if path == "/" else path.rstrip("/")
 
     @field_validator("encryption_keys")
     @classmethod
@@ -303,6 +323,8 @@ def load_shared_settings() -> SharedHostedSettings:
                 "active_key_version": int(os.environ.get("ODOO_MCP_ACTIVE_KEY_VERSION", "0")),
                 "encryption_keys": keys,
                 "storage_kind": os.environ.get("ODOO_MCP_SHARED_STORAGE_KIND", ""),
+                "database_url": os.environ.get("DATABASE_URL") or None,
+                "database_migration_url": os.environ.get("DATABASE_MIGRATION_URL") or None,
             }
         )
     except (ValidationError, ValueError, TypeError):

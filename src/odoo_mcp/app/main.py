@@ -127,7 +127,11 @@ def main(argv: list[str] | None = None) -> None:
                 permissions=_permissions(config),
             )
             try:
-                uvicorn.run(protect_shared_app(shared_app), host=args.host, port=args.port)
+                uvicorn.run(
+                    protect_shared_app(shared_app, base_path=shared_settings.base_path),
+                    host=args.host,
+                    port=args.port,
+                )
             finally:
                 lease.release()
             return

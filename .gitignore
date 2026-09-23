@@ -2,6 +2,7 @@
 .env.*
 !.env.example
 !.env.shared.example
+!.env.prod.example
 .venv/
 __pycache__/
 *.py[cod]

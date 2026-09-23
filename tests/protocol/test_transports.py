@@ -245,10 +245,19 @@ def test_dedicated_remote_rejects_wrong_signature(connection: OdooConnectionSett
 
 
 @pytest.mark.asyncio
-async def test_stdio_profile_lists_the_shared_registry() -> None:
+async def test_stdio_profile_lists_the_shared_registry(tmp_path) -> None:
     parameters = StdioServerParameters(
         command=sys.executable,
-        args=["-m", "odoo_mcp", "--profile", "local", "--transport", "stdio"],
+        args=[
+            "-m",
+            "odoo_mcp",
+            "--profile",
+            "local",
+            "--transport",
+            "stdio",
+            "--storage",
+            str(tmp_path / "stdio-state.sqlite3"),
+        ],
         env={
             "ODOO_MCP_ODOO_URL": "https://odoo.invalid",
             "ODOO_MCP_ODOO_DATABASE": "synthetic-db",

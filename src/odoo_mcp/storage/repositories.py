@@ -3,12 +3,11 @@
 from __future__ import annotations
 
 import hashlib
-import sqlite3
 from collections.abc import Mapping
 from datetime import timedelta
 from typing import ClassVar
 
-from odoo_mcp.storage.database import SQLiteDatabase
+from odoo_mcp.storage.database import Connection, Database, Row
 from odoo_mcp.storage.errors import (
     IdempotencyPayloadMismatch,
     IdempotencyTransitionError,
@@ -42,7 +41,7 @@ def _company(company_id: int) -> None:
         raise ValueError("company_id must be positive")
 
 
-def _proposal(row: sqlite3.Row) -> ProposalRecord:
+def _proposal(row: Row) -> ProposalRecord:
     return ProposalRecord(
         id=int(row["id"]),
         request_id=str(row["request_id"]),
@@ -73,7 +72,7 @@ class ProposalRepository:
         ),
     }
 
-    def __init__(self, database: SQLiteDatabase) -> None:
+    def __init__(self, database: Database) -> None:
         self._database = database
 
     def create(
@@ -106,7 +105,7 @@ class ProposalRepository:
 
     def create_in_transaction(
         self,
-        connection: sqlite3.Connection,
+        connection: Connection,
         request_id: str,
         tenant_id: str,
         company_id: int,
@@ -198,7 +197,7 @@ class ProposalRepository:
 
 
 class ArtifactRepository:
-    def __init__(self, database: SQLiteDatabase) -> None:
+    def __init__(self, database: Database) -> None:
         self._database = database
 
     def create(
@@ -227,7 +226,7 @@ class ArtifactRepository:
 
     def create_in_transaction(
         self,
-        connection: sqlite3.Connection,
+        connection: Connection,
         request_id: str,
         tenant_id: str,
         company_id: int,
@@ -282,7 +281,7 @@ class ArtifactRepository:
         return None if row is None else self._from_row(row)
 
     @staticmethod
-    def _from_row(row: sqlite3.Row) -> ArtifactRecord:
+    def _from_row(row: Row) -> ArtifactRecord:
         return ArtifactRecord(
             id=int(row["id"]),
             request_id=str(row["request_id"]),
@@ -298,7 +297,7 @@ class ArtifactRepository:
 
 
 class CapabilityCacheRepository:
-    def __init__(self, database: SQLiteDatabase) -> None:
+    def __init__(self, database: Database) -> None:
         self._database = database
 
     def put(
@@ -355,7 +354,7 @@ class CapabilityCacheRepository:
 class IdempotencyRepository:
     _TTL = timedelta(hours=24)
 
-    def __init__(self, database: SQLiteDatabase) -> None:
+    def __init__(self, database: Database) -> None:
         self._database = database
 
     @staticmethod
@@ -385,7 +384,7 @@ class IdempotencyRepository:
 
     def reserve_in_transaction(
         self,
-        connection: sqlite3.Connection,
+        connection: Connection,
         tenant_id: str,
         company_id: int,
         tool_name: str,
@@ -402,6 +401,7 @@ class IdempotencyRepository:
         now_text = timestamp(now)
         expires_at = now + self._TTL
         request_hash = self._request_hash(company_id, request_payload)
+        self._database.lock(connection, f"idempotency:{tenant_id}:{tool_name}:{idempotency_key}")
         row = connection.execute(
             """
             SELECT * FROM idempotency_keys
@@ -495,7 +495,7 @@ class IdempotencyRepository:
 
     def finish_in_transaction(
         self,
-        connection: sqlite3.Connection,
+        connection: Connection,
         tenant_id: str,
         company_id: int,
         tool_name: str,

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -70,13 +71,13 @@ def test_shared_profile_uses_complete_shared_application(
     lease = Lease()
     shared_app = object()
     seen: list[object] = []
-    monkeypatch.setattr(main_module, "load_shared_settings", lambda: object())
+    monkeypatch.setattr(main_module, "load_shared_settings", lambda: SimpleNamespace(base_path=""))
     monkeypatch.setattr(
         main_module,
         "open_shared_app",
         lambda *_args, **_kwargs: (shared_app, lease),
     )
-    monkeypatch.setattr(main_module, "protect_shared_app", lambda app: app)
+    monkeypatch.setattr(main_module, "protect_shared_app", lambda app, **_kwargs: app)
     monkeypatch.setattr(main_module.uvicorn, "run", lambda app, **_kwargs: seen.append(app))
 
     main_module.main(["--profile", "shared"])

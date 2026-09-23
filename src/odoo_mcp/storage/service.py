@@ -11,8 +11,8 @@ from uuid import uuid4
 from mcp.shared.auth import OAuthClientInformationFull
 
 from odoo_mcp.storage.audit import AuditRepository
-from odoo_mcp.storage.connections import EncryptionKeyring, SQLiteEncryptedConnectionRepository
-from odoo_mcp.storage.database import SQLiteDatabase
+from odoo_mcp.storage.connections import EncryptedConnectionRepository, EncryptionKeyring
+from odoo_mcp.storage.database import Database, PostgresDatabase, SQLiteDatabase
 from odoo_mcp.storage.errors import StorageCorruptionError, StorageError
 from odoo_mcp.storage.execution import ExecutionJournal
 from odoo_mcp.storage.json_support import (
@@ -22,6 +22,7 @@ from odoo_mcp.storage.json_support import (
 )
 from odoo_mcp.storage.migrations import apply_migrations
 from odoo_mcp.storage.models import IdempotencyState, ProposalState
+from odoo_mcp.storage.postgres_migrations import apply_postgres_migrations
 from odoo_mcp.storage.proposals import ProposalJournal
 from odoo_mcp.storage.reporting import ReportJournal
 from odoo_mcp.storage.repositories import (
@@ -33,9 +34,9 @@ from odoo_mcp.storage.repositories import (
 
 
 class Storage:
-    """Initialized SQLite repositories sharing one transaction boundary."""
+    """Existing repositories sharing one selected relational transaction boundary."""
 
-    def __init__(self, database: SQLiteDatabase, keyring: EncryptionKeyring | None) -> None:
+    def __init__(self, database: Database, keyring: EncryptionKeyring | None) -> None:
         self.database = database
         self.keyring = keyring
         self.audit = AuditRepository(database)
@@ -44,7 +45,7 @@ class Storage:
         self.idempotency = IdempotencyRepository(database)
         self.execution = ExecutionJournal(database, self.idempotency, self.audit)
         self.capabilities = CapabilityCacheRepository(database)
-        self.connections = SQLiteEncryptedConnectionRepository(database, self.audit, keyring)
+        self.connections = EncryptedConnectionRepository(database, self.audit, keyring)
         self.reports = ReportJournal(database, self.artifacts, self.audit)
         self.proposal_journal = ProposalJournal(database, self.proposals, self.artifacts)
 
@@ -54,7 +55,28 @@ class Storage:
         apply_migrations(database)
         return cls(database, keyring)
 
+    @classmethod
+    def open_postgres(
+        cls,
+        pooled_url: str,
+        migration_url: str,
+        *,
+        keyring: EncryptionKeyring | None = None,
+    ) -> Storage:
+        database = PostgresDatabase(pooled_url, migration_url)
+        try:
+            apply_postgres_migrations(database)
+            return cls(database, keyring)
+        except BaseException:
+            database.close()
+            raise
+
+    def close(self) -> None:
+        self.database.close()
+
     def backup(self, destination: Path) -> None:
+        if not isinstance(self.database, SQLiteDatabase):
+            raise StorageError("PostgreSQL backup uses shipctl export")
         destination = destination.resolve()
         if destination.exists():
             raise FileExistsError("Backup destination already exists")
@@ -74,9 +96,10 @@ class Storage:
 
     def _verify_integrity(self) -> None:
         with self.database.transaction() as connection:
-            result = connection.execute("PRAGMA integrity_check").fetchone()
-            if result is None or str(result[0]) != "ok":
-                raise StorageCorruptionError("Storage integrity verification failed")
+            if isinstance(self.database, SQLiteDatabase):
+                result = connection.execute("PRAGMA integrity_check").fetchone()
+                if result is None or str(result[0]) != "ok":
+                    raise StorageCorruptionError("Storage integrity verification failed")
             idempotency_rows = connection.execute(
                 """
                 SELECT request_hash, state, response_json, expires_at, created_at, updated_at
@@ -222,7 +245,10 @@ class Storage:
     def verify(self) -> None:
         """Verify migrations and all persisted recovery invariants."""
 
-        apply_migrations(self.database)
+        if isinstance(self.database, SQLiteDatabase):
+            apply_migrations(self.database)
+        elif isinstance(self.database, PostgresDatabase):
+            apply_postgres_migrations(self.database)
         self._verify_integrity()
 
     @staticmethod

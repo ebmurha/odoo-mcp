@@ -67,9 +67,10 @@ token to exactly one active connector. Configure it from
 `.env.shared.example`; its versioned 256-bit encryption keys must come from an
 operator-controlled secret store. Missing configuration, invalid ciphertext,
 inactive grants, unsafe Odoo destinations, and unauthorized connector bindings
-fail closed. It requires one writable process and a durable local SQLite
-volume. TLS, public ingress, monitoring, and production deployment remain
-operator responsibilities.
+fail closed. Shared Hosted supports either one writable process with a durable
+local SQLite volume or qualified PostgreSQL with pooled runtime and direct
+migration connections. TLS, public ingress, monitoring, and production
+deployment remain operator responsibilities.
 
 Reproducible Dedicated Remote Docker and systemd templates, Shared Hosted
 integration requirements, and network hardening guidance are in
@@ -78,7 +79,7 @@ listener directly to the public internet.
 
 ## Durable state
 
-`odoo_mcp.storage.Storage` provides ordered SQLite migrations and tenant-scoped
+`odoo_mcp.storage.Storage` provides ordered SQLite and PostgreSQL migrations and tenant-scoped
 repositories for audit records, proposals, artifacts, idempotency reservations,
 capability snapshots, and encrypted Shared Hosted connections. Audit rows are
 append-only and SHA-256 hash-chained per tenant. Idempotency reservations bind
@@ -91,8 +92,9 @@ error text is not persisted.
 SQLite backups use a consistent snapshot. Restore writes to a new destination
 and is accepted only after database integrity, migrations, tenant audit chains,
 idempotency state, capability data, and encrypted connections verify. Encryption
-keys must be backed up and restored separately. PostgreSQL is not supported or
-claimed by this release.
+keys must be backed up and restored separately. PostgreSQL uses database-level
+migration serialization and preserves the same repository, OAuth, audit,
+idempotency, encryption, and lifecycle contracts.
 
 The server stores local durable state at `.odoo-mcp/state.sqlite3` by default.
 Use `--storage <path>` to select a different SQLite file. Successful accounting

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from odoo_mcp.storage.audit import AuditRepository
-from odoo_mcp.storage.database import SQLiteDatabase
+from odoo_mcp.storage.database import Database
 from odoo_mcp.storage.models import ArtifactRecord, AuditEvent
 from odoo_mcp.storage.repositories import ArtifactRepository
 
@@ -11,7 +11,7 @@ from odoo_mcp.storage.repositories import ArtifactRepository
 class ReportJournal:
     def __init__(
         self,
-        database: SQLiteDatabase,
+        database: Database,
         artifacts: ArtifactRepository,
         audit: AuditRepository,
     ) -> None:

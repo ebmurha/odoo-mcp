@@ -2,7 +2,8 @@
 
 ## Diagnostics and monitoring
 
-Remote deployments expose `GET /healthz`. It proves only that the application
+Remote deployments expose `GET <base-path>/healthz` (or `/healthz` without a
+configured base path). It proves only that the application
 process can serve HTTP; it deliberately does not probe Odoo or storage and must
 not be used as a readiness or authorization signal.
 
@@ -12,7 +13,7 @@ Verify durable state offline or before admitting traffic:
 odoo-mcp-admin verify --storage /var/lib/odoo-mcp/state.sqlite3
 ```
 
-The command checks migrations, SQLite integrity, tenant audit chains,
+The command checks SQLite migrations and integrity, tenant audit chains,
 idempotency replay state, capabilities, proposals, artifacts, and encrypted
 connections. It prints a fixed success or failure message and suppresses paths
 and exception details. Shared Hosted operators load the versioned keyring from
@@ -28,6 +29,11 @@ capacity, and failed backups. Do not log request payloads, raw Odoo responses,
 credentials, or decrypted connection records.
 
 ## Backup and restore
+
+The commands below are the SQLite path. PostgreSQL deployments use the
+deployment provider's standard `pg_dump`/`pg_restore` path; shipctl deployments
+use `shipctl export` for the dump and keep the matching encryption-key versions
+in a separate protected backup.
 
 Stop or drain the service for the simplest recovery procedure. Create a
 database-consistent snapshot without overwriting an existing file:
@@ -53,8 +59,10 @@ backup. A restore without every required key fails closed. Keep the original
 database and backup until MCP startup, audit verification, capability discovery,
 and one idempotent replay have been checked against the restored destination.
 
-Shared Hosted upgrades and restarts must retain the same durable volume. The
-writer lock prevents a second application process from serving the database.
+SQLite Shared Hosted upgrades and restarts must retain the same durable volume;
+its writer lock prevents a second application process from serving that
+database. PostgreSQL deployments retain state in the database, serialize
+migrations with an advisory lock, and support pooled application processes.
 To rotate encryption keys, add the new version to the secret, select it as
 active, rotate stored connections through the storage maintenance API, verify
 the database, and only then retire an unused old key. OAuth access tokens expire
@@ -85,8 +93,9 @@ request fails closed before a stored checkpoint can authorize a later action.
 4. Install the exact new version in a new environment or deploy a new image.
 5. Run `odoo-mcp-admin verify` against a copied database; startup then applies
    any ordered migrations.
-6. Start on loopback, check `/healthz`, list MCP tools, run capability discovery,
-   and verify the tenant audit chain before admitting traffic.
+6. Start on loopback, check `<base-path>/healthz` (or `/healthz` without a base
+   path), list MCP tools, run capability discovery, and verify the tenant audit
+   chain before admitting traffic.
 
 Never test an upgrade against the only copy of production state.
 

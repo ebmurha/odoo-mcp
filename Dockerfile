@@ -18,5 +18,4 @@ RUN uv sync --frozen --no-dev
 
 USER odoo-mcp
 EXPOSE 8000
-ENTRYPOINT ["/app/.venv/bin/odoo-mcp"]
-CMD ["--profile", "dedicated", "--config", "/app/config/config.example.yaml", "--host", "0.0.0.0", "--port", "8000", "--storage", "/var/lib/odoo-mcp/state.sqlite3"]
+ENTRYPOINT ["/bin/sh", "/app/deploy/container-entrypoint.sh"]

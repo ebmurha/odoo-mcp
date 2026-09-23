@@ -135,11 +135,39 @@ def test_shared_settings_require_complete_local_volume_and_keyring(
     }
     for key, value in values.items():
         monkeypatch.setenv(key, value)
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    monkeypatch.delenv("DATABASE_MIGRATION_URL", raising=False)
 
     settings = load_shared_settings()
 
     assert settings.active_key_version == 2
     assert settings.encryption_keys == {1: b"a" * 32, 2: b"b" * 32}
+
+
+def test_shared_postgresql_settings_require_both_database_urls(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import base64
+
+    values = {
+        "ODOO_MCP_SHARED_ISSUER_URL": "https://service.invalid/odoo",
+        "ODOO_MCP_SHARED_PUBLIC_MCP_URL": "https://service.invalid/odoo",
+        "ODOO_MCP_SHARED_STORAGE_KIND": "postgresql",
+        "ODOO_MCP_ACTIVE_KEY_VERSION": "1",
+        "ODOO_MCP_ENCRYPTION_KEYS": "1:" + base64.urlsafe_b64encode(b"a" * 32).decode(),
+        "DATABASE_URL": "postgresql://runtime.invalid/database",
+        "DATABASE_MIGRATION_URL": "postgresql://migration.invalid/database",
+    }
+    for key, value in values.items():
+        monkeypatch.setenv(key, value)
+
+    settings = load_shared_settings()
+
+    assert settings.base_path == "/odoo"
+    assert settings.database_url is not None
+    monkeypatch.delenv("DATABASE_MIGRATION_URL")
+    with pytest.raises(SettingsError):
+        load_shared_settings()
 
 
 def test_partial_shared_settings_fail_without_disclosing_values(

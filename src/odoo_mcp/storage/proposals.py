@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 
-from odoo_mcp.storage.database import SQLiteDatabase
+from odoo_mcp.storage.database import Database
 from odoo_mcp.storage.models import ProposalRecord
 from odoo_mcp.storage.repositories import ArtifactRepository, ProposalRepository
 
@@ -12,7 +12,7 @@ from odoo_mcp.storage.repositories import ArtifactRepository, ProposalRepository
 class ProposalJournal:
     def __init__(
         self,
-        database: SQLiteDatabase,
+        database: Database,
         proposals: ProposalRepository,
         artifacts: ArtifactRepository,
     ) -> None:

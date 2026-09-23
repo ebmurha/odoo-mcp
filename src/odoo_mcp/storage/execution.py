@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 
 from odoo_mcp.storage.audit import AuditRepository
-from odoo_mcp.storage.database import SQLiteDatabase
+from odoo_mcp.storage.database import Database
 from odoo_mcp.storage.models import (
     AuditEvent,
     IdempotencyDecision,
@@ -20,7 +20,7 @@ class ExecutionJournal:
 
     def __init__(
         self,
-        database: SQLiteDatabase,
+        database: Database,
         idempotency: IdempotencyRepository,
         audit: AuditRepository,
     ) -> None:

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import hashlib
 import secrets
-import sqlite3
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -19,7 +18,7 @@ from odoo_mcp.app.settings import OdooConnectionSettings, OdooEnrollmentCredenti
 from odoo_mcp.mcp.request_ids import new_request_id
 from odoo_mcp.storage.audit import AuditRepository
 from odoo_mcp.storage.connections import EncryptionKeyring
-from odoo_mcp.storage.database import SQLiteDatabase
+from odoo_mcp.storage.database import Connection, Database, Row
 from odoo_mcp.storage.json_support import canonical_json, parse_timestamp
 from odoo_mcp.storage.models import AuditEvent
 
@@ -60,7 +59,7 @@ class SharedConnectorLifecycle:
 
     def __init__(
         self,
-        database: SQLiteDatabase,
+        database: Database,
         audit: AuditRepository,
         keyring: EncryptionKeyring,
         validator: EnrollmentValidator,
@@ -101,51 +100,51 @@ class SharedConnectorLifecycle:
         expires = now + SESSION_TTL
         company_ids = tuple(company.id for company in verified.companies)
         with self._database.transaction(write=True) as connection:
-            try:
-                connection.execute(
-                    """
-                    INSERT INTO erp_connections (
-                        id, tenant_id, connection_label, odoo_url, database_name,
-                        username, encrypted_api_key, discovered_company_ids_json,
-                        allowed_company_ids_json, default_company_id, detected_version,
-                        selected_transport, key_version, status, enrollment_handle_hash,
-                        consumed_enrollment_handle_hash, enrollment_expires_at,
-                        activated_at, revoked_at, created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?, ?,
-                        'pending', ?, NULL, ?, NULL, NULL, ?, ?)
-                    """,
-                    (
-                        connector_id,
-                        tenant_id,
-                        "Odoo connection",
-                        str(credentials.url),
-                        credentials.database,
-                        credentials.username,
-                        encrypted,
-                        canonical_json(company_ids),
-                        str(verified.version),
-                        verified.transport,
-                        key_version,
-                        handle_hash,
-                        expires.isoformat(),
-                        now.isoformat(),
-                        now.isoformat(),
-                    ),
-                )
-            except sqlite3.IntegrityError:
+            cursor = connection.execute(
+                """
+                INSERT INTO erp_connections (
+                    id, tenant_id, connection_label, odoo_url, database_name,
+                    username, encrypted_api_key, discovered_company_ids_json,
+                    allowed_company_ids_json, default_company_id, detected_version,
+                    selected_transport, key_version, status, enrollment_handle_hash,
+                    consumed_enrollment_handle_hash, enrollment_expires_at,
+                    activated_at, revoked_at, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?, ?,
+                    'pending', ?, NULL, ?, NULL, NULL, ?, ?)
+                ON CONFLICT (enrollment_handle_hash) DO NOTHING
+                """,
+                (
+                    connector_id,
+                    tenant_id,
+                    "Odoo connection",
+                    str(credentials.url),
+                    credentials.database,
+                    credentials.username,
+                    encrypted,
+                    canonical_json(company_ids),
+                    str(verified.version),
+                    verified.transport,
+                    key_version,
+                    handle_hash,
+                    expires.isoformat(),
+                    now.isoformat(),
+                    now.isoformat(),
+                ),
+            )
+            if cursor.rowcount == 0:
                 row = connection.execute(
                     "SELECT * FROM erp_connections WHERE enrollment_handle_hash = ?",
                     (handle_hash,),
                 ).fetchone()
                 if row is None:
-                    raise
+                    raise RuntimeError("Enrollment conflict could not be resolved")
                 return self._restore_prepared(row, credentials, handle, verified)
             self._append_audit(connection, tenant_id, "prepare_enrollment", connector_id)
         return PreparedEnrollment(handle, connector_id, tenant_id, expires, verified.companies)
 
     def _restore_prepared(
         self,
-        row: sqlite3.Row,
+        row: Row,
         credentials: OdooEnrollmentCredentials,
         handle: str,
         verified: VerifiedEnrollment,
@@ -243,7 +242,7 @@ class SharedConnectorLifecycle:
                 """,
                 (now, now),
             )
-            return cursor.rowcount
+            return int(cursor.rowcount)
 
     def discard_pending(self, tenant_id: str, connector_id: str) -> None:
         """Remove a never-authorized connector after application binding fails."""
@@ -261,12 +260,12 @@ class SharedConnectorLifecycle:
                 (tenant_id, connector_id, tenant_id, connector_id),
             )
 
-    def _is_expired(self, row: sqlite3.Row) -> bool:
+    def _is_expired(self, row: Row) -> bool:
         value = row["enrollment_expires_at"]
         return value is None or parse_timestamp(str(value)) <= self._now()
 
     @staticmethod
-    def _ids(row: sqlite3.Row) -> tuple[int, ...]:
+    def _ids(row: Row) -> tuple[int, ...]:
         import json
 
         values = json.loads(str(row["discovered_company_ids_json"]))
@@ -277,7 +276,7 @@ class SharedConnectorLifecycle:
         return tuple(values)
 
     @staticmethod
-    def _allowed_ids(row: sqlite3.Row) -> tuple[int, ...]:
+    def _allowed_ids(row: Row) -> tuple[int, ...]:
         import json
 
         values = json.loads(str(row["allowed_company_ids_json"]))
@@ -319,7 +318,7 @@ class SharedConnectorLifecycle:
             raise ValueError("The connector settings are incomplete") from None
 
     def _append_audit(
-        self, connection: sqlite3.Connection, tenant_id: str, operation: str, connector_id: str
+        self, connection: Connection, tenant_id: str, operation: str, connector_id: str
     ) -> None:
         self._audit.append_in_transaction(
             connection,

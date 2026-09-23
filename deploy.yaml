@@ -1,0 +1,43 @@
+app_name: odoo-mcp
+env_example: .env.prod.example
+
+registry: ghcr
+database_provider: neon
+compute_provider: render
+proxy_provider: cloudflare-worker
+
+deployment_tracking:
+  enabled: true
+  provider: github
+  repository: ebmurha/odoo-mcp
+  environment: production
+
+backend:
+  enabled: true
+  image_name: odoo-mcp
+  region: frankfurt
+  health_check_path: /odoo/healthz
+  domain: mcp.riseos.work
+  domain_path: /odoo
+  proxy_via_cloudflare: true
+  needs_email: false
+  env:
+    ODOO_MCP_PROFILE: shared
+    ODOO_MCP_SHARED_ISSUER_URL: https://mcp.riseos.work/odoo
+    ODOO_MCP_SHARED_PUBLIC_MCP_URL: https://mcp.riseos.work/odoo
+    ODOO_MCP_SHARED_STORAGE_KIND: postgresql
+    ODOO_MCP_ACTIVE_KEY_VERSION: 1
+  env_from_shell:
+    - ODOO_MCP_ENCRYPTION_KEYS
+
+auth:
+  enabled: true
+  provider: self-hosted
+  library: mcp-python-sdk
+  generate_secret: false
+
+database:
+  enabled: true
+
+frontend:
+  enabled: false

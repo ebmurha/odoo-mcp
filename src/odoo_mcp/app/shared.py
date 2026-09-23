@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import html
 import secrets
-import sqlite3
 import sys
 import time
 from collections import defaultdict, deque
@@ -34,18 +33,21 @@ from odoo_mcp.app.settings import (
     OdooConnectionSettings,
     OdooEnrollmentCredentials,
     SharedHostedSettings,
+    StorageKind,
 )
 from odoo_mcp.app.shared_auth import VALID_SCOPES, CimdFetcher, SharedOAuthProvider
 from odoo_mcp.app.shared_lifecycle import EnrollmentValidator, SharedConnectorLifecycle
 from odoo_mcp.mcp.error_codes import OdooMcpError
 from odoo_mcp.mcp.server import AdapterFactory, create_mcp_server
 from odoo_mcp.storage import EncryptionKeyring, Storage
+from odoo_mcp.storage.database import DATABASE_ERRORS
 from odoo_mcp.storage.errors import StorageError
 
-SESSION_COOKIE = "__Host-odoo-mcp-session"
-ENROLLMENT_COOKIE = "__Host-odoo-mcp-enrollment"
-CSRF_COOKIE = "__Host-odoo-mcp-csrf"
+SESSION_COOKIE = "__Secure-odoo-mcp-session"
+ENROLLMENT_COOKIE = "__Secure-odoo-mcp-enrollment"
+CSRF_COOKIE = "__Secure-odoo-mcp-csrf"
 MAX_FORM_BYTES = 32 * 1024
+SHARED_DATABASE_ERRORS = (StorageError, *DATABASE_ERRORS)
 
 
 class SingleWriterLease:
@@ -98,16 +100,25 @@ class SingleWriterLease:
 class SharedRateLimitMiddleware:
     """Small in-process abuse hook; infrastructure may enforce stricter limits."""
 
-    def __init__(self, app: ASGIApp, *, requests: int = 60, window_seconds: int = 60) -> None:
+    def __init__(
+        self,
+        app: ASGIApp,
+        *,
+        base_path: str = "",
+        requests: int = 60,
+        window_seconds: int = 60,
+    ) -> None:
         self._app = app
         self._requests = requests
         self._window = window_seconds
         self._events: dict[str, deque[float]] = defaultdict(deque)
+        self._paths = tuple(
+            f"{base_path}{path}"
+            for path in ("/authorize", "/register", "/token", "/revoke", "/enroll")
+        )
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-        if scope["type"] == "http" and str(scope.get("path", "")).startswith(
-            ("/authorize", "/register", "/token", "/revoke", "/enroll")
-        ):
+        if scope["type"] == "http" and str(scope.get("path", "")).startswith(self._paths):
             client = scope.get("client")
             key = "unknown" if client is None else str(client[0])
             now = time.monotonic()
@@ -139,7 +150,7 @@ def _one(form: dict[str, list[str]], name: str) -> str:
     return values[0]
 
 
-def _secure_cookie(response: Response, name: str, value: str) -> None:
+def _secure_cookie(response: Response, name: str, value: str, path: str) -> None:
     response.set_cookie(
         name,
         value,
@@ -147,7 +158,7 @@ def _secure_cookie(response: Response, name: str, value: str) -> None:
         secure=True,
         httponly=True,
         samesite="lax",
-        path="/",
+        path=path,
     )
 
 
@@ -172,11 +183,11 @@ def _csrf(request: Request, form: dict[str, list[str]]) -> None:
         raise ValueError("The authorization session is invalid")
 
 
-def _credentials_form(csrf: str) -> str:
+def _credentials_form(csrf: str, base_path: str) -> str:
     escaped = html.escape(csrf, quote=True)
     return f"""<!doctype html><html><body><main>
 <h1>Connect Odoo</h1>
-<form method="post" action="/enroll/prepare" autocomplete="off">
+<form method="post" action="{base_path}/enroll/prepare" autocomplete="off">
 <input type="hidden" name="csrf" value="{escaped}">
 <label>Odoo URL <input name="url" type="url" required></label>
 <label>Database <input name="database" required></label>
@@ -191,6 +202,7 @@ def _company_form(
     client_id: str,
     scopes: tuple[str, ...],
     companies: tuple[tuple[int, str], ...],
+    base_path: str,
 ) -> str:
     options = "".join(
         f'<label><input type="checkbox" name="company_id" value="{identifier}">'
@@ -205,7 +217,7 @@ def _company_form(
 <h1>Authorize Odoo MCP</h1>
 <p>Client: {html.escape(client_id)}</p>
 <p>Scopes: {html.escape(", ".join(scopes))}</p>
-<form method="post" action="/enroll/commit">
+<form method="post" action="{base_path}/enroll/commit">
 <input type="hidden" name="csrf" value="{html.escape(csrf, quote=True)}">
 {options}<label>Default company <select name="default_company_id">{defaults}</select></label>
 <label><input type="checkbox" name="consent" value="yes" required>Approve this connector</label>
@@ -225,6 +237,8 @@ def create_shared_app(
     """Compose OAuth, enrollment, and the unchanged MCP server in one process."""
 
     policy = outbound_policy or SharedOutboundPolicy()
+    base_path = settings.base_path
+    cookie_path = base_path or "/"
     keyring = storage.keyring
     if keyring is None:
         raise ValueError("Shared Hosted requires an encryption keyring")
@@ -290,9 +304,9 @@ def create_shared_app(
                 provider.session_summary(supplied)
             except ValueError:
                 return JSONResponse({"error": "invalid_session"}, status_code=400)
-            response = RedirectResponse("/enroll", status_code=303)
-            _secure_cookie(response, SESSION_COOKIE, supplied)
-            _secure_cookie(response, CSRF_COOKIE, _random_csrf())
+            response = RedirectResponse(f"{base_path}/enroll", status_code=303)
+            _secure_cookie(response, SESSION_COOKIE, supplied, cookie_path)
+            _secure_cookie(response, CSRF_COOKIE, _random_csrf(), cookie_path)
             return response
         session = request.cookies.get(SESSION_COOKIE)
         csrf = request.cookies.get(CSRF_COOKIE)
@@ -313,9 +327,10 @@ def create_shared_app(
                 str(summary["client_id"]),
                 tuple(str(value) for value in cast(tuple[object, ...], summary["scopes"])),
                 companies,
+                base_path,
             )
         else:
-            content = _credentials_form(csrf)
+            content = _credentials_form(csrf, base_path)
         return _html_response(content)
 
     async def prepare(request: Request) -> Response:
@@ -347,11 +362,12 @@ def create_shared_app(
                     str(summary["client_id"]),
                     tuple(str(value) for value in cast(tuple[object, ...], summary["scopes"])),
                     companies,
+                    base_path,
                 )
             )
-            _secure_cookie(response, ENROLLMENT_COOKIE, prepared.enrollment_handle)
+            _secure_cookie(response, ENROLLMENT_COOKIE, prepared.enrollment_handle, cookie_path)
             return response
-        except (KeyError, ValueError, ValidationError, OdooMcpError, StorageError, sqlite3.Error):
+        except (KeyError, ValueError, ValidationError, OdooMcpError, *SHARED_DATABASE_ERRORS):
             if prepared_connector is not None:
                 lifecycle.discard_pending(*prepared_connector)
             return JSONResponse({"error": "enrollment_failed"}, status_code=400)
@@ -374,16 +390,18 @@ def create_shared_app(
             location = provider.activate_connector(session, consent=consent)
             response = RedirectResponse(location, status_code=303)
             for name in (SESSION_COOKIE, ENROLLMENT_COOKIE, CSRF_COOKIE):
-                response.delete_cookie(name, path="/", secure=True, httponly=True, samesite="lax")
+                response.delete_cookie(
+                    name, path=cookie_path, secure=True, httponly=True, samesite="lax"
+                )
             return response
-        except (KeyError, TypeError, ValueError, StorageError, sqlite3.Error):
+        except (KeyError, TypeError, ValueError, *SHARED_DATABASE_ERRORS):
             return JSONResponse({"error": "authorization_failed"}, status_code=400)
 
     async def revoke(request: Request) -> Response:
         try:
             form = await _form(request)
             provider.revoke_raw_token(_one(form, "client_id"), _one(form, "token"))
-        except (ValueError, StorageError, sqlite3.Error):
+        except (ValueError, *SHARED_DATABASE_ERRORS):
             pass
         return Response(status_code=200, headers={"Cache-Control": "no-store"})
 
@@ -400,7 +418,7 @@ def create_shared_app(
             provider.authorize_replacement(session, trusted)
         except ValueError:
             return JSONResponse({"error": "invalid_session"}, status_code=400)
-        return RedirectResponse("/enroll", status_code=303)
+        return RedirectResponse(f"{base_path}/enroll", status_code=303)
 
     auth_routes = create_auth_routes(
         provider,
@@ -427,21 +445,44 @@ def create_shared_app(
         return await authorization_handler.handle(request)
 
     auth_routes = [route for route in auth_routes if route.path != "/authorize"]
+    scoped_auth_routes: list[Route] = []
+    for route in auth_routes:
+        path = route.path
+        if path == "/.well-known/oauth-authorization-server" and base_path:
+            path = f"{path}{base_path}"
+        elif not path.startswith("/.well-known/"):
+            path = f"{base_path}{path}"
+        scoped_auth_routes.append(
+            Route(
+                path,
+                endpoint=route.endpoint,
+                methods=route.methods,
+                name=route.name,
+                include_in_schema=route.include_in_schema,
+            )
+        )
+
+    mcp_app.router.routes[:] = [
+        route for route in mcp_app.router.routes if getattr(route, "path", None) != "/healthz"
+    ]
 
     @asynccontextmanager
     async def lifespan(_application: Starlette) -> AsyncIterator[None]:
-        async with mcp_app.router.lifespan_context(mcp_app):
-            yield
+        try:
+            async with mcp_app.router.lifespan_context(mcp_app):
+                yield
+        finally:
+            storage.close()
 
     routes = [
-        Route("/healthz", health, methods=["GET"]),
-        Route("/revoke", revoke, methods=["POST"]),
-        Route("/authorize", authorize, methods=["GET"]),
-        *auth_routes,
-        Route("/enroll", enrollment, methods=["GET"]),
-        Route("/enroll/prepare", prepare, methods=["POST"]),
-        Route("/enroll/commit", commit, methods=["POST"]),
-        Route("/enroll/replacement", replacement, methods=["POST"]),
+        Route(f"{base_path}/healthz", health, methods=["GET"]),
+        Route(f"{base_path}/revoke", revoke, methods=["POST"]),
+        Route(f"{base_path}/authorize", authorize, methods=["GET"]),
+        *scoped_auth_routes,
+        Route(f"{base_path}/enroll", enrollment, methods=["GET"]),
+        Route(f"{base_path}/enroll/prepare", prepare, methods=["POST"]),
+        Route(f"{base_path}/enroll/commit", commit, methods=["POST"]),
+        Route(f"{base_path}/enroll/replacement", replacement, methods=["POST"]),
         Mount("/", app=mcp_app),
     ]
     return Starlette(routes=routes, lifespan=lifespan, middleware=[])
@@ -457,12 +498,25 @@ def open_shared_app(
     *,
     validator: EnrollmentValidator | None = None,
     permissions: frozenset[str] = VALID_SCOPES,
-) -> tuple[Starlette, SingleWriterLease]:
-    lease = SingleWriterLease(storage_path)
-    lease.acquire()
+) -> tuple[Starlette, SingleWriterLease | _NoopLease]:
+    lease: SingleWriterLease | _NoopLease
+    if settings.storage_kind is StorageKind.LOCAL:
+        lease = SingleWriterLease(storage_path)
+        lease.acquire()
+    else:
+        lease = _NoopLease()
     try:
         keyring = EncryptionKeyring(settings.active_key_version, settings.encryption_keys)
-        storage = Storage.open(storage_path, keyring=keyring)
+        if settings.storage_kind is StorageKind.POSTGRESQL:
+            assert settings.database_url is not None
+            assert settings.database_migration_url is not None
+            storage = Storage.open_postgres(
+                settings.database_url.get_secret_value(),
+                settings.database_migration_url.get_secret_value(),
+                keyring=keyring,
+            )
+        else:
+            storage = Storage.open(storage_path, keyring=keyring)
         app = create_shared_app(
             settings,
             storage,
@@ -476,5 +530,10 @@ def open_shared_app(
         raise
 
 
-def protect_shared_app(app: ASGIApp) -> ASGIApp:
-    return SharedRateLimitMiddleware(app)
+class _NoopLease:
+    def release(self) -> None:
+        """PostgreSQL coordinates writers through database transactions."""
+
+
+def protect_shared_app(app: ASGIApp, *, base_path: str = "") -> ASGIApp:
+    return SharedRateLimitMiddleware(app, base_path=base_path)

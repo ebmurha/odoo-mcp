@@ -368,3 +368,56 @@ def test_reverse_proxy_headers_cannot_change_canonical_authority(tmp_path) -> No
     assert direct.json() == proxied.json()
     assert direct.json()["resource"] == "https://testserver/mcp"
     assert spoofed.status_code == 401
+
+
+def test_path_scoped_shared_app_owns_only_the_configured_surface(tmp_path) -> None:
+    settings = SharedHostedSettings.model_validate(
+        {
+            "issuer_url": "https://testserver/odoo",
+            "public_mcp_url": "https://testserver/odoo",
+            "active_key_version": 1,
+            "encryption_keys": {1: b"a" * 32},
+            "storage_kind": "local",
+        }
+    )
+    storage = Storage.open(
+        tmp_path / "path-state.sqlite3",
+        keyring=EncryptionKeyring(1, {1: b"a" * 32}),
+    )
+    app = create_shared_app(
+        settings,
+        storage,
+        validator=Validator(),
+        adapter_factory=_adapter_factory,
+        permissions=frozenset({"core_read"}),
+    )
+
+    with TestClient(app, base_url="https://testserver") as client:
+        health = client.get("/odoo/healthz")
+        root_health = client.get("/healthz")
+        metadata = client.get("/.well-known/oauth-authorization-server/odoo")
+        resource = client.get("/.well-known/oauth-protected-resource/odoo")
+        root_registration = client.post("/register", json={})
+        registration = client.post(
+            "/odoo/register",
+            json={
+                "client_name": "Path client",
+                "redirect_uris": ["https://client.invalid/callback"],
+                "token_endpoint_auth_method": "none",
+                "grant_types": ["authorization_code"],
+                "response_types": ["code"],
+                "scope": "core_read",
+            },
+        )
+
+    assert health.status_code == 200
+    assert root_health.status_code == 404
+    assert root_registration.status_code == 404
+    assert registration.status_code == 201
+    assert metadata.status_code == 200
+    assert metadata.json()["issuer"] == "https://testserver/odoo"
+    assert metadata.json()["authorization_endpoint"] == "https://testserver/odoo/authorize"
+    assert metadata.json()["token_endpoint"] == "https://testserver/odoo/token"
+    assert metadata.json()["registration_endpoint"] == "https://testserver/odoo/register"
+    assert resource.status_code == 200
+    assert resource.json()["resource"] == "https://testserver/odoo"

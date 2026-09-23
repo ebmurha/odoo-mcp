@@ -5,7 +5,6 @@ from __future__ import annotations
 import base64
 import json
 import os
-import sqlite3
 from typing import cast
 
 from cryptography.exceptions import InvalidTag
@@ -15,7 +14,7 @@ from odoo_mcp.adapters.odoo.connections import ConnectorAuthorization
 from odoo_mcp.app.settings import OdooConnectionSettings
 from odoo_mcp.mcp.request_ids import new_request_id
 from odoo_mcp.storage.audit import AuditRepository
-from odoo_mcp.storage.database import SQLiteDatabase
+from odoo_mcp.storage.database import Database, Row
 from odoo_mcp.storage.errors import ConnectionDecryptionError
 from odoo_mcp.storage.json_support import canonical_json, timestamp
 from odoo_mcp.storage.models import AuditEvent
@@ -78,12 +77,12 @@ class EncryptionKeyring:
             ) from exc
 
 
-class SQLiteEncryptedConnectionRepository:
+class EncryptedConnectionRepository:
     """Tenant-bound connection storage implementing the resolver protocol."""
 
     def __init__(
         self,
-        database: SQLiteDatabase,
+        database: Database,
         audit: AuditRepository,
         keyring: EncryptionKeyring | None,
     ) -> None:
@@ -120,7 +119,7 @@ class SQLiteEncryptedConnectionRepository:
             raise ConnectionDecryptionError("The encrypted Odoo connection is invalid")
         return tuple(cast(list[int], parsed))
 
-    def _resolve_row(self, row: sqlite3.Row) -> OdooConnectionSettings:
+    def _resolve_row(self, row: Row) -> OdooConnectionSettings:
         tenant_id = str(row["tenant_id"])
         connection_id = str(row["id"])
         api_key = self._require_keyring().decrypt(
