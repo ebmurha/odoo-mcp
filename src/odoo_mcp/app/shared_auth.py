@@ -307,6 +307,7 @@ class SharedOAuthProvider:
             raise ValueError("The authorization session is invalid or expired")
         return {
             "client_id": str(row["client_id"]),
+            "redirect_uri": str(row["redirect_uri"]),
             "scopes": tuple(json.loads(str(row["scopes_json"]))),
             "connector_id": None if row["connector_id"] is None else str(row["connector_id"]),
             "discovered_company_ids": (

@@ -345,6 +345,11 @@ def test_complete_shared_hosted_flow_and_fail_closed_mcp(
     assert prepared.status_code == 200
     assert "Choose company access" in prepared.text
     assert "Default company (always authorized)" in prepared.text
+    assert 'data-pending-label="Authorizing..."' in prepared.text
+    assert "script-src 'sha256-" in prepared.headers["content-security-policy"]
+    assert "form-action 'self' https://client.invalid" in prepared.headers[
+        "content-security-policy"
+    ]
     assert f'action="{endpoint("/enroll/commit")}"' in prepared.text
     assert "synthetic-secret" not in prepared.text
     assert rejected_consent.status_code == 400

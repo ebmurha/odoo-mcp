@@ -188,6 +188,20 @@ button, .button {
   text-decoration: none;
   cursor: pointer;
 }
+button:disabled {
+  cursor: wait;
+  opacity: .78;
+}
+button[aria-busy="true"]::before {
+  width: 14px;
+  height: 14px;
+  margin-right: 9px;
+  border: 2px solid rgb(255 255 255 / 45%);
+  border-top-color: #fff;
+  border-radius: 50%;
+  animation: spin .8s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
 button:hover, .button:hover { background: #642d6d; }
 .privacy { margin: 22px 0 0; color: #817486; font-size: 12px; line-height: 1.5; }
 @media (max-width: 520px) {
@@ -200,6 +214,26 @@ button:hover, .button:hover { background: #642d6d; }
 """.strip()
 ENROLLMENT_STYLE_HASH = base64.b64encode(
     hashlib.sha256(ENROLLMENT_CSS.encode()).digest()
+).decode()
+ENROLLMENT_SCRIPT = """
+document.addEventListener("submit", (event) => {
+  const form = event.target;
+  if (!(form instanceof HTMLFormElement)) return;
+  if (form.dataset.submitting === "true") {
+    event.preventDefault();
+    return;
+  }
+  form.dataset.submitting = "true";
+  const button = form.querySelector('button[type="submit"]');
+  if (button) {
+    button.disabled = true;
+    button.setAttribute("aria-busy", "true");
+    button.textContent = button.dataset.pendingLabel || "Working...";
+  }
+});
+""".strip()
+ENROLLMENT_SCRIPT_HASH = base64.b64encode(
+    hashlib.sha256(ENROLLMENT_SCRIPT.encode()).digest()
 ).decode()
 CSRF_COOKIE = "__Secure-odoo-mcp-csrf"
 MAX_FORM_BYTES = 32 * 1024
@@ -318,7 +352,24 @@ def _secure_cookie(response: Response, name: str, value: str, path: str) -> None
     )
 
 
-def _html_response(content: str, *, status_code: int = 200) -> HTMLResponse:
+def _callback_csp_source(redirect_uri: str) -> str:
+    parsed = urlsplit(redirect_uri)
+    if parsed.scheme in {"https", "http"} and parsed.netloc:
+        return f"{parsed.scheme}://{parsed.netloc}"
+    if parsed.scheme and not parsed.netloc:
+        return f"{parsed.scheme}:"
+    raise ValueError("The authorization redirect URI is invalid")
+
+
+def _html_response(
+    content: str,
+    *,
+    status_code: int = 200,
+    redirect_uri: str | None = None,
+) -> HTMLResponse:
+    form_action = "'self'"
+    if redirect_uri is not None:
+        form_action += f" {_callback_csp_source(redirect_uri)}"
     return HTMLResponse(
         content,
         status_code=status_code,
@@ -327,7 +378,8 @@ def _html_response(content: str, *, status_code: int = 200) -> HTMLResponse:
             "Content-Security-Policy": (
                 "default-src 'none'; "
                 f"style-src 'sha256-{ENROLLMENT_STYLE_HASH}'; "
-                "form-action 'self'; base-uri 'none'; frame-ancestors 'none'"
+                f"script-src 'sha256-{ENROLLMENT_SCRIPT_HASH}'; "
+                f"form-action {form_action}; base-uri 'none'; frame-ancestors 'none'"
             ),
             "Referrer-Policy": "no-referrer",
             "X-Content-Type-Options": "nosniff",
@@ -370,6 +422,7 @@ def _page(
 {body}
 </div>
 </main>
+<script>{ENROLLMENT_SCRIPT}</script>
 </body>
 </html>"""
 
@@ -405,7 +458,8 @@ def _credentials_form(csrf: str, base_path: str, *, error: str | None = None) ->
 <input id="api-key" name="api_key" type="password" autocomplete="current-password" required>
 <span class="hint">Use an Odoo API key, not your account password.</span>
 </label>
-<div class="actions"><button type="submit">Verify and continue</button></div>
+<div class="actions"><button type="submit" data-pending-label="Verifying...">
+Verify and continue</button></div>
 </form>
 <p class="privacy">Your credentials are verified directly against Odoo and stored encrypted
 while you review company access.</p>"""
@@ -462,7 +516,8 @@ def _company_form(
 <span><strong>Approve this connector</strong>
 <small>Allow this client to use the companies and permissions shown above.</small></span>
 </label>
-<div class="actions"><button type="submit">Authorize connector</button></div>
+<div class="actions"><button type="submit" data-pending-label="Authorizing...">
+Authorize connector</button></div>
 </form>
 <p class="privacy">You can revoke this connector later. Odoo access remains limited by the
 permissions of the Odoo user and API key supplied in step 1.</p>"""
@@ -600,7 +655,8 @@ def create_shared_app(
             )
         else:
             content = _credentials_form(csrf, base_path)
-        return _html_response(content)
+        redirect_uri = str(summary["redirect_uri"]) if discovered else None
+        return _html_response(content, redirect_uri=redirect_uri)
 
     async def prepare(request: Request) -> Response:
         prepared_connector: tuple[str, str] | None = None
@@ -635,7 +691,8 @@ def create_shared_app(
                     tuple(str(value) for value in cast(tuple[object, ...], summary["scopes"])),
                     companies,
                     base_path,
-                )
+                ),
+                redirect_uri=str(summary["redirect_uri"]),
             )
             _secure_cookie(response, ENROLLMENT_COOKIE, prepared.enrollment_handle, cookie_path)
             return response
