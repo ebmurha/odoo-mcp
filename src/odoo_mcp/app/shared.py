@@ -212,9 +212,7 @@ button:hover, .button:hover { background: #642d6d; }
   .actions, button, .button { width: 100%; }
 }
 """.strip()
-ENROLLMENT_STYLE_HASH = base64.b64encode(
-    hashlib.sha256(ENROLLMENT_CSS.encode()).digest()
-).decode()
+ENROLLMENT_STYLE_HASH = base64.b64encode(hashlib.sha256(ENROLLMENT_CSS.encode()).digest()).decode()
 ENROLLMENT_SCRIPT = """
 document.addEventListener("submit", (event) => {
   const form = event.target;
@@ -534,7 +532,7 @@ permissions of the Odoo user and API key supplied in step 1.</p>"""
 def _authorization_error(base_path: str, message: str, reference: str) -> str:
     body = f"""
 <div class="actions">
-<a class="button" href="{html.escape(f'{base_path}/enroll', quote=True)}">
+<a class="button" href="{html.escape(f"{base_path}/enroll", quote=True)}">
 Return to company selection
 </a>
 </div>
@@ -742,9 +740,7 @@ def create_shared_app(
             failure_stage = "selection"
             default = int(_one(form, "default_company_id"))
             selected = tuple(
-                dict.fromkeys(
-                    [*(int(value) for value in form.get("company_id", ())), default]
-                )
+                dict.fromkeys([*(int(value) for value in form.get("company_id", ())), default])
             )
             failure_stage = "consent"
             consent = _one(form, "consent") == "yes"
