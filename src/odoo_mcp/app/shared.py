@@ -815,7 +815,7 @@ def create_shared_app(
     registration_options = ClientRegistrationOptions(
         enabled=True,
         valid_scopes=sorted(permissions),
-        default_scopes=["core_read"],
+        default_scopes=sorted(permissions),
     )
     revocation_options = RevocationOptions(enabled=True)
     auth_routes = create_auth_routes(
