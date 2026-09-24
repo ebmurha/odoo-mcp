@@ -15,13 +15,19 @@ def test_release_metadata_is_consistent_and_installable() -> None:
     package = registry["packages"][0]
 
     assert project["project"]["version"] == "0.1.0"
+    assert project["project"]["name"] == "odoo-erp-mcp"
     assert registry["name"] == "io.github.ebmurha/odoo-mcp"
     assert registry["version"] == project["project"]["version"]
+    assert "remotes" not in registry
     assert package["registryType"] == "pypi"
+    assert package["identifier"] == "odoo-erp-mcp"
     assert package["identifier"] == project["project"]["name"]
     assert package["version"] == project["project"]["version"]
     assert package["transport"] == {"type": "stdio"}
-    assert project["project"]["scripts"]["odoo-mcp-admin"] == "odoo_mcp.app.operations:main"
+    assert project["project"]["scripts"] == {
+        "odoo-mcp": "odoo_mcp.app.main:main",
+        "odoo-mcp-admin": "odoo_mcp.app.operations:main",
+    }
 
 
 def test_release_documentation_and_deployment_templates_are_present() -> None:
@@ -50,6 +56,7 @@ def test_release_documentation_and_deployment_templates_are_present() -> None:
     compose = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
     docker_verifier = (ROOT / "scripts/verify_docker.py").read_text(encoding="utf-8")
     assert "mcp-name: io.github.ebmurha/odoo-mcp" in readme
+    assert "pipx install odoo-erp-mcp" in readme
     assert "USER odoo-mcp" in dockerfile
     assert "FROM python:3.11.16-slim@sha256:" in dockerfile
     assert "uv sync --frozen --no-dev" in dockerfile
@@ -59,6 +66,19 @@ def test_release_documentation_and_deployment_templates_are_present() -> None:
     assert "127.0.0.1:8000:8000" in compose
     assert "ODOO_MCP_ODOO_API_KEY" in compose
     assert '"/app/.venv/bin/python"' in docker_verifier
+
+
+def test_pypi_publish_workflow_builds_tags_from_main() -> None:
+    workflow = (ROOT / ".github" / "workflows" / "publish.yml").read_text(
+        encoding="utf-8"
+    )
+
+    assert '      - "v*"' in workflow
+    assert 'git merge-base --is-ancestor "$GITHUB_SHA" origin/main' in workflow
+    assert "python -m build" in workflow
+    assert "python -m twine check dist/*" in workflow
+    assert "pypa/gh-action-pypi-publish@release/v1" in workflow
+    assert "secrets.PYPI_API_TOKEN" in workflow
 
 
 def test_live_invoicing_qualifier_requires_explicit_write_flag() -> None:
