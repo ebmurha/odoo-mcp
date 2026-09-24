@@ -27,7 +27,11 @@ def test_release_metadata_is_consistent_and_installable() -> None:
     assert project["project"]["scripts"] == {
         "odoo-mcp": "odoo_mcp.app.main:main",
         "odoo-mcp-admin": "odoo_mcp.app.operations:main",
+        "odoo-erp-mcp": "odoo_mcp.app.main:main",
     }
+    assert project["project"]["scripts"][package["identifier"]] == (
+        project["project"]["scripts"]["odoo-mcp"]
+    )
 
 
 def test_release_documentation_and_deployment_templates_are_present() -> None:
@@ -57,6 +61,7 @@ def test_release_documentation_and_deployment_templates_are_present() -> None:
     docker_verifier = (ROOT / "scripts/verify_docker.py").read_text(encoding="utf-8")
     assert "mcp-name: io.github.ebmurha/odoo-mcp" in readme
     assert "pipx install odoo-erp-mcp" in readme
+    assert "`odoo-erp-mcp` as a compatibility launcher" in readme
     assert "USER odoo-mcp" in dockerfile
     assert "FROM python:3.11.16-slim@sha256:" in dockerfile
     assert "uv sync --frozen --no-dev" in dockerfile
@@ -79,6 +84,11 @@ def test_pypi_publish_workflow_builds_tags_from_main() -> None:
     assert "python -m twine check dist/*" in workflow
     assert "pypa/gh-action-pypi-publish@release/v1" in workflow
     assert "secrets.PYPI_API_TOKEN" in workflow
+
+    ci_workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(
+        encoding="utf-8"
+    )
+    assert 'uvx --from "$WHEEL" odoo-erp-mcp --help' in ci_workflow
 
 
 def test_live_invoicing_qualifier_requires_explicit_write_flag() -> None:

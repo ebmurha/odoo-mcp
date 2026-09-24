@@ -38,6 +38,7 @@ dev = [
 [project.scripts]
 odoo-mcp = "odoo_mcp.app.main:main"
 odoo-mcp-admin = "odoo_mcp.app.operations:main"
+odoo-erp-mcp = "odoo_mcp.app.main:main"
 
 [project.urls]
 Homepage = "https://github.com/ebmurha/odoo-mcp"

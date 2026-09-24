@@ -37,6 +37,9 @@ pipx install odoo-erp-mcp
 odoo-mcp --help
 ```
 
+The package also exposes `odoo-erp-mcp` as a compatibility launcher for MCP
+Registry clients. It starts the same server as `odoo-mcp`.
+
 ## Local Development
 
 Requires Python 3.11 or newer and [uv](https://docs.astral.sh/uv/).
