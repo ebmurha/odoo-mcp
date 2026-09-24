@@ -63,6 +63,7 @@ include = [
     "/SUPPORT.md",
     "/CONTRIBUTING.md",
     "/CHANGELOG.md",
+    "/assets",
     "/Dockerfile",
     "/docker-compose.yml",
     "/.dockerignore",
