@@ -29,8 +29,9 @@ def test_release_metadata_is_consistent_and_installable() -> None:
         "odoo-mcp-admin": "odoo_mcp.app.operations:main",
         "odoo-erp-mcp": "odoo_mcp.app.main:main",
     }
-    assert project["project"]["scripts"][package["identifier"]] == (
-        project["project"]["scripts"]["odoo-mcp"]
+    assert (
+        project["project"]["scripts"][package["identifier"]]
+        == (project["project"]["scripts"]["odoo-mcp"])
     )
 
 
@@ -74,9 +75,7 @@ def test_release_documentation_and_deployment_templates_are_present() -> None:
 
 
 def test_pypi_publish_workflow_builds_tags_from_main() -> None:
-    workflow = (ROOT / ".github" / "workflows" / "publish.yml").read_text(
-        encoding="utf-8"
-    )
+    workflow = (ROOT / ".github" / "workflows" / "publish.yml").read_text(encoding="utf-8")
 
     assert '      - "v*"' in workflow
     assert 'git merge-base --is-ancestor "$GITHUB_SHA" origin/main' in workflow
@@ -85,9 +84,7 @@ def test_pypi_publish_workflow_builds_tags_from_main() -> None:
     assert "pypa/gh-action-pypi-publish@release/v1" in workflow
     assert "secrets.PYPI_API_TOKEN" in workflow
 
-    ci_workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(
-        encoding="utf-8"
-    )
+    ci_workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
     assert 'uvx --from "$WHEEL" odoo-erp-mcp --help' in ci_workflow
 
 
