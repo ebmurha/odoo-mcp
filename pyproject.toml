@@ -3,7 +3,7 @@ requires = ["hatchling==1.27.0"]
 build-backend = "hatchling.build"
 
 [project]
-name = "odoo-mcp"
+name = "odoo-erp-mcp"
 version = "0.1.0"
 description = "Workflow-native MCP server for Odoo Enterprise."
 readme = "README.md"
@@ -38,6 +38,7 @@ dev = [
 [project.scripts]
 odoo-mcp = "odoo_mcp.app.main:main"
 odoo-mcp-admin = "odoo_mcp.app.operations:main"
+odoo-erp-mcp = "odoo_mcp.app.main:main"
 
 [project.urls]
 Homepage = "https://github.com/ebmurha/odoo-mcp"

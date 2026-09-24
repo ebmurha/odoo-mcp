@@ -75,12 +75,8 @@ def test_registration_defaults_to_all_enabled_permissions(tmp_path) -> None:
 
     with TestClient(app, base_url="https://testserver") as client:
         defaulted = client.post("/odoo/register", json=registration)
-        narrowed = client.post(
-            "/odoo/register", json={**registration, "scope": "core_read"}
-        )
-        invalid = client.post(
-            "/odoo/register", json={**registration, "scope": "unknown_scope"}
-        )
+        narrowed = client.post("/odoo/register", json={**registration, "scope": "core_read"})
+        invalid = client.post("/odoo/register", json={**registration, "scope": "unknown_scope"})
 
     assert defaulted.status_code == 201
     assert defaulted.json()["scope"] == "accounting_propose accounting_read core_read"
@@ -383,9 +379,9 @@ def test_complete_shared_hosted_flow_and_fail_closed_mcp(
     assert "Default company (always authorized)" in prepared.text
     assert 'data-pending-label="Authorizing..."' in prepared.text
     assert "script-src 'sha256-" in prepared.headers["content-security-policy"]
-    assert "form-action 'self' https://client.invalid" in prepared.headers[
-        "content-security-policy"
-    ]
+    assert (
+        "form-action 'self' https://client.invalid" in prepared.headers["content-security-policy"]
+    )
     assert f'action="{endpoint("/enroll/commit")}"' in prepared.text
     assert "synthetic-secret" not in prepared.text
     assert rejected_consent.status_code == 400

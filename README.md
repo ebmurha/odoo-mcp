@@ -26,6 +26,20 @@ Other Odoo versions, Odoo Online, Community edition, and custom forks are not
 supported. This package is not an Odoo module and does not expose generic model
 CRUD.
 
+## Installation
+
+The product and commands are named `odoo-mcp`; the PyPI distribution is
+`odoo-erp-mcp` because the `odoo-mcp` distribution name is owned by another
+project.
+
+```bash
+pipx install odoo-erp-mcp
+odoo-mcp --help
+```
+
+The package also exposes `odoo-erp-mcp` as a compatibility launcher for MCP
+Registry clients. It starts the same server as `odoo-mcp`.
+
 ## Local Development
 
 Requires Python 3.11 or newer and [uv](https://docs.astral.sh/uv/).
