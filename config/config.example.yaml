@@ -22,5 +22,12 @@ permissions:
     - register_payment
     - create_journal_entry
     - post_journal_entry
-  payroll_read: []
+  payroll_read:
+    - list_payroll_periods
+    - get_payroll_batch
+    - list_payslips
+    - get_payslip
+    - get_employee_payroll_context
+    - list_salary_rules
+    - get_attendance_summary
   payroll_draft_write: []

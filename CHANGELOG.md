@@ -6,6 +6,8 @@ All notable public changes are documented here.
 
 - Add company-scoped Odoo currency-rate history with deterministic precedence,
   pagination, structured evidence, and Markdown output.
+- Add bounded, source-linked Payroll evidence access with Odoo 18/19 normalized
+  adapter support and metadata-only auditing.
 
 ## 0.1.0
 

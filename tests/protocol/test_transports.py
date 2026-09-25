@@ -150,6 +150,13 @@ def test_streamable_http_lists_the_shared_registry(
         "list_journal_entries",
         "create_journal_entry",
         "post_journal_entry",
+        "list_payroll_periods",
+        "get_payroll_batch",
+        "list_payslips",
+        "get_payslip",
+        "get_employee_payroll_context",
+        "list_salary_rules",
+        "get_attendance_summary",
     ]
     assert called.status_code == 200
     assert called.json()["result"]["structuredContent"]["status"] == "ok"
@@ -303,4 +310,11 @@ async def test_stdio_profile_lists_the_shared_registry(tmp_path) -> None:
         "list_journal_entries",
         "create_journal_entry",
         "post_journal_entry",
+        "list_payroll_periods",
+        "get_payroll_batch",
+        "list_payslips",
+        "get_payslip",
+        "get_employee_payroll_context",
+        "list_salary_rules",
+        "get_attendance_summary",
     ]

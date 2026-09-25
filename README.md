@@ -5,17 +5,20 @@
 `odoo-mcp` is a workflow-native MCP server for Odoo Enterprise. It exposes
 read-only capability discovery, trial-balance reporting, aged receivables and
 payables reporting, cashbook visibility, unmatched bank-line detection, and
-proposal-only bank reconciliation.
+proposal-only bank reconciliation. It also exposes bounded, read-only Payroll
+evidence for exact periods, batches, payslips, employees, salary rules, and
+payroll work entries.
 
 The initial accounting release also supports bounded invoice, supplier-bill,
 credit-note, payment-registration, and manual-journal workflows. Mutating tools
 are preview-only by default and require explicit execution plus idempotency.
 
-The internal accounting adapter provides bounded, typed, company-scoped read
-primitives for the reporting workflows. It enforces fixed model/action allowlists,
-strips denied fields, normalizes dates, decimals, relations, and cursor pages,
-and translates Odoo authentication, permission, and transport failures into
-safe errors. It does not expose generic CRUD or an Odoo configuration surface.
+The internal Odoo adapter provides bounded, typed, company-scoped primitives
+for the accounting and Payroll workflows. It enforces fixed model/action
+allowlists, strips denied fields, normalizes dates, decimals, relations, and
+cursor pages, and translates Odoo authentication, permission, and transport
+failures into safe errors. It does not expose generic CRUD or an Odoo
+configuration surface.
 
 Supported connection targets are Odoo.sh and self-hosted Odoo Enterprise:
 
@@ -208,6 +211,30 @@ distribution to exact analytic account IDs. These reports do not infer custom
 chart-of-accounts groups, fiscal-year closing rules, consolidation, eliminations,
 or localization-specific report layouts. Unsupported account classifications
 fail explicitly instead of being guessed.
+
+## Payroll evidence workflows
+
+- `list_payroll_periods` lists exact date pairs observed on company-scoped
+  payslips, with bounded status, batch, and currency evidence.
+- `get_payroll_batch` returns one exact batch, compact payslips, complete
+  employee and state counts, and currency-partitioned observed rule/category
+  totals.
+- `list_payslips` lists compact payslip facts for an exact batch, exact period,
+  or both. `get_payslip` returns one exact payslip with all bounded calculated
+  lines, worked days, and one-off inputs.
+- `get_employee_payroll_context` returns only the employee and contract/version
+  evidence applicable to an exact period.
+- `list_salary_rules` reports rule metadata observed on eligible payslip lines;
+  it is not a Payroll configuration catalogue.
+- `get_attendance_summary` summarizes Payroll work entries by employee, type,
+  code, and state. It does not read raw attendance or claim proof of physical
+  attendance.
+
+These tools require `payroll_read` and the accessible Odoo Payroll capability.
+They are read-only, use request-bound pagination, return Odoo source IDs, and
+store only non-sensitive invocation metadata in the audit chain. Payroll
+responses are not persisted as artifacts, proposals, idempotency records, or
+workflow state.
 
 ## Verification
 

@@ -29,6 +29,7 @@ from odoo_mcp.adapters.base import CapabilitySnapshot, Company, OdooAdapter
 from odoo_mcp.adapters.odoo.client import OdooClient
 from odoo_mcp.adapters.odoo.connections import ConnectionBinding, ConnectionResolver
 from odoo_mcp.mcp.error_codes import ErrorCode, ErrorResponse, OdooMcpError
+from odoo_mcp.mcp.payroll import register_payroll_tools
 from odoo_mcp.mcp.registry import TOOL_REGISTRY, ToolDefinition, get_tool_definition
 from odoo_mcp.mcp.request_ids import new_request_id
 from odoo_mcp.mcp.schemas import (
@@ -1910,6 +1911,12 @@ def create_mcp_server(
         annotations=post_journal_definition.annotations,
         meta=post_journal_definition.protocol_meta(),
         structured_output=True,
+    )
+    register_payroll_tools(
+        server,
+        resolver,
+        adapter_factory=adapter_factory,
+        storage=storage,
     )
     return server
 

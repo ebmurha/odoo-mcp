@@ -396,6 +396,121 @@ TOOL_REGISTRY: tuple[ToolDefinition, ...] = (
             open_world_hint=True,
         ),
     ),
+    ToolDefinition(
+        name="list_payroll_periods",
+        version="1.0.0",
+        title="List payroll periods",
+        description="List bounded exact periods observed in authorized Odoo payslips.",
+        risk_level="read",
+        required_permission="payroll_read",
+        required_capability="hr_payroll",
+        annotations=ToolAnnotations(
+            read_only_hint=True,
+            destructive_hint=False,
+            idempotent_hint=True,
+            open_world_hint=True,
+        ),
+    ),
+    ToolDefinition(
+        name="get_payroll_batch",
+        version="1.0.0",
+        title="Get payroll batch",
+        description=(
+            "Return one exact payroll batch with compact payslips and complete observed totals."
+        ),
+        risk_level="read",
+        required_permission="payroll_read",
+        required_capability="hr_payroll",
+        annotations=ToolAnnotations(
+            read_only_hint=True,
+            destructive_hint=False,
+            idempotent_hint=True,
+            open_world_hint=True,
+        ),
+    ),
+    ToolDefinition(
+        name="list_payslips",
+        version="1.0.0",
+        title="List payslips",
+        description="List compact payslips for an exact batch, exact period, or both.",
+        risk_level="read",
+        required_permission="payroll_read",
+        required_capability="hr_payroll",
+        annotations=ToolAnnotations(
+            read_only_hint=True,
+            destructive_hint=False,
+            idempotent_hint=True,
+            open_world_hint=True,
+        ),
+    ),
+    ToolDefinition(
+        name="get_payslip",
+        version="1.0.0",
+        title="Get payslip",
+        description=(
+            "Return one exact payslip with bounded calculated lines, worked days, and inputs."
+        ),
+        risk_level="read",
+        required_permission="payroll_read",
+        required_capability="hr_payroll",
+        annotations=ToolAnnotations(
+            read_only_hint=True,
+            destructive_hint=False,
+            idempotent_hint=True,
+            open_world_hint=True,
+        ),
+    ),
+    ToolDefinition(
+        name="get_employee_payroll_context",
+        version="1.0.0",
+        title="Get employee payroll context",
+        description=(
+            "Return one employee's bounded contract evidence for an exact payroll period."
+        ),
+        risk_level="read",
+        required_permission="payroll_read",
+        required_capability="hr_payroll",
+        annotations=ToolAnnotations(
+            read_only_hint=True,
+            destructive_hint=False,
+            idempotent_hint=True,
+            open_world_hint=True,
+        ),
+    ),
+    ToolDefinition(
+        name="list_salary_rules",
+        version="1.0.0",
+        title="List observed salary rules",
+        description=(
+            "List salary-rule snapshots observed on eligible company-scoped payslip lines."
+        ),
+        risk_level="read",
+        required_permission="payroll_read",
+        required_capability="hr_payroll",
+        annotations=ToolAnnotations(
+            read_only_hint=True,
+            destructive_hint=False,
+            idempotent_hint=True,
+            open_world_hint=True,
+        ),
+    ),
+    ToolDefinition(
+        name="get_attendance_summary",
+        version="1.0.0",
+        title="Get payroll work-entry summary",
+        description=(
+            "Summarize bounded Odoo payroll work-entry evidence without claiming attendance."
+        ),
+        risk_level="read",
+        required_permission="payroll_read",
+        required_capability="hr_payroll",
+        annotations=ToolAnnotations(
+            read_only_hint=True,
+            destructive_hint=False,
+            idempotent_hint=True,
+            open_world_hint=True,
+        ),
+    ),
 )
 
 

@@ -107,6 +107,13 @@ async def test_all_profiles_expose_identical_registry_and_discovery(
         "list_journal_entries",
         "create_journal_entry",
         "post_journal_entry",
+        "list_payroll_periods",
+        "get_payroll_batch",
+        "list_payslips",
+        "get_payslip",
+        "get_employee_payroll_context",
+        "list_salary_rules",
+        "get_attendance_summary",
     ]
     for output in outputs:
         output.pop("request_id")
@@ -124,8 +131,8 @@ async def test_registry_metadata_and_schemas_match_the_contract(
     server = create_mcp_server(Resolver(_binding(DeploymentProfile.LOCAL, connection)))
     tools = await server.list_tools()
 
-    assert len(TOOL_REGISTRY) == 20
-    assert len(tools) == 20
+    assert len(TOOL_REGISTRY) == 27
+    assert len(tools) == 27
     assert [tool.name for tool in tools] == [definition.name for definition in TOOL_REGISTRY]
     for tool, definition in zip(tools, TOOL_REGISTRY, strict=True):
         assert tool.input_schema["type"] == "object"
@@ -177,6 +184,29 @@ async def test_registry_metadata_and_schemas_match_the_contract(
     }
     assert tools[18].annotations.destructive_hint is False
     assert tools[19].annotations.destructive_hint is True
+    assert set(tools[20].input_schema["required"]) == {
+        "window_start",
+        "window_end",
+        "company_id",
+    }
+    assert set(tools[21].input_schema["required"]) == {"batch_id", "company_id"}
+    assert set(tools[22].input_schema["required"]) == {"company_id"}
+    assert set(tools[23].input_schema["required"]) == {"payslip_id", "company_id"}
+    assert set(tools[24].input_schema["required"]) == {
+        "employee_id",
+        "period_start",
+        "period_end",
+        "company_id",
+    }
+    assert set(tools[25].input_schema["required"]) == {"company_id"}
+    assert set(tools[26].input_schema["required"]) == {
+        "employee_ids",
+        "period_start",
+        "period_end",
+        "company_id",
+    }
+    assert all(tool.annotations.read_only_hint is True for tool in tools[20:])
+    assert all("dry_run" not in tool.input_schema["properties"] for tool in tools[20:])
 
 
 async def test_permission_denial_happens_before_adapter_creation(
@@ -260,7 +290,15 @@ def test_public_permission_example_matches_registry() -> None:
             "create_journal_entry",
             "post_journal_entry",
         },
-        "payroll_read": set(),
+        "payroll_read": {
+            "list_payroll_periods",
+            "get_payroll_batch",
+            "list_payslips",
+            "get_payslip",
+            "get_employee_payroll_context",
+            "list_salary_rules",
+            "get_attendance_summary",
+        },
         "payroll_draft_write": set(),
     }
     assert PERMISSION_GROUPS == frozenset(
