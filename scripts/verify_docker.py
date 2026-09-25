@@ -10,7 +10,7 @@ IMAGE = "odoo-mcp:qualification"
 DOCKER = ["docker", "--context", "default"]
 QUALIFICATION = (
     "import os, odoo_mcp; "
-    "assert odoo_mcp.__version__ == '0.1.0'; "
+    "assert odoo_mcp.__version__ == '0.2.0'; "
     "assert os.getuid() != 0; "
     "print('Odoo MCP Docker qualification passed.')"
 )

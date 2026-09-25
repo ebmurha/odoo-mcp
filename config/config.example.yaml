@@ -2,6 +2,7 @@ permissions:
   core_read:
     - get_erp_capabilities
   accounting_read:
+    - get_currency_rate_history
     - get_trial_balance
     - get_profit_and_loss
     - get_balance_sheet

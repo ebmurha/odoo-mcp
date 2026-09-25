@@ -22,6 +22,7 @@ MODULE_MODEL_READ_ALLOWLIST: dict[str, frozenset[str]] = {
             "account.partial.reconcile",
             "account.analytic.account",
             "res.currency",
+            "res.currency.rate",
             "res.partner",
             "product.product",
         }

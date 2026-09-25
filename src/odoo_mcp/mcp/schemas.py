@@ -182,6 +182,20 @@ class CashbookInput(AccountingReadInput):
         return self
 
 
+class CurrencyRateHistoryInput(AccountingReadInput):
+    currency_id: int = Field(gt=0)
+    period_start: date
+    period_end: date
+
+    @model_validator(mode="after")
+    def validate_period(self) -> CurrencyRateHistoryInput:
+        if self.period_end < self.period_start:
+            raise ValueError("period_end must not precede period_start")
+        if (self.period_end - self.period_start).days > 365:
+            raise ValueError("period must contain at most 366 calendar dates")
+        return self
+
+
 class UnmatchedStatementLinesInput(AccountingReadInput):
     period_start: date
     period_end: date
@@ -755,6 +769,58 @@ class CashbookResponse(BaseModel):
     artifact_markdown: str
 
 
+class CurrencyRateDescriptor(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: int
+    name: str
+
+
+class CurrencyRateItem(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    source_rate_id: int
+    source_scope: Literal["company", "shared"]
+    effective_date: date
+    currency_units_per_company_unit: Decimal
+    company_units_per_currency_unit: Decimal
+
+
+class EffectiveCurrencyRate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    source_rate_id: int | None
+    source_scope: Literal["company", "shared", "identity"]
+    effective_date: date
+    currency_units_per_company_unit: Decimal
+    company_units_per_currency_unit: Decimal
+
+
+class CurrencyRateHistorySummary(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    history_status: Literal["available", "missing", "company_currency_identity"]
+    returned_count: int
+    has_more: bool
+
+
+class CurrencyRateHistoryResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["ok"] = "ok"
+    request_id: str
+    company_id: int
+    company_currency: CurrencyRateDescriptor
+    requested_currency: CurrencyRateDescriptor
+    period_start: date
+    period_end: date
+    effective_at_start: EffectiveCurrencyRate | None
+    items: list[CurrencyRateItem]
+    next_cursor: str | None
+    summary: CurrencyRateHistorySummary
+    artifact_markdown: str
+
+
 class UnmatchedStatementLinesResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -780,6 +846,9 @@ class AccountingToolResponse(BaseModel):
     period_start: date | None = None
     period_end: date | None = None
     as_of_date: date | None = None
+    company_currency: CurrencyRateDescriptor | None = None
+    requested_currency: CurrencyRateDescriptor | None = None
+    effective_at_start: EffectiveCurrencyRate | None = None
     items: (
         list[
             TrialBalanceItem
@@ -790,6 +859,7 @@ class AccountingToolResponse(BaseModel):
             | UnmatchedStatementLineItem
             | OpenDocumentItem
             | JournalEntryItem
+            | CurrencyRateItem
         ]
         | None
     ) = None
@@ -803,6 +873,7 @@ class AccountingToolResponse(BaseModel):
         | UnmatchedStatementLinesSummary
         | OpenDocumentsSummary
         | JournalEntriesSummary
+        | CurrencyRateHistorySummary
         | None
     ) = None
     artifact_markdown: str | None = None
@@ -834,7 +905,12 @@ class AccountingToolResponse(BaseModel):
     @model_serializer(mode="wrap")
     def omit_nulls(self, handler: object) -> dict[str, object]:
         serialized = handler(self)  # type: ignore[operator]
-        return {key: value for key, value in serialized.items() if value is not None}
+        return {
+            key: value
+            for key, value in serialized.items()
+            if value is not None
+            or (key == "effective_at_start" and self.requested_currency is not None)
+        }
 
     @classmethod
     def from_success(
@@ -848,6 +924,7 @@ class AccountingToolResponse(BaseModel):
             | UnmatchedStatementLinesResponse
             | OpenDocumentsResponse
             | JournalEntriesResponse
+            | CurrencyRateHistoryResponse
         ),
     ) -> AccountingToolResponse:
         return cls(**response.model_dump())

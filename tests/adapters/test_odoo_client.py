@@ -191,13 +191,23 @@ async def test_connect_selects_version_transport_and_discovers_authorized_scope(
                 )
             assert model == "res.company"
             assert args[5] == [[["id", "in", [1, 2]]]]
-            assert args[6]["fields"] == ["id", "name", "currency_id"]
+            assert args[6]["fields"] == ["id", "name", "currency_id", "root_id"]
             return httpx.Response(
                 200,
                 json={
                     "result": [
-                        {"id": 2, "name": "Beta", "currency_id": [2, "USD"]},
-                        {"id": 1, "name": "Alpha", "currency_id": [1, "KES"]},
+                        {
+                            "id": 2,
+                            "name": "Beta",
+                            "currency_id": [2, "USD"],
+                            "root_id": [1, "Alpha"],
+                        },
+                        {
+                            "id": 1,
+                            "name": "Alpha",
+                            "currency_id": [1, "KES"],
+                            "root_id": [1, "Alpha"],
+                        },
                     ]
                 },
             )
@@ -215,12 +225,22 @@ async def test_connect_selects_version_transport_and_discovers_authorized_scope(
             return httpx.Response(200 if available else 404, json=1 if available else {})
         assert request.url.path == "/json/2/res.company/search_read"
         assert body["domain"] == [["id", "in", [1, 2]]]
-        assert body["fields"] == ["id", "name", "currency_id"]
+        assert body["fields"] == ["id", "name", "currency_id", "root_id"]
         return httpx.Response(
             200,
             json=[
-                {"id": 2, "name": "Beta", "currency_id": [2, "USD"]},
-                {"id": 1, "name": "Alpha", "currency_id": [1, "KES"]},
+                {
+                    "id": 2,
+                    "name": "Beta",
+                    "currency_id": [2, "USD"],
+                    "root_id": [1, "Alpha"],
+                },
+                {
+                    "id": 1,
+                    "name": "Alpha",
+                    "currency_id": [1, "KES"],
+                    "root_id": [1, "Alpha"],
+                },
             ],
         )
 

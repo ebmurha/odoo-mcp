@@ -11,6 +11,8 @@ from odoo_mcp.adapters.accounting import (
     AccountMoveLine,
     AnalyticAccount,
     Currency,
+    CurrencyRate,
+    CurrencyRatePage,
     PageRequest,
     PartialReconciliation,
     ReadFilters,
@@ -52,6 +54,7 @@ class AccountingAdapter:
                 id=1,
                 name="Synthetic Company",
                 currency=RelatedRecord(id=1, name="KES"),
+                root_id=1,
             )
         ]
 
@@ -161,7 +164,38 @@ class AccountingAdapter:
         *,
         page: PageRequest,
     ) -> RecordPage[Currency]:
-        return RecordPage(items=[Currency(id=1, name="KES", rounding=Decimal("0.01"))])
+        return RecordPage(
+            items=[
+                Currency(
+                    id=currency_ids[0],
+                    name="KES" if currency_ids[0] == 1 else "USD",
+                    rounding=Decimal("0.01"),
+                )
+            ]
+        )
+
+    async def get_currency_rates(
+        self,
+        company_id: int,
+        currency_id: int,
+        through_date: date,
+        *,
+        page: PageRequest,
+    ) -> CurrencyRatePage:
+        return CurrencyRatePage(
+            company_currency=RelatedRecord(id=1, name="KES"),
+            root_company_id=1,
+            items=[
+                CurrencyRate(
+                    id=90,
+                    effective_date=date(2026, 1, 1),
+                    currency_id=currency_id,
+                    company_id=1,
+                    company_rate=Decimal("129.123456"),
+                    inverse_company_rate=Decimal("0.00774453"),
+                )
+            ],
+        )
 
     async def close(self) -> None:
         self.closed = True
@@ -179,6 +213,47 @@ def _binding(
         permissions=permissions,
         connection=connection,
     )
+
+
+async def test_currency_rate_history_runs_full_path_and_persists_evidence(
+    connection: OdooConnectionSettings,
+    tmp_path,
+) -> None:
+    storage = Storage.open(tmp_path / "currency-rates.sqlite3")
+    adapter = AccountingAdapter()
+
+    async def factory(_connection: object) -> OdooAdapter:
+        return adapter
+
+    server = create_mcp_server(
+        Resolver(_binding(connection)), adapter_factory=factory, storage=storage
+    )
+    async with Client(server) as client:
+        result = await client.call_tool(
+            "get_currency_rate_history",
+            {
+                "company_id": 1,
+                "currency_id": 2,
+                "period_start": "2026-01-01",
+                "period_end": "2026-01-31",
+            },
+        )
+
+    assert result.is_error is False
+    assert result.structured_content is not None
+    assert result.structured_content["summary"] == {
+        "history_status": "available",
+        "returned_count": 1,
+        "has_more": False,
+    }
+    assert result.structured_content["items"][0]["source_rate_id"] == 90
+    audits = storage.audit.list_for_tenant("tenant-accounting")
+    assert len(audits) == 1
+    assert audits[0].tool_name == "get_currency_rate_history"
+    with storage.database.transaction() as database:
+        artifact = database.execute("SELECT * FROM artifacts").fetchone()
+    assert artifact is not None
+    assert "# Currency Rate History" in str(artifact["content"])
 
 
 async def test_trial_balance_runs_full_path_and_persists_artifact_and_audit(

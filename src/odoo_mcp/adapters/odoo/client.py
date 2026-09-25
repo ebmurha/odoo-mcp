@@ -15,6 +15,7 @@ from odoo_mcp.adapters.accounting import (
     AnalyticAccount,
     BankStatementLine,
     Currency,
+    CurrencyRatePage,
     DatePeriod,
     InvoiceDraft,
     InvoiceEffect,
@@ -121,7 +122,7 @@ class OdooClient:
         rows = await self._transport.search_read(
             "res.company",
             [["id", "in", list(allowed)]],
-            ["id", "name", "currency_id"],
+            ["id", "name", "currency_id", "root_id"],
             limit=len(allowed),
             offset=0,
             order="id asc",
@@ -132,6 +133,7 @@ class OdooClient:
             identifier = row.get("id")
             name = row.get("name")
             raw_currency = row.get("currency_id")
+            raw_root = row.get("root_id")
             currency = (
                 RelatedRecord(id=raw_currency[0], name=raw_currency[1])
                 if isinstance(raw_currency, (list, tuple))
@@ -147,7 +149,18 @@ class OdooClient:
                 and not isinstance(identifier, bool)
                 and isinstance(name, str)
             ):
-                companies.append(Company(id=identifier, name=name, currency=currency))
+                root_id = (
+                    raw_root[0]
+                    if isinstance(raw_root, (list, tuple))
+                    and len(raw_root) == 2
+                    and isinstance(raw_root[0], int)
+                    and not isinstance(raw_root[0], bool)
+                    and raw_root[0] > 0
+                    else None
+                )
+                companies.append(
+                    Company(id=identifier, name=name, currency=currency, root_id=root_id)
+                )
         found = {company.id for company in companies}
         if found != set(allowed):
             raise OdooMcpError(
@@ -189,6 +202,18 @@ class OdooClient:
             company_id,
             currency_ids,
             page=page,
+        )
+
+    async def get_currency_rates(
+        self,
+        company_id: int,
+        currency_id: int,
+        through_date: date,
+        *,
+        page: PageRequest = DEFAULT_PAGE_REQUEST,
+    ) -> CurrencyRatePage:
+        return await self._accounting.get_currency_rates(
+            company_id, currency_id, through_date, page=page
         )
 
     async def get_bank_statement_lines(

@@ -155,6 +155,9 @@ boundary and never expand the technical user's Odoo permissions.
 
 ## Accounting workflows
 
+- `get_currency_rate_history` returns the selected company's Odoo rate history
+  for one exact currency, preserving company-over-shared precedence and both
+  rate directions without performing conversions.
 - `get_trial_balance` returns posted opening balances, inclusive-period debit
   and credit movement, closing balances, totals, and a Markdown artifact.
 - `get_profit_and_loss` classifies posted lines by Odoo's income and expense

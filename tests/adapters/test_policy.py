@@ -31,6 +31,7 @@ def test_policy_constants_match_the_public_adapter_contract() -> None:
                 "account.partial.reconcile",
                 "account.analytic.account",
                 "res.currency",
+                "res.currency.rate",
                 "res.partner",
                 "product.product",
             }

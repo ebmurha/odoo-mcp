@@ -15,6 +15,7 @@ from odoo_mcp.adapters.accounting import (
     AnalyticAccount,
     BankStatementLine,
     Currency,
+    CurrencyRatePage,
     DatePeriod,
     InvoiceDraft,
     InvoiceEffect,
@@ -41,6 +42,7 @@ class Company(BaseModel):
     id: int
     name: str
     currency: RelatedRecord | None = None
+    root_id: int | None = None
 
 
 class CapabilitySnapshot(BaseModel):
@@ -82,6 +84,15 @@ class OdooAdapter(Protocol):
         *,
         page: PageRequest = DEFAULT_PAGE_REQUEST,
     ) -> RecordPage[Currency]: ...
+
+    async def get_currency_rates(
+        self,
+        company_id: int,
+        currency_id: int,
+        through_date: Date,
+        *,
+        page: PageRequest = DEFAULT_PAGE_REQUEST,
+    ) -> CurrencyRatePage: ...
 
     async def get_bank_statement_lines(
         self,

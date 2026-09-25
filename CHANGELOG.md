@@ -2,7 +2,12 @@
 
 All notable public changes are documented here.
 
-## 0.1.0 — Unreleased
+## 0.2.0 — Unreleased
+
+- Add company-scoped Odoo currency-rate history with deterministic precedence,
+  pagination, structured evidence, and Markdown output.
+
+## 0.1.0
 
 - Initial Odoo Enterprise accounting MCP server for Local Development,
   Dedicated Remote, and Shared Hosted deployment profiles.

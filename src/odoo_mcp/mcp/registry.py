@@ -77,6 +77,24 @@ TOOL_REGISTRY: tuple[ToolDefinition, ...] = (
         ),
     ),
     ToolDefinition(
+        name="get_currency_rate_history",
+        version="1.0.0",
+        title="Get currency rate history",
+        description=(
+            "Return company-scoped Odoo currency-rate history for an exact currency "
+            "and inclusive period."
+        ),
+        risk_level="read",
+        required_permission="accounting_read",
+        required_capability="account",
+        annotations=ToolAnnotations(
+            read_only_hint=True,
+            destructive_hint=False,
+            idempotent_hint=True,
+            open_world_hint=True,
+        ),
+    ),
+    ToolDefinition(
         name="get_trial_balance",
         version="1.0.0",
         title="Get trial balance",
