@@ -14,7 +14,7 @@ from odoo_mcp.app.settings import (
     OdooConnectionSettings,
     load_permission_config,
 )
-from odoo_mcp.mcp.registry import TOOL_REGISTRY
+from odoo_mcp.mcp.registry import PERMISSION_GROUPS, TOOL_REGISTRY
 from odoo_mcp.mcp.server import create_mcp_server
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -260,4 +260,15 @@ def test_public_permission_example_matches_registry() -> None:
             "create_journal_entry",
             "post_journal_entry",
         },
+        "payroll_read": set(),
+        "payroll_draft_write": set(),
     }
+    assert PERMISSION_GROUPS == frozenset(
+        {
+            "core_read",
+            "accounting_read",
+            "accounting_propose",
+            "payroll_read",
+            "payroll_draft_write",
+        }
+    )

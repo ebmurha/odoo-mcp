@@ -22,3 +22,5 @@ permissions:
     - register_payment
     - create_journal_entry
     - post_journal_entry
+  payroll_read: []
+  payroll_draft_write: []

@@ -11,6 +11,16 @@ from odoo_mcp.workflows.core.capabilities import ToolAvailability
 
 RiskLevel = Literal["read", "propose", "draft_write", "confirm_write"]
 
+PERMISSION_GROUPS = frozenset(
+    {
+        "core_read",
+        "accounting_read",
+        "accounting_propose",
+        "payroll_read",
+        "payroll_draft_write",
+    }
+)
+
 
 @dataclass(frozen=True)
 class ToolDefinition:

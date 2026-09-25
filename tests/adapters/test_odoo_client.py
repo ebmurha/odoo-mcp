@@ -265,17 +265,20 @@ async def test_connect_selects_version_transport_and_discovers_authorized_scope(
         "base": "res.company",
         "account": "account.move",
         "account_accountant": "account.bank.statement.line",
+        "hr_payroll": "hr.payslip",
     }
     assert probed_models == [*CAPABILITY_PROBES.values(), *CAPABILITY_PROBES.values()]
     assert capabilities.modules == {
         "base": True,
         "account": True,
         "account_accountant": False,
+        "hr_payroll": False,
     }
     assert [item.name for item in discovery.installed_modules] == [
         "account",
         "account_accountant",
         "base",
+        "hr_payroll",
     ]
     assert [(company.id, company.name) for company in companies] == [(1, "Alpha"), (2, "Beta")]
     assert [

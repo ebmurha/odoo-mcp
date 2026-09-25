@@ -27,7 +27,7 @@ from odoo_mcp.app.settings import (
     load_shared_settings,
 )
 from odoo_mcp.app.shared import open_shared_app, protect_shared_app
-from odoo_mcp.mcp.registry import TOOL_REGISTRY
+from odoo_mcp.mcp.registry import PERMISSION_GROUPS, TOOL_REGISTRY
 from odoo_mcp.mcp.server import create_mcp_server
 from odoo_mcp.storage import Storage
 from odoo_mcp.storage.errors import StorageError
@@ -57,9 +57,8 @@ def _permissions(config: PermissionConfig | None) -> frozenset[str]:
         return frozenset({"core_read"})
 
     definitions = {tool.name: tool for tool in TOOL_REGISTRY}
-    known_permissions = {tool.required_permission for tool in TOOL_REGISTRY}
     for permission, tool_names in config.permissions.items():
-        if permission not in known_permissions:
+        if permission not in PERMISSION_GROUPS:
             raise SettingsError("Permission configuration does not match the tool registry")
         for tool_name in tool_names:
             definition = definitions.get(tool_name)
