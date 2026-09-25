@@ -118,6 +118,16 @@ def test_streamable_http_lists_the_shared_registry(
     assert health.json() == {"status": "ok"}
     assert unauthorized.status_code == 401
     assert initialize.status_code == 200
+    assert initialize.json()["result"]["serverInfo"]["title"] == "Odoo MCP"
+    assert initialize.json()["result"]["serverInfo"]["icons"] == [
+        {
+            "src": (
+                "https://raw.githubusercontent.com/ebmurha/odoo-mcp/main/assets/odoo-mcp-logo.png"
+            ),
+            "mimeType": "image/png",
+            "sizes": ["256x256"],
+        }
+    ]
     assert listed.status_code == 200
     assert [tool["name"] for tool in listed.json()["result"]["tools"]] == [
         "get_erp_capabilities",

@@ -9,6 +9,7 @@ from datetime import date
 from decimal import Decimal
 from typing import Annotated, Literal, TypeAlias
 
+from mcp import types
 from mcp.server import MCPServer
 from mcp.server.auth.provider import TokenVerifier
 from mcp.server.auth.settings import AuthSettings
@@ -98,6 +99,7 @@ from odoo_mcp.workflows.accounting.reports import (
 )
 from odoo_mcp.workflows.core.capabilities import get_erp_capabilities
 
+SERVER_ICON_URL = "https://raw.githubusercontent.com/ebmurha/odoo-mcp/main/assets/odoo-mcp-logo.png"
 AdapterFactory = Callable[[object], Awaitable[OdooAdapter]]
 ReportResponse: TypeAlias = (
     TrialBalanceResponse
@@ -159,6 +161,14 @@ def create_mcp_server(
 
     server = MCPServer(
         "odoo-mcp",
+        title="Odoo MCP",
+        icons=[
+            types.Icon(
+                src=SERVER_ICON_URL,
+                mime_type="image/png",
+                sizes=["256x256"],
+            )
+        ],
         auth=auth,
         token_verifier=token_verifier,
     )

@@ -3,6 +3,15 @@
   "name": "io.github.ebmurha/odoo-mcp",
   "description": "Workflow-native MCP server for safe Odoo Enterprise back-office operations",
   "title": "Odoo MCP",
+  "icons": [
+    {
+      "src": "https://raw.githubusercontent.com/ebmurha/odoo-mcp/main/assets/odoo-mcp-logo.png",
+      "mimeType": "image/png",
+      "sizes": [
+        "256x256"
+      ]
+    }
+  ],
   "repository": {
     "url": "https://github.com/ebmurha/odoo-mcp",
     "source": "github"

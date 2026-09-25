@@ -19,6 +19,16 @@ def test_release_metadata_is_consistent_and_installable() -> None:
     assert registry["name"] == "io.github.ebmurha/odoo-mcp"
     assert registry["version"] == project["project"]["version"]
     assert "remotes" not in registry
+    assert registry["icons"] == [
+        {
+            "src": (
+                "https://raw.githubusercontent.com/ebmurha/odoo-mcp/main/assets/odoo-mcp-logo.png"
+            ),
+            "mimeType": "image/png",
+            "sizes": ["256x256"],
+        }
+    ]
+    assert (ROOT / "assets" / "odoo-mcp-logo.png").is_file()
     assert package["registryType"] == "pypi"
     assert package["identifier"] == "odoo-erp-mcp"
     assert package["identifier"] == project["project"]["name"]

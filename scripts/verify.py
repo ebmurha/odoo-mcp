@@ -17,6 +17,7 @@ FORBIDDEN_ARCHIVE_PARTS = {
     "CLAUDE.md",
 }
 REQUIRED_SDIST_SUFFIXES = {
+    "/assets/odoo-mcp-logo.png",
     "/CHANGELOG.md",
     "/CONTRIBUTING.md",
     "/Dockerfile",
