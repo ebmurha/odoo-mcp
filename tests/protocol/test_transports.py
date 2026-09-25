@@ -122,8 +122,7 @@ def test_streamable_http_lists_the_shared_registry(
     assert initialize.json()["result"]["serverInfo"]["icons"] == [
         {
             "src": (
-                "https://raw.githubusercontent.com/ebmurha/odoo-mcp/"
-                "main/assets/odoo-mcp-logo.png"
+                "https://raw.githubusercontent.com/ebmurha/odoo-mcp/main/assets/odoo-mcp-logo.png"
             ),
             "mimeType": "image/png",
             "sizes": ["256x256"],

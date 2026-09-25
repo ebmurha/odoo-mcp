@@ -22,8 +22,7 @@ def test_release_metadata_is_consistent_and_installable() -> None:
     assert registry["icons"] == [
         {
             "src": (
-                "https://raw.githubusercontent.com/ebmurha/odoo-mcp/"
-                "main/assets/odoo-mcp-logo.png"
+                "https://raw.githubusercontent.com/ebmurha/odoo-mcp/main/assets/odoo-mcp-logo.png"
             ),
             "mimeType": "image/png",
             "sizes": ["256x256"],

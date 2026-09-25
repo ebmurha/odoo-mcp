@@ -99,9 +99,7 @@ from odoo_mcp.workflows.accounting.reports import (
 )
 from odoo_mcp.workflows.core.capabilities import get_erp_capabilities
 
-SERVER_ICON_URL = (
-    "https://raw.githubusercontent.com/ebmurha/odoo-mcp/main/assets/odoo-mcp-logo.png"
-)
+SERVER_ICON_URL = "https://raw.githubusercontent.com/ebmurha/odoo-mcp/main/assets/odoo-mcp-logo.png"
 AdapterFactory = Callable[[object], Awaitable[OdooAdapter]]
 ReportResponse: TypeAlias = (
     TrialBalanceResponse
