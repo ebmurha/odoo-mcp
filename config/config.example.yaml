@@ -30,4 +30,8 @@ permissions:
     - get_employee_payroll_context
     - list_salary_rules
     - get_attendance_summary
+    - compare_payroll_periods
+    - analyze_employee_payroll_change
+    - detect_payroll_anomalies
+    - explain_payslip
   payroll_draft_write: []

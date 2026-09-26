@@ -19,6 +19,10 @@ from odoo_mcp.mcp.error_codes import ErrorCode, ErrorResponse, OdooMcpError
 from odoo_mcp.mcp.payroll_schemas import (
     DEFAULT_PAYROLL_STATES,
     DEFAULT_WORK_ENTRY_STATES,
+    AnalyzeEmployeePayrollChangeInput,
+    ComparePayrollPeriodsInput,
+    DetectPayrollAnomaliesInput,
+    ExplainPayslipInput,
     GetAttendanceSummaryInput,
     GetAttendanceSummaryResponse,
     GetEmployeePayrollContextInput,
@@ -34,12 +38,20 @@ from odoo_mcp.mcp.payroll_schemas import (
     PayrollCursor,
     PayrollEvidenceResponse,
     PayrollLimit,
+    PayrollPeriodRange,
     PayrollToolResponse,
     PositiveIdentifier,
+    ThresholdProfile,
 )
 from odoo_mcp.mcp.registry import ToolDefinition, get_tool_definition
 from odoo_mcp.mcp.request_ids import new_request_id
 from odoo_mcp.storage import AuditEvent, Storage
+from odoo_mcp.workflows.payroll.analysis import (
+    analyze_employee_payroll_change,
+    compare_payroll_periods,
+    detect_payroll_anomalies,
+    explain_payslip,
+)
 from odoo_mcp.workflows.payroll.evidence import (
     get_attendance_summary,
     get_employee_payroll_context,
@@ -54,6 +66,7 @@ AdapterFactory = Callable[[object], Awaitable[OdooAdapter]]
 PayrollOperation = Callable[[OdooAdapter, str, datetime], Awaitable[PayrollEvidenceResponse]]
 EmployeeIds = Annotated[tuple[int, ...], Field(max_length=100)]
 RequiredEmployeeIds = Annotated[tuple[int, ...], Field(min_length=1, max_length=100)]
+HistoryPeriods = Annotated[tuple[PayrollPeriodRange, ...], Field(max_length=12)]
 
 LOGGER = logging.getLogger(__name__)
 
@@ -75,6 +88,8 @@ def _safe_input(
     payslip_filter_count: int = 0,
     period_filter_count: int = 0,
     continuation_requested: bool = False,
+    comparison_requested: bool = False,
+    history_requested: bool = False,
 ) -> dict[str, object]:
     return {
         "query_kind": query_kind,
@@ -83,20 +98,29 @@ def _safe_input(
         "batch_filter_count": batch_filter_count,
         "payslip_filter_count": payslip_filter_count,
         "period_filter_count": period_filter_count,
-        "comparison_requested": False,
-        "history_requested": False,
+        "comparison_requested": comparison_requested,
+        "history_requested": history_requested,
         "continuation_requested": continuation_requested,
     }
 
 
 def _audit_input(definition: ToolDefinition, request: object) -> dict[str, object]:
-    states = tuple(str(value) for value in getattr(request, "states", ()))
+    states = (
+        DEFAULT_PAYROLL_STATES
+        if isinstance(request, AnalyzeEmployeePayrollChangeInput)
+        else tuple(str(value) for value in getattr(request, "states", ()))
+    )
     employee_ids = tuple(getattr(request, "employee_ids", ()))
     return _safe_input(
         definition.name,
         states=states,
         employee_filter_count=(
-            1 if isinstance(request, GetEmployeePayrollContextInput) else len(employee_ids)
+            1
+            if isinstance(
+                request,
+                (GetEmployeePayrollContextInput, AnalyzeEmployeePayrollChangeInput),
+            )
+            else len(employee_ids)
         ),
         batch_filter_count=(
             1
@@ -104,9 +128,18 @@ def _audit_input(definition: ToolDefinition, request: object) -> dict[str, objec
             or getattr(request, "batch_id", None) is not None
             else 0
         ),
-        payslip_filter_count=1 if isinstance(request, GetPayslipInput) else 0,
+        payslip_filter_count=(
+            1 if isinstance(request, (GetPayslipInput, ExplainPayslipInput)) else 0
+        ),
         period_filter_count=(
-            1
+            2 + len(request.history_periods)
+            if isinstance(request, DetectPayrollAnomaliesInput)
+            else 2
+            if isinstance(
+                request,
+                (ComparePayrollPeriodsInput, AnalyzeEmployeePayrollChangeInput),
+            )
+            else 1
             if isinstance(
                 request,
                 (
@@ -119,6 +152,19 @@ def _audit_input(definition: ToolDefinition, request: object) -> dict[str, objec
             else 0
         ),
         continuation_requested=getattr(request, "cursor", None) is not None,
+        comparison_requested=isinstance(
+            request,
+            (
+                ComparePayrollPeriodsInput,
+                AnalyzeEmployeePayrollChangeInput,
+                DetectPayrollAnomaliesInput,
+            ),
+        ),
+        history_requested=(
+            bool(request.history_periods)
+            if isinstance(request, DetectPayrollAnomaliesInput)
+            else False
+        ),
     )
 
 
@@ -133,6 +179,7 @@ def _result_projection(
         has_more = False
         limitations: list[str] = []
     else:
+        findings = getattr(response, "findings", None)
         if isinstance(
             response,
             (
@@ -145,6 +192,9 @@ def _result_projection(
         ):
             item_count = len(response.items)
             has_more = response.next_cursor is not None
+        elif isinstance(findings, list):
+            item_count = len(findings)
+            has_more = False
         else:
             item_count = 1
             has_more = False
@@ -205,7 +255,7 @@ def register_payroll_tools(
     adapter_factory: AdapterFactory,
     storage: Storage | None,
 ) -> None:
-    """Register the seven read-only Payroll evidence tools."""
+    """Register the read-only Payroll evidence and analysis tools."""
 
     async def invalid_request(
         definition: ToolDefinition,
@@ -762,5 +812,212 @@ def register_payroll_tools(
         description=attendance_definition.description,
         annotations=attendance_definition.annotations,
         meta=attendance_definition.protocol_meta(),
+        structured_output=True,
+    )
+
+    compare_definition = get_tool_definition("compare_payroll_periods")
+
+    async def compare_payroll_periods_tool(
+        baseline_period: PayrollPeriodRange,
+        target_period: PayrollPeriodRange,
+        company_id: PositiveIdentifier,
+        employee_ids: EmployeeIds = (),
+        states: tuple[PayrollState, ...] = DEFAULT_PAYROLL_STATES,
+    ) -> PayrollToolResponse:
+        safe = _safe_input(
+            compare_definition.name,
+            states=tuple(states),
+            employee_filter_count=len(employee_ids),
+            period_filter_count=2,
+            comparison_requested=True,
+        )
+        try:
+            request = ComparePayrollPeriodsInput(
+                company_id=company_id,
+                baseline_period=baseline_period,
+                target_period=target_period,
+                employee_ids=employee_ids,
+                states=states,
+            )
+        except ValidationError:
+            return await invalid_request(compare_definition, company_id, safe)
+
+        async def operation(
+            adapter: OdooAdapter, request_id: str, observed_at: datetime
+        ) -> PayrollEvidenceResponse:
+            return await compare_payroll_periods(
+                adapter,
+                request,
+                request_id=request_id,
+                observed_at=observed_at,
+            )
+
+        return await run(
+            compare_definition,
+            request.company_id,
+            _audit_input(compare_definition, request),
+            operation,
+        )
+
+    server.add_tool(
+        compare_payroll_periods_tool,
+        name=compare_definition.name,
+        title=compare_definition.title,
+        description=compare_definition.description,
+        annotations=compare_definition.annotations,
+        meta=compare_definition.protocol_meta(),
+        structured_output=True,
+    )
+
+    employee_analysis_definition = get_tool_definition("analyze_employee_payroll_change")
+
+    async def analyze_employee_payroll_change_tool(
+        employee_id: PositiveIdentifier,
+        baseline_period: PayrollPeriodRange,
+        target_period: PayrollPeriodRange,
+        company_id: PositiveIdentifier,
+    ) -> PayrollToolResponse:
+        safe = _safe_input(
+            employee_analysis_definition.name,
+            states=DEFAULT_PAYROLL_STATES,
+            employee_filter_count=1,
+            period_filter_count=2,
+            comparison_requested=True,
+        )
+        try:
+            request = AnalyzeEmployeePayrollChangeInput(
+                company_id=company_id,
+                employee_id=employee_id,
+                baseline_period=baseline_period,
+                target_period=target_period,
+            )
+        except ValidationError:
+            return await invalid_request(employee_analysis_definition, company_id, safe)
+
+        async def operation(
+            adapter: OdooAdapter, request_id: str, observed_at: datetime
+        ) -> PayrollEvidenceResponse:
+            return await analyze_employee_payroll_change(
+                adapter,
+                request,
+                request_id=request_id,
+                observed_at=observed_at,
+            )
+
+        return await run(
+            employee_analysis_definition,
+            request.company_id,
+            _audit_input(employee_analysis_definition, request),
+            operation,
+        )
+
+    server.add_tool(
+        analyze_employee_payroll_change_tool,
+        name=employee_analysis_definition.name,
+        title=employee_analysis_definition.title,
+        description=employee_analysis_definition.description,
+        annotations=employee_analysis_definition.annotations,
+        meta=employee_analysis_definition.protocol_meta(),
+        structured_output=True,
+    )
+
+    anomalies_definition = get_tool_definition("detect_payroll_anomalies")
+
+    async def detect_payroll_anomalies_tool(
+        baseline_period: PayrollPeriodRange,
+        target_period: PayrollPeriodRange,
+        company_id: PositiveIdentifier,
+        history_periods: HistoryPeriods = (),
+        employee_ids: EmployeeIds = (),
+        states: tuple[PayrollState, ...] = DEFAULT_PAYROLL_STATES,
+        threshold_profile: ThresholdProfile = "standard",
+    ) -> PayrollToolResponse:
+        safe = _safe_input(
+            anomalies_definition.name,
+            states=tuple(states),
+            employee_filter_count=len(employee_ids),
+            period_filter_count=2 + len(history_periods),
+            comparison_requested=True,
+            history_requested=bool(history_periods),
+        )
+        try:
+            request = DetectPayrollAnomaliesInput(
+                company_id=company_id,
+                baseline_period=baseline_period,
+                target_period=target_period,
+                history_periods=history_periods,
+                employee_ids=employee_ids,
+                states=states,
+                threshold_profile=threshold_profile,
+            )
+        except ValidationError:
+            return await invalid_request(anomalies_definition, company_id, safe)
+
+        async def operation(
+            adapter: OdooAdapter, request_id: str, observed_at: datetime
+        ) -> PayrollEvidenceResponse:
+            return await detect_payroll_anomalies(
+                adapter,
+                request,
+                request_id=request_id,
+                observed_at=observed_at,
+            )
+
+        return await run(
+            anomalies_definition,
+            request.company_id,
+            _audit_input(anomalies_definition, request),
+            operation,
+        )
+
+    server.add_tool(
+        detect_payroll_anomalies_tool,
+        name=anomalies_definition.name,
+        title=anomalies_definition.title,
+        description=anomalies_definition.description,
+        annotations=anomalies_definition.annotations,
+        meta=anomalies_definition.protocol_meta(),
+        structured_output=True,
+    )
+
+    explain_definition = get_tool_definition("explain_payslip")
+
+    async def explain_payslip_tool(
+        payslip_id: PositiveIdentifier,
+        company_id: PositiveIdentifier,
+    ) -> PayrollToolResponse:
+        safe = _safe_input(explain_definition.name, payslip_filter_count=1)
+        try:
+            request = ExplainPayslipInput(
+                company_id=company_id,
+                payslip_id=payslip_id,
+            )
+        except ValidationError:
+            return await invalid_request(explain_definition, company_id, safe)
+
+        async def operation(
+            adapter: OdooAdapter, request_id: str, observed_at: datetime
+        ) -> PayrollEvidenceResponse:
+            return await explain_payslip(
+                adapter,
+                request,
+                request_id=request_id,
+                observed_at=observed_at,
+            )
+
+        return await run(
+            explain_definition,
+            request.company_id,
+            _audit_input(explain_definition, request),
+            operation,
+        )
+
+    server.add_tool(
+        explain_payslip_tool,
+        name=explain_definition.name,
+        title=explain_definition.title,
+        description=explain_definition.description,
+        annotations=explain_definition.annotations,
+        meta=explain_definition.protocol_meta(),
         structured_output=True,
     )

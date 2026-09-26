@@ -17,6 +17,10 @@ from odoo_mcp.app.settings import DeploymentProfile, OdooConnectionSettings
 from odoo_mcp.mcp.error_codes import ErrorCode, OdooMcpError
 from odoo_mcp.mcp.payroll import _audit_input
 from odoo_mcp.mcp.payroll_schemas import (
+    AnalyzeEmployeePayrollChangeInput,
+    ComparePayrollPeriodsInput,
+    DetectPayrollAnomaliesInput,
+    ExplainPayslipInput,
     GetAttendanceSummaryInput,
     GetEmployeePayrollContextInput,
     GetPayrollBatchInput,
@@ -24,6 +28,7 @@ from odoo_mcp.mcp.payroll_schemas import (
     ListPayrollPeriodsInput,
     ListPayslipsInput,
     ListSalaryRulesInput,
+    PayrollPeriodRange,
 )
 from odoo_mcp.mcp.registry import get_tool_definition
 from odoo_mcp.mcp.server import create_mcp_server
@@ -361,11 +366,27 @@ async def test_capability_discovery_reports_only_registered_payroll_tools(
             "get_employee_payroll_context",
             "list_salary_rules",
             "get_attendance_summary",
+            "compare_payroll_periods",
+            "analyze_employee_payroll_change",
+            "detect_payroll_anomalies",
+            "explain_payslip",
         ]
     )
 
 
 def test_every_payroll_read_uses_identifier_free_audit_input_projection() -> None:
+    baseline = PayrollPeriodRange(
+        period_start=date(2041, 2, 1),
+        period_end=date(2041, 2, 28),
+    )
+    target = PayrollPeriodRange(
+        period_start=date(2042, 2, 1),
+        period_end=date(2042, 2, 28),
+    )
+    history = PayrollPeriodRange(
+        period_start=date(2040, 2, 1),
+        period_end=date(2040, 2, 29),
+    )
     requests = {
         "list_payroll_periods": ListPayrollPeriodsInput(
             company_id=1,
@@ -406,17 +427,48 @@ def test_every_payroll_read_uses_identifier_free_audit_input_projection() -> Non
             period_end=date(2042, 2, 28),
             cursor="private-work-entry-cursor",
         ),
+        "compare_payroll_periods": ComparePayrollPeriodsInput(
+            company_id=1,
+            baseline_period=baseline,
+            target_period=target,
+            employee_ids=(456_789,),
+        ),
+        "analyze_employee_payroll_change": AnalyzeEmployeePayrollChangeInput(
+            company_id=1,
+            employee_id=456_789,
+            baseline_period=baseline,
+            target_period=target,
+        ),
+        "detect_payroll_anomalies": DetectPayrollAnomaliesInput(
+            company_id=1,
+            baseline_period=baseline,
+            target_period=target,
+            history_periods=(history,),
+            employee_ids=(456_789,),
+        ),
+        "explain_payslip": ExplainPayslipInput(company_id=1, payslip_id=345_678),
     }
 
     for name, request in requests.items():
         projection = _audit_input(get_tool_definition(name), request)
         encoded = json.dumps(projection, sort_keys=True)
         assert projection["query_kind"] == name
-        assert projection["comparison_requested"] is False
-        assert projection["history_requested"] is False
+        assert projection["comparison_requested"] is (
+            name
+            in {
+                "compare_payroll_periods",
+                "analyze_employee_payroll_change",
+                "detect_payroll_anomalies",
+            }
+        )
+        assert projection["history_requested"] is (name == "detect_payroll_anomalies")
+        if name == "analyze_employee_payroll_change":
+            assert projection["normalized_states"] == ["waiting", "done", "paid"]
         for forbidden in (
             "2042-02-01",
             "2042-02-28",
+            "2041-02-01",
+            "2040-02-01",
             "987654",
             "456789",
             "345678",

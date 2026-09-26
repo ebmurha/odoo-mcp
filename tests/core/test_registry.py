@@ -114,6 +114,10 @@ async def test_all_profiles_expose_identical_registry_and_discovery(
         "get_employee_payroll_context",
         "list_salary_rules",
         "get_attendance_summary",
+        "compare_payroll_periods",
+        "analyze_employee_payroll_change",
+        "detect_payroll_anomalies",
+        "explain_payslip",
     ]
     for output in outputs:
         output.pop("request_id")
@@ -131,8 +135,8 @@ async def test_registry_metadata_and_schemas_match_the_contract(
     server = create_mcp_server(Resolver(_binding(DeploymentProfile.LOCAL, connection)))
     tools = await server.list_tools()
 
-    assert len(TOOL_REGISTRY) == 27
-    assert len(tools) == 27
+    assert len(TOOL_REGISTRY) == 31
+    assert len(tools) == 31
     assert [tool.name for tool in tools] == [definition.name for definition in TOOL_REGISTRY]
     for tool, definition in zip(tools, TOOL_REGISTRY, strict=True):
         assert tool.input_schema["type"] == "object"
@@ -205,6 +209,23 @@ async def test_registry_metadata_and_schemas_match_the_contract(
         "period_end",
         "company_id",
     }
+    assert set(tools[27].input_schema["required"]) == {
+        "baseline_period",
+        "target_period",
+        "company_id",
+    }
+    assert set(tools[28].input_schema["required"]) == {
+        "employee_id",
+        "baseline_period",
+        "target_period",
+        "company_id",
+    }
+    assert set(tools[29].input_schema["required"]) == {
+        "baseline_period",
+        "target_period",
+        "company_id",
+    }
+    assert set(tools[30].input_schema["required"]) == {"payslip_id", "company_id"}
     assert all(tool.annotations.read_only_hint is True for tool in tools[20:])
     assert all("dry_run" not in tool.input_schema["properties"] for tool in tools[20:])
 
@@ -298,6 +319,10 @@ def test_public_permission_example_matches_registry() -> None:
             "get_employee_payroll_context",
             "list_salary_rules",
             "get_attendance_summary",
+            "compare_payroll_periods",
+            "analyze_employee_payroll_change",
+            "detect_payroll_anomalies",
+            "explain_payslip",
         },
         "payroll_draft_write": set(),
     }

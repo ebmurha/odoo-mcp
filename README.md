@@ -7,7 +7,7 @@ read-only capability discovery, trial-balance reporting, aged receivables and
 payables reporting, cashbook visibility, unmatched bank-line detection, and
 proposal-only bank reconciliation. It also exposes bounded, read-only Payroll
 evidence for exact periods, batches, payslips, employees, salary rules, and
-payroll work entries.
+payroll work entries, plus deterministic Payroll comparison and anomaly review.
 
 The initial accounting release also supports bounded invoice, supplier-bill,
 credit-note, payment-registration, and manual-journal workflows. Mutating tools
@@ -229,12 +229,29 @@ fail explicitly instead of being guessed.
 - `get_attendance_summary` summarizes Payroll work entries by employee, type,
   code, and state. It does not read raw attendance or claim proof of physical
   attendance.
+- `compare_payroll_periods` compares exact employee sets, contract facts,
+  work-entry hours, and currency-partitioned observed line, rule, and category
+  totals across two non-overlapping periods.
+- `analyze_employee_payroll_change` separates directly observed changes from
+  correlations and unresolved causes for one exact employee.
+- `detect_payroll_anomalies` applies fixed public percentage thresholds and an
+  optional request-time modified-z-score check. It does not learn or retain a
+  customer baseline; its source-linked Markdown summary is returned inline and
+  is not stored as an artifact. The percentage thresholds are 5% (`strict`),
+  10% (`standard`), and 20% (`relaxed`). Statistical checks require six
+  comparable history values and an absolute modified z-score of at least 3.5;
+  fewer values or a zero median absolute deviation is reported as unavailable.
+- `explain_payslip` organizes Odoo-returned line arithmetic, categories,
+  worked-day evidence, and contract context without evaluating salary-rule
+  code or reproducing gross-to-net calculation.
 
 These tools require `payroll_read` and the accessible Odoo Payroll capability.
 They are read-only, use request-bound pagination, return Odoo source IDs, and
 store only non-sensitive invocation metadata in the audit chain. Payroll
 responses are not persisted as artifacts, proposals, idempotency records, or
-workflow state.
+workflow state. Monetary comparisons never combine or convert currencies;
+recognized `BASIC`, `GROSS`, and `NET` totals require those exact Odoo rule
+codes, and employer cost remains explicitly unavailable.
 
 ## Verification
 

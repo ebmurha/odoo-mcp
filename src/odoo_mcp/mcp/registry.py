@@ -511,6 +511,75 @@ TOOL_REGISTRY: tuple[ToolDefinition, ...] = (
             open_world_hint=True,
         ),
     ),
+    ToolDefinition(
+        name="compare_payroll_periods",
+        version="1.0.0",
+        title="Compare payroll periods",
+        description=(
+            "Compare two exact payroll periods using current, source-linked Odoo evidence."
+        ),
+        risk_level="read",
+        required_permission="payroll_read",
+        required_capability="hr_payroll",
+        annotations=ToolAnnotations(
+            read_only_hint=True,
+            destructive_hint=False,
+            idempotent_hint=True,
+            open_world_hint=True,
+        ),
+    ),
+    ToolDefinition(
+        name="analyze_employee_payroll_change",
+        version="1.0.0",
+        title="Analyze employee payroll change",
+        description=(
+            "Analyze one employee's exact line, contract, and work-entry changes across periods."
+        ),
+        risk_level="read",
+        required_permission="payroll_read",
+        required_capability="hr_payroll",
+        annotations=ToolAnnotations(
+            read_only_hint=True,
+            destructive_hint=False,
+            idempotent_hint=True,
+            open_world_hint=True,
+        ),
+    ),
+    ToolDefinition(
+        name="detect_payroll_anomalies",
+        version="1.0.0",
+        title="Detect payroll anomalies",
+        description=(
+            "Apply fixed, explainable thresholds and optional request-time history "
+            "to payroll evidence."
+        ),
+        risk_level="read",
+        required_permission="payroll_read",
+        required_capability="hr_payroll",
+        annotations=ToolAnnotations(
+            read_only_hint=True,
+            destructive_hint=False,
+            idempotent_hint=True,
+            open_world_hint=True,
+        ),
+    ),
+    ToolDefinition(
+        name="explain_payslip",
+        version="1.0.0",
+        title="Explain payslip evidence",
+        description=(
+            "Organize one exact payslip's Odoo-returned lines and context without recalculating it."
+        ),
+        risk_level="read",
+        required_permission="payroll_read",
+        required_capability="hr_payroll",
+        annotations=ToolAnnotations(
+            read_only_hint=True,
+            destructive_hint=False,
+            idempotent_hint=True,
+            open_world_hint=True,
+        ),
+    ),
 )
 
 

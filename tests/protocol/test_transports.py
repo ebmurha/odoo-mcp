@@ -157,6 +157,10 @@ def test_streamable_http_lists_the_shared_registry(
         "get_employee_payroll_context",
         "list_salary_rules",
         "get_attendance_summary",
+        "compare_payroll_periods",
+        "analyze_employee_payroll_change",
+        "detect_payroll_anomalies",
+        "explain_payslip",
     ]
     assert called.status_code == 200
     assert called.json()["result"]["structuredContent"]["status"] == "ok"
@@ -317,4 +321,8 @@ async def test_stdio_profile_lists_the_shared_registry(tmp_path) -> None:
         "get_employee_payroll_context",
         "list_salary_rules",
         "get_attendance_summary",
+        "compare_payroll_periods",
+        "analyze_employee_payroll_change",
+        "detect_payroll_anomalies",
+        "explain_payslip",
     ]

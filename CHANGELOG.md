@@ -8,6 +8,8 @@ All notable public changes are documented here.
   pagination, structured evidence, and Markdown output.
 - Add bounded, source-linked Payroll evidence access with Odoo 18/19 normalized
   adapter support and metadata-only auditing.
+- Add deterministic Payroll period comparison, employee change analysis,
+  fixed-threshold anomaly detection, and evidence-only payslip explanation.
 
 ## 0.1.0
 

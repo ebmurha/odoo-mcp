@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import date, datetime
 from decimal import Decimal
+from itertools import pairwise
 from typing import Annotated, Literal, TypeAlias
 
 from pydantic import (
@@ -36,6 +37,7 @@ DEFAULT_WORK_ENTRY_STATES: tuple[PayrollWorkEntryState, ...] = (
     "conflict",
     "validated",
 )
+ThresholdProfile = Literal["strict", "standard", "relaxed"]
 
 
 class PayrollSchema(BaseModel):
@@ -188,6 +190,84 @@ class GetAttendanceSummaryInput(PayrollListInput):
         _validate_unique(self.employee_ids, "employee_ids")
         _validate_unique(self.states, "states")
         return self
+
+
+class PayrollPeriodRange(PayrollSchema):
+    period_start: date
+    period_end: date
+
+    @model_validator(mode="after")
+    def validate_period(self) -> PayrollPeriodRange:
+        _validate_period(self.period_start, self.period_end)
+        return self
+
+
+def _validate_comparison_periods(
+    baseline: PayrollPeriodRange,
+    target: PayrollPeriodRange,
+) -> None:
+    if baseline.period_end >= target.period_start:
+        raise ValueError("baseline_period must end before target_period starts")
+
+
+class ComparePayrollPeriodsInput(PayrollSchema):
+    company_id: PositiveIdentifier
+    baseline_period: PayrollPeriodRange
+    target_period: PayrollPeriodRange
+    employee_ids: tuple[PositiveIdentifier, ...] = Field(default=(), max_length=100)
+    states: tuple[PayrollState, ...] = DEFAULT_PAYROLL_STATES
+
+    @field_validator("states", mode="before")
+    @classmethod
+    def normalize_default_states(cls, value: object) -> object:
+        return DEFAULT_PAYROLL_STATES if value in (None, (), []) else value
+
+    @model_validator(mode="after")
+    def validate_filters(self) -> ComparePayrollPeriodsInput:
+        _validate_comparison_periods(self.baseline_period, self.target_period)
+        _validate_unique(self.employee_ids, "employee_ids")
+        _validate_unique(self.states, "states")
+        return self
+
+
+class AnalyzeEmployeePayrollChangeInput(PayrollSchema):
+    company_id: PositiveIdentifier
+    employee_id: PositiveIdentifier
+    baseline_period: PayrollPeriodRange
+    target_period: PayrollPeriodRange
+
+    @model_validator(mode="after")
+    def validate_periods(self) -> AnalyzeEmployeePayrollChangeInput:
+        _validate_comparison_periods(self.baseline_period, self.target_period)
+        return self
+
+
+class DetectPayrollAnomaliesInput(ComparePayrollPeriodsInput):
+    history_periods: tuple[PayrollPeriodRange, ...] = Field(default=(), max_length=12)
+    threshold_profile: ThresholdProfile = "standard"
+
+    @model_validator(mode="after")
+    def validate_history(self) -> DetectPayrollAnomaliesInput:
+        ranges = sorted(
+            (
+                period.period_start,
+                period.period_end,
+            )
+            for period in self.history_periods
+        )
+        if len(ranges) != len(set(ranges)):
+            raise ValueError("history_periods must not contain duplicates")
+        if any(period_end >= self.baseline_period.period_start for _, period_end in ranges):
+            raise ValueError("history_periods must end before baseline_period starts")
+        for previous, current in pairwise(ranges):
+            if previous[1] >= current[0]:
+                raise ValueError("history_periods must not overlap")
+        return self
+
+
+class ExplainPayslipInput(PayrollSchema):
+    company_id: PositiveIdentifier
+    payslip_id: PositiveIdentifier
 
 
 class PayrollNamedReference(PayrollSchema):
@@ -384,6 +464,190 @@ class AttendanceSummary(PayrollSchema):
     has_more: bool
 
 
+PayrollChangeKind = Literal[
+    "unchanged",
+    "increased",
+    "decreased",
+    "added",
+    "removed",
+    "unavailable",
+]
+PayrollFindingCode = Literal[
+    "new_employee",
+    "missing_employee",
+    "employee_count_change",
+    "contract_change",
+    "rule_line_added",
+    "rule_line_removed",
+    "currency_change",
+    "monetary_deviation",
+    "hours_deviation",
+    "work_entry_conflict",
+    "statistical_deviation",
+]
+PayrollFindingSeverity = Literal["info", "review", "critical"]
+
+
+class PayrollCountComparison(PayrollSchema):
+    baseline: int = Field(ge=0)
+    target: int = Field(ge=0)
+    absolute_delta: int
+    percentage_delta: Decimal | None
+    change: PayrollChangeKind
+
+
+class PayrollDecimalComparison(PayrollSchema):
+    baseline: Decimal
+    target: Decimal
+    absolute_delta: Decimal
+    percentage_delta: Decimal | None
+    change: PayrollChangeKind
+
+
+class PayrollEmployeeSetChanges(PayrollSchema):
+    new_employees: list[PayrollNamedReference]
+    missing_employees: list[PayrollNamedReference]
+    common_employees: list[PayrollNamedReference]
+
+
+class PayrollPayslipTotalComparison(PayrollSchema):
+    employee: PayrollNamedReference
+    currency: PayrollCurrencyReference
+    baseline_payslip_ids: tuple[PositiveIdentifier, ...]
+    target_payslip_ids: tuple[PositiveIdentifier, ...]
+    observed_line_total: PayrollDecimalComparison
+    source_refs: list[PayrollSourceReference]
+
+
+class PayrollRuleTotalComparison(PayrollSchema):
+    currency: PayrollCurrencyReference
+    salary_rule: PayrollNamedReference
+    code: str
+    category: PayrollNamedReference
+    total: PayrollDecimalComparison
+    source_refs: list[PayrollSourceReference]
+
+
+class PayrollCategoryTotalComparison(PayrollSchema):
+    currency: PayrollCurrencyReference
+    category: PayrollNamedReference
+    total: PayrollDecimalComparison
+    source_refs: list[PayrollSourceReference]
+
+
+class PayrollRecognizedCurrencyTotal(PayrollSchema):
+    currency: PayrollCurrencyReference
+    total: Decimal
+    source_refs: list[PayrollSourceReference]
+
+
+class PayrollRecognizedPeriodValue(PayrollSchema):
+    status: Literal["available", "unavailable"]
+    values: list[PayrollRecognizedCurrencyTotal]
+    reason: str | None = None
+
+    @model_validator(mode="after")
+    def validate_availability(self) -> PayrollRecognizedPeriodValue:
+        if self.status == "available" and (not self.values or self.reason is not None):
+            raise ValueError("available recognized totals require values only")
+        if self.status == "unavailable" and (self.values or self.reason is None):
+            raise ValueError("unavailable recognized totals require a reason only")
+        return self
+
+
+class PayrollRecognizedRuleComparison(PayrollSchema):
+    code: Literal["BASIC", "GROSS", "NET"]
+    recognition_basis: Literal["exact_rule_code"] = "exact_rule_code"
+    baseline: PayrollRecognizedPeriodValue
+    target: PayrollRecognizedPeriodValue
+
+
+class PayrollRecognizedRuleValue(PayrollSchema):
+    code: Literal["BASIC", "GROSS", "NET"]
+    recognition_basis: Literal["exact_rule_code"] = "exact_rule_code"
+    value: PayrollRecognizedPeriodValue
+
+
+class PayrollUnavailableMetric(PayrollSchema):
+    status: Literal["unavailable"] = "unavailable"
+    reason: str
+
+
+class PayrollEvidenceChange(PayrollSchema):
+    fact: str
+    baseline_value: str | None
+    target_value: str | None
+    source_refs: list[PayrollSourceReference]
+
+
+class PayrollContractFactChange(PayrollEvidenceChange):
+    employee: PayrollNamedReference
+
+
+class PayrollLineChange(PayrollSchema):
+    employee: PayrollNamedReference
+    currency: PayrollCurrencyReference | None
+    salary_rule: PayrollNamedReference
+    code: str
+    category: PayrollNamedReference
+    baseline_total: Decimal | None
+    target_total: Decimal | None
+    absolute_delta: Decimal | None
+    percentage_delta: Decimal | None
+    change: PayrollChangeKind
+    source_refs: list[PayrollSourceReference]
+    limitations: list[str]
+
+
+class PayrollWorkEntryHoursComparison(PayrollSchema):
+    employee: PayrollNamedReference
+    work_entry_type: PayrollNamedReference
+    code: str
+    hours: PayrollDecimalComparison
+    conflict_count: int = Field(ge=0)
+    source_refs: list[PayrollSourceReference]
+
+
+class PayrollFinding(PayrollSchema):
+    finding_code: PayrollFindingCode
+    severity: PayrollFindingSeverity
+    employee: PayrollNamedReference | None
+    baseline_period: PayrollPeriodRange
+    target_period: PayrollPeriodRange
+    currency: PayrollCurrencyReference | None
+    salary_rule: PayrollNamedReference | None
+    code: str | None
+    baseline_value: str | None
+    target_value: str | None
+    absolute_delta: Decimal | None
+    percentage_delta: Decimal | None
+    observed_delta: Decimal | None
+    calculation: str
+    rule: str
+    threshold: Decimal | None
+    threshold_profile: ThresholdProfile | None
+    source_refs: list[PayrollSourceReference]
+    evidence: list[PayrollEvidenceChange]
+    correlations: list[PayrollEvidenceChange]
+    limitations: list[str]
+
+
+class PayrollExplanationGroup(PayrollSchema):
+    category: PayrollNamedReference
+    currency: PayrollCurrencyReference
+    observed_total: Decimal
+    lines: list[PayrollSalaryLineItem]
+
+
+class PayrollLineArithmetic(PayrollSchema):
+    source_line_id: PositiveIdentifier
+    quantity: Decimal
+    rate: Decimal
+    amount: Decimal
+    odoo_returned_total: Decimal
+    description: str
+
+
 class PayrollSuccess(PayrollSchema):
     status: Literal["ok"] = "ok"
     request_id: str
@@ -391,6 +655,59 @@ class PayrollSuccess(PayrollSchema):
     observed_at: datetime
     source_refs: list[PayrollSourceReference]
     limitations: list[str]
+
+
+class ComparePayrollPeriodsResponse(PayrollSuccess):
+    baseline_period: PayrollPeriodRange
+    target_period: PayrollPeriodRange
+    headcount: PayrollCountComparison
+    employee_changes: PayrollEmployeeSetChanges
+    payslip_totals: list[PayrollPayslipTotalComparison]
+    rule_totals: list[PayrollRuleTotalComparison]
+    category_totals: list[PayrollCategoryTotalComparison]
+    recognized_rule_totals: list[PayrollRecognizedRuleComparison]
+    employer_cost: PayrollUnavailableMetric
+    contract_changes: list[PayrollContractFactChange]
+    work_entry_hours: list[PayrollWorkEntryHoursComparison]
+    changed_employees: list[PayrollNamedReference]
+    findings: list[PayrollFinding]
+
+
+class AnalyzeEmployeePayrollChangeResponse(PayrollSuccess):
+    employee: PayrollNamedReference
+    baseline_period: PayrollPeriodRange
+    target_period: PayrollPeriodRange
+    baseline_payslips: list[CompactPayslip]
+    target_payslips: list[CompactPayslip]
+    line_changes: list[PayrollLineChange]
+    contract_changes: list[PayrollContractFactChange]
+    work_entry_hours: list[PayrollWorkEntryHoursComparison]
+    demonstrated_contributors: list[PayrollEvidenceChange]
+    correlations: list[PayrollEvidenceChange]
+    unresolved_causes: list[str]
+    findings: list[PayrollFinding]
+
+
+class DetectPayrollAnomaliesResponse(PayrollSuccess):
+    baseline_period: PayrollPeriodRange
+    target_period: PayrollPeriodRange
+    threshold_profile: ThresholdProfile
+    evaluated_employee_count: int = Field(ge=0)
+    statistical_period_count: int = Field(ge=0)
+    findings: list[PayrollFinding]
+    rendered_markdown: str
+
+
+class ExplainPayslipResponse(PayrollSuccess):
+    payslip: CompactPayslip
+    line_groups: list[PayrollExplanationGroup]
+    line_arithmetic: list[PayrollLineArithmetic]
+    worked_days: list[PayrollWorkedDayItem]
+    inputs: list[PayrollInputItem]
+    contract_segments: list[PayrollContractSegmentItem]
+    recognized_rule_totals: list[PayrollRecognizedRuleValue]
+    employer_cost: PayrollUnavailableMetric
+    missing_evidence: list[str]
 
 
 class ListPayrollPeriodsResponse(PayrollSuccess):
@@ -444,6 +761,10 @@ PayrollEvidenceResponse: TypeAlias = (
     | GetEmployeePayrollContextResponse
     | ListSalaryRulesResponse
     | GetAttendanceSummaryResponse
+    | ComparePayrollPeriodsResponse
+    | AnalyzeEmployeePayrollChangeResponse
+    | DetectPayrollAnomaliesResponse
+    | ExplainPayslipResponse
 )
 
 
@@ -473,8 +794,36 @@ class PayrollToolResponse(PayrollSchema):
     salary_lines: list[PayrollSalaryLineItem] | None = None
     worked_days: list[PayrollWorkedDayItem] | None = None
     inputs: list[PayrollInputItem] | None = None
-    employee: PayrollEmployeeDetails | None = None
+    employee: PayrollEmployeeDetails | PayrollNamedReference | None = None
     contract_segments: list[PayrollContractSegmentItem] | None = None
+    baseline_period: PayrollPeriodRange | None = None
+    target_period: PayrollPeriodRange | None = None
+    headcount: PayrollCountComparison | None = None
+    employee_changes: PayrollEmployeeSetChanges | None = None
+    payslip_totals: list[PayrollPayslipTotalComparison] | None = None
+    rule_totals: list[PayrollRuleTotalComparison] | None = None
+    category_totals: list[PayrollCategoryTotalComparison] | None = None
+    recognized_rule_totals: (
+        list[PayrollRecognizedRuleComparison] | list[PayrollRecognizedRuleValue] | None
+    ) = None
+    employer_cost: PayrollUnavailableMetric | None = None
+    contract_changes: list[PayrollContractFactChange] | None = None
+    work_entry_hours: list[PayrollWorkEntryHoursComparison] | None = None
+    changed_employees: list[PayrollNamedReference] | None = None
+    findings: list[PayrollFinding] | None = None
+    baseline_payslips: list[CompactPayslip] | None = None
+    target_payslips: list[CompactPayslip] | None = None
+    line_changes: list[PayrollLineChange] | None = None
+    demonstrated_contributors: list[PayrollEvidenceChange] | None = None
+    correlations: list[PayrollEvidenceChange] | None = None
+    unresolved_causes: list[str] | None = None
+    threshold_profile: ThresholdProfile | None = None
+    evaluated_employee_count: int | None = None
+    statistical_period_count: int | None = None
+    rendered_markdown: str | None = None
+    line_groups: list[PayrollExplanationGroup] | None = None
+    line_arithmetic: list[PayrollLineArithmetic] | None = None
+    missing_evidence: list[str] | None = None
     error_code: ErrorCode | None = None
     error_message: str | None = None
     remediation_hint: str | None = None
