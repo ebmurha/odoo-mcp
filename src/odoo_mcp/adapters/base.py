@@ -51,6 +51,7 @@ from odoo_mcp.adapters.payroll import (
     PayrollStructure,
     PayrollWorkEntry,
     PayrollWorkEntryFilters,
+    PayrollWriteCheckpoint,
     Payslip,
     PayslipChildFilters,
     PayslipFilters,
@@ -259,7 +260,10 @@ class OdooAdapter(Protocol):
     ) -> PayrollPage[PayrollWorkEntry]: ...
 
     async def create_draft_payslip_input(
-        self, company_id: int, payload: DraftPayslipInputCreate
+        self,
+        company_id: int,
+        payload: DraftPayslipInputCreate,
+        expected: PayrollWriteCheckpoint,
     ) -> PayslipInput: ...
 
     async def update_draft_payslip_input(
@@ -267,10 +271,20 @@ class OdooAdapter(Protocol):
         company_id: int,
         input_id: int,
         payload: DraftPayslipInputUpdate,
+        expected: PayrollWriteCheckpoint,
     ) -> PayslipInput: ...
 
     async def delete_draft_payslip_input(
-        self, company_id: int, input_id: int
+        self,
+        company_id: int,
+        payslip_id: int,
+        input_id: int,
+        expected: PayrollWriteCheckpoint,
     ) -> DeletedPayslipInput: ...
 
-    async def recompute_draft_payslip(self, company_id: int, payslip_id: int) -> Payslip: ...
+    async def recompute_draft_payslip(
+        self,
+        company_id: int,
+        payslip_id: int,
+        expected: PayrollWriteCheckpoint,
+    ) -> Payslip: ...

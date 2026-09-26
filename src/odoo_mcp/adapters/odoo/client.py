@@ -60,6 +60,7 @@ from odoo_mcp.adapters.payroll import (
     PayrollStructure,
     PayrollWorkEntry,
     PayrollWorkEntryFilters,
+    PayrollWriteCheckpoint,
     Payslip,
     PayslipChildFilters,
     PayslipFilters,
@@ -419,25 +420,42 @@ class OdooClient:
         return await self._payroll.get_payroll_work_entries(company_id, filters, page)
 
     async def create_draft_payslip_input(
-        self, company_id: int, payload: DraftPayslipInputCreate
+        self,
+        company_id: int,
+        payload: DraftPayslipInputCreate,
+        expected: PayrollWriteCheckpoint,
     ) -> PayslipInput:
-        return await self._payroll.create_draft_payslip_input(company_id, payload)
+        return await self._payroll.create_draft_payslip_input(company_id, payload, expected)
 
     async def update_draft_payslip_input(
         self,
         company_id: int,
         input_id: int,
         payload: DraftPayslipInputUpdate,
+        expected: PayrollWriteCheckpoint,
     ) -> PayslipInput:
-        return await self._payroll.update_draft_payslip_input(company_id, input_id, payload)
+        return await self._payroll.update_draft_payslip_input(
+            company_id, input_id, payload, expected
+        )
 
     async def delete_draft_payslip_input(
-        self, company_id: int, input_id: int
+        self,
+        company_id: int,
+        payslip_id: int,
+        input_id: int,
+        expected: PayrollWriteCheckpoint,
     ) -> DeletedPayslipInput:
-        return await self._payroll.delete_draft_payslip_input(company_id, input_id)
+        return await self._payroll.delete_draft_payslip_input(
+            company_id, payslip_id, input_id, expected
+        )
 
-    async def recompute_draft_payslip(self, company_id: int, payslip_id: int) -> Payslip:
-        return await self._payroll.recompute_draft_payslip(company_id, payslip_id)
+    async def recompute_draft_payslip(
+        self,
+        company_id: int,
+        payslip_id: int,
+        expected: PayrollWriteCheckpoint,
+    ) -> Payslip:
+        return await self._payroll.recompute_draft_payslip(company_id, payslip_id, expected)
 
     async def verify_payroll_schema(self, company_id: int) -> None:
         """Run the fixed, read-only Payroll schema qualification."""

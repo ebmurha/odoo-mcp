@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
@@ -25,6 +26,7 @@ from odoo_mcp.adapters.payroll import (
     PayrollPage,
     PayrollPageRequest,
     PayrollStructure,
+    PayrollWriteCheckpoint,
     PayrollWriteRejected,
     Payslip,
     PayslipChildFilters,
@@ -284,10 +286,40 @@ class PayrollWriteAdapter:
         if self.state.unknown_failure:
             raise RuntimeError("synthetic uncertain transport outcome")
 
+    def _require_checkpoint(
+        self,
+        expected: PayrollWriteCheckpoint,
+        *,
+        payslip_id: int,
+    ) -> None:
+        observed = PayrollWriteCheckpoint(
+            version=self.state.version,
+            payslip=self.state.payslip,
+            inputs=tuple(self.state.inputs),
+            employee=self.state.employee,
+            contract=self.state.contract,
+            structure=self.state.structure,
+            input_types=(self.state.input_type,) if expected.input_types else (),
+            calculated_lines=(),
+            worked_days=(),
+        )
+        if payslip_id != self.state.payslip.id or observed != expected:
+            raise PayrollWriteRejected(
+                OdooMcpError(
+                    ErrorCode.ODOO_STATE_CONFLICT,
+                    "The draft payslip changed after the write was prepared.",
+                    "Refresh the preview and retry with a new idempotency key.",
+                )
+            )
+
     async def create_draft_payslip_input(
-        self, company_id: int, payload: DraftPayslipInputCreate
+        self,
+        company_id: int,
+        payload: DraftPayslipInputCreate,
+        expected: PayrollWriteCheckpoint,
     ) -> PayslipInput:
         assert company_id == 1
+        self._require_checkpoint(expected, payslip_id=payload.payslip_id)
         await self._before_mutation()
         self.state.create_count += 1
         created = PayslipInput(
@@ -313,8 +345,10 @@ class PayrollWriteAdapter:
         company_id: int,
         input_id: int,
         payload: DraftPayslipInputUpdate,
+        expected: PayrollWriteCheckpoint,
     ) -> PayslipInput:
         assert company_id == 1
+        self._require_checkpoint(expected, payslip_id=payload.payslip_id)
         await self._before_mutation()
         self.state.update_count += 1
         current = next(item for item in self.state.inputs if item.id == input_id)
@@ -329,16 +363,36 @@ class PayrollWriteAdapter:
         return updated
 
     async def delete_draft_payslip_input(
-        self, company_id: int, input_id: int
+        self,
+        company_id: int,
+        payslip_id: int,
+        input_id: int,
+        expected: PayrollWriteCheckpoint,
     ) -> DeletedPayslipInput:
         assert company_id == 1
+        self._require_checkpoint(expected, payslip_id=payslip_id)
+        current = next(item for item in self.state.inputs if item.id == input_id)
+        if current.payslip.id != payslip_id:
+            raise PayrollWriteRejected(
+                OdooMcpError(
+                    ErrorCode.ODOO_STATE_CONFLICT,
+                    "The draft payslip changed after the write was prepared.",
+                    "Refresh the preview and retry with a new idempotency key.",
+                )
+            )
         await self._before_mutation()
         self.state.delete_count += 1
         self.state.inputs = [item for item in self.state.inputs if item.id != input_id]
-        return DeletedPayslipInput(id=input_id, payslip_id=101)
+        return DeletedPayslipInput(id=input_id, payslip_id=payslip_id)
 
-    async def recompute_draft_payslip(self, company_id: int, payslip_id: int) -> Payslip:
+    async def recompute_draft_payslip(
+        self,
+        company_id: int,
+        payslip_id: int,
+        expected: PayrollWriteCheckpoint,
+    ) -> Payslip:
         assert company_id == 1 and payslip_id == 101
+        self._require_checkpoint(expected, payslip_id=payslip_id)
         await self._before_mutation()
         self.state.recalculate_count += 1
         source_state = "verify" if self.state.version == 18 else "draft"
@@ -354,6 +408,21 @@ class PayrollWriteAdapter:
 
     async def close(self) -> None:
         return None
+
+
+def _existing_input(*, payslip_id: int = 101, amount: str = "25.125") -> PayslipInput:
+    return PayslipInput(
+        id=901,
+        name="Synthetic Existing Adjustment",
+        payslip=RelatedRecord(id=payslip_id, name=f"Synthetic Payslip {payslip_id}"),
+        sequence=10,
+        input_type=RelatedRecord(id=401, name="Synthetic Adjustment"),
+        code="SYN_ADJ",
+        amount=Decimal(amount),
+        contract_segment=RelatedRecord(id=301, name="Synthetic Contract"),
+        contract_source="hr.version",
+        write_date=STAMP,
+    )
 
 
 def _binding(
@@ -377,10 +446,16 @@ def _server(
     state: PayrollWriteState,
     *,
     permissions: frozenset[str] = frozenset({"payroll_draft_write"}),
+    before_execution_adapter: Callable[[PayrollWriteState], None] | None = None,
 ) -> tuple[object, Storage]:
     storage = Storage.open(path)
+    adapter_count = 0
 
     async def factory(_connection: object) -> OdooAdapter:
+        nonlocal adapter_count
+        adapter_count += 1
+        if adapter_count == 4 and before_execution_adapter is not None:
+            before_execution_adapter(state)
         return PayrollWriteAdapter(state)  # type: ignore[return-value]
 
     server = create_mcp_server(
@@ -494,6 +569,112 @@ async def test_version_specific_editable_sources_and_structure_anchor_race(
             plan,  # type: ignore[arg-type]
         )
     assert caught.value.code is ErrorCode.ODOO_STATE_CONFLICT
+
+
+@pytest.mark.parametrize("operation", ["create", "update", "recalculate"])
+async def test_intervening_state_change_before_execution_adapter_blocks_dispatch(
+    connection: OdooConnectionSettings,
+    tmp_path: Path,
+    operation: str,
+) -> None:
+    state = PayrollWriteState()
+    if operation == "update":
+        state.inputs = [_existing_input()]
+
+    def race(current: PayrollWriteState) -> None:
+        if operation == "create":
+            current.inputs.append(_existing_input())
+        elif operation == "update":
+            current.inputs = [
+                current.inputs[0].model_copy(
+                    update={"amount": Decimal("99"), "write_date": STAMP + timedelta(seconds=1)}
+                )
+            ]
+        else:
+            current.payslip = current.payslip.model_copy(
+                update={"write_date": STAMP + timedelta(seconds=1)}
+            )
+
+    server, _ = _server(
+        connection,
+        tmp_path / f"execution-race-{operation}.sqlite3",
+        state,
+        before_execution_adapter=race,
+    )
+    if operation == "create":
+        tool = "set_draft_payroll_input"
+        arguments = _set_arguments(dry_run=False, key="race-create")
+    elif operation == "update":
+        tool = "set_draft_payroll_input"
+        arguments = _set_arguments(
+            dry_run=False,
+            key="race-update",
+            input_id=901,
+            input_type_id=None,
+            description=None,
+            amount="42.125",
+        )
+    else:
+        tool = "recalculate_draft_payslip"
+        arguments = {
+            "company_id": 1,
+            "payslip_id": 101,
+            "dry_run": False,
+            "idempotency_key": "race-recalculate",
+        }
+
+    async with Client(server) as client:  # type: ignore[arg-type]
+        result = await client.call_tool(tool, arguments)
+
+    assert result.structured_content is not None
+    assert result.structured_content["error_code"] == "ODOO_STATE_CONFLICT"
+    assert state.create_count == 0
+    assert state.update_count == 0
+    assert state.recalculate_count == 0
+
+
+async def test_reparented_input_before_execution_adapter_is_not_removed(
+    connection: OdooConnectionSettings,
+    tmp_path: Path,
+) -> None:
+    state = PayrollWriteState(inputs=[_existing_input()])
+
+    def reparent(current: PayrollWriteState) -> None:
+        current.inputs = [
+            current.inputs[0].model_copy(
+                update={
+                    "payslip": RelatedRecord(id=102, name="Synthetic Payslip 102"),
+                    "write_date": STAMP + timedelta(seconds=1),
+                }
+            )
+        ]
+
+    server, _ = _server(
+        connection,
+        tmp_path / "execution-race-remove.sqlite3",
+        state,
+        before_execution_adapter=reparent,
+    )
+    async with Client(server) as client:  # type: ignore[arg-type]
+        result = await client.call_tool(
+            "remove_draft_payroll_input",
+            {
+                "company_id": 1,
+                "payslip_id": 101,
+                "input_id": 901,
+                "dry_run": False,
+                "idempotency_key": "race-remove",
+            },
+        )
+
+    assert result.structured_content is not None
+    assert result.structured_content["error_code"] == "ODOO_STATE_CONFLICT"
+    assert state.delete_count == 0
+    assert state.inputs == [
+        _existing_input(payslip_id=102).model_copy(
+            update={"write_date": STAMP + timedelta(seconds=1)}
+        )
+    ]
 
 
 async def test_noneditable_and_attachment_owned_inputs_fail_closed() -> None:

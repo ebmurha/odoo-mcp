@@ -23,6 +23,7 @@ from odoo_mcp.adapters.payroll import (
     PayrollPeriod,
     PayrollStructure,
     PayrollValue,
+    PayrollWriteCheckpoint,
     Payslip,
     PayslipChildFilters,
     PayslipFilters,
@@ -357,19 +358,23 @@ class PayrollWriteSnapshot:
     worked_days: tuple[PayslipWorkedDay, ...] = ()
 
     @property
+    def adapter_checkpoint(self) -> PayrollWriteCheckpoint:
+        return PayrollWriteCheckpoint(
+            version=self.version,
+            payslip=self.payslip,
+            inputs=self.inputs,
+            employee=self.employee,
+            contract=self.contract,
+            structure=self.structure,
+            input_types=self.input_types,
+            input_types_truncated=self.input_types_truncated,
+            calculated_lines=self.calculated_lines,
+            worked_days=self.worked_days,
+        )
+
+    @property
     def checkpoint(self) -> str:
-        payload = {
-            "version": self.version,
-            "payslip": self.payslip.model_dump(mode="json"),
-            "inputs": [item.model_dump(mode="json") for item in self.inputs],
-            "employee": self.employee.model_dump(mode="json"),
-            "contract": self.contract.model_dump(mode="json"),
-            "structure": self.structure.model_dump(mode="json"),
-            "input_types": [item.model_dump(mode="json") for item in self.input_types],
-            "input_types_truncated": self.input_types_truncated,
-            "calculated_lines": [item.model_dump(mode="json") for item in self.calculated_lines],
-            "worked_days": [item.model_dump(mode="json") for item in self.worked_days],
-        }
+        payload = self.adapter_checkpoint.model_dump(mode="json")
         encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
         return f"sha256:{hashlib.sha256(encoded).hexdigest()}"
 
@@ -752,6 +757,7 @@ async def execute_payroll_write_plan(
                 description=set_request.description,
                 amount=set_request.amount,
             ),
+            plan.snapshot.adapter_checkpoint,
         )
         refreshed = await _snapshot(
             adapter,
@@ -799,6 +805,7 @@ async def execute_payroll_write_plan(
                 description=set_request.description,
                 amount=set_request.amount,
             ),
+            plan.snapshot.adapter_checkpoint,
         )
         refreshed = await _snapshot(
             adapter,
@@ -842,7 +849,12 @@ async def execute_payroll_write_plan(
     if plan.operation == "remove":
         if not isinstance(request, RemoveDraftPayrollInput) or plan.current_input is None:
             raise TypeError("Invalid remove-input plan")
-        deleted = await adapter.delete_draft_payslip_input(request.company_id, request.input_id)
+        deleted = await adapter.delete_draft_payslip_input(
+            request.company_id,
+            request.payslip_id,
+            request.input_id,
+            plan.snapshot.adapter_checkpoint,
+        )
         refreshed = await _snapshot(
             adapter,
             request.company_id,
@@ -877,6 +889,7 @@ async def execute_payroll_write_plan(
     recalculated = await adapter.recompute_draft_payslip(
         request.company_id,
         request.payslip_id,
+        plan.snapshot.adapter_checkpoint,
     )
     evidence = await get_payslip(
         adapter,

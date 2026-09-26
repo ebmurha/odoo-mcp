@@ -287,6 +287,28 @@ class PayrollContractSegment(PayrollValue):
     write_date: datetime
 
 
+class PayrollWriteCheckpoint(PayrollValue):
+    """Complete normalized state a draft Payroll mutation must still observe."""
+
+    version: StrictInt
+    payslip: Payslip
+    inputs: tuple[PayslipInput, ...]
+    employee: PayrollEmployee
+    contract: PayrollContractSegment
+    structure: PayrollStructure
+    input_types: tuple[PayrollInputType, ...]
+    input_types_truncated: bool = False
+    calculated_lines: tuple[PayslipLine, ...] = ()
+    worked_days: tuple[PayslipWorkedDay, ...] = ()
+
+    @field_validator("version")
+    @classmethod
+    def validate_version(cls, value: int) -> int:
+        if value not in {18, 19}:
+            raise ValueError("Payroll writes support only Odoo 18 and 19")
+        return value
+
+
 class PayrollWorkEntry(PayrollValue):
     id: _PositiveIdentifier
     employee: RelatedRecord

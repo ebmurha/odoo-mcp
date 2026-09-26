@@ -7,7 +7,7 @@ import binascii
 import hashlib
 import json
 from collections import defaultdict
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from datetime import date, datetime, time, timedelta
 from decimal import Decimal, InvalidOperation
 from typing import Literal, TypeAlias, TypeVar, cast
@@ -41,6 +41,7 @@ from odoo_mcp.adapters.payroll import (
     PayrollWorkEntry,
     PayrollWorkEntryFilters,
     PayrollWorkEntryState,
+    PayrollWriteCheckpoint,
     PayrollWriteRejected,
     Payslip,
     PayslipChildFilters,
@@ -68,6 +69,21 @@ PAYROLL_SOURCE_CAPS: dict[str, int] = {
     "hr.contract": 20_000,
     "hr.version": 20_000,
     "hr.work.entry": 100_000,
+}
+
+_MAX_WRITE_CALCULATED_LINES = 500
+_MAX_WRITE_WORKED_DAYS = 200
+_CHECKPOINT_CONFLICT_CODES = {
+    ErrorCode.CONTRACT_DATA_MISSING,
+    ErrorCode.EMPLOYEE_NOT_FOUND,
+    ErrorCode.PAYROLL_INPUT_NOT_FOUND,
+    ErrorCode.PAYROLL_INPUT_TYPE_NOT_ALLOWED,
+    ErrorCode.PAYROLL_RESULT_TOO_LARGE,
+    ErrorCode.PAYROLL_SOURCE_INCONSISTENT,
+    ErrorCode.PAYROLL_STATE_NOT_EDITABLE,
+    ErrorCode.PAYROLL_STRUCTURE_NOT_FOUND,
+    ErrorCode.PAYSLIP_NOT_FOUND,
+    ErrorCode.ODOO_STATE_CONFLICT,
 }
 
 _BATCH_FIELDS = (
@@ -1459,6 +1475,161 @@ class PayrollReader:
             raise _inconsistent()
         return page.items
 
+    async def _complete_write_children(
+        self,
+        fetch: Callable[[PayrollPageRequest], Awaitable[PayrollPage[ChildT]]],
+        *,
+        cap: int,
+    ) -> tuple[ChildT, ...]:
+        items: list[ChildT] = []
+        seen_ids: set[int] = set()
+        seen_cursors: set[str] = set()
+        expected_total: int | None = None
+        cursor: str | None = None
+        while True:
+            page = await fetch(PayrollPageRequest(limit=200, cursor=cursor))
+            if expected_total is None:
+                expected_total = page.total_count
+                if expected_total > cap:
+                    raise _too_large()
+            elif page.total_count != expected_total:
+                raise _inconsistent()
+            for item in page.items:
+                if item.id in seen_ids:
+                    raise _inconsistent()
+                seen_ids.add(item.id)
+                items.append(item)
+                if len(items) > cap or len(items) > expected_total:
+                    raise _inconsistent()
+            if page.next_cursor is None:
+                if len(items) != expected_total:
+                    raise _inconsistent()
+                return tuple(items)
+            if not page.items or page.next_cursor in seen_cursors:
+                raise _inconsistent()
+            seen_cursors.add(page.next_cursor)
+            cursor = page.next_cursor
+
+    async def _read_write_checkpoint(
+        self,
+        company_id: int,
+        expected: PayrollWriteCheckpoint,
+        *,
+        payslip_id: int,
+        include_calculation_sources: bool,
+    ) -> PayrollWriteCheckpoint:
+        if (
+            expected.version != self._version
+            or expected.payslip.id != payslip_id
+            or expected.payslip.company_id != company_id
+            or expected.input_types_truncated
+            or (
+                not include_calculation_sources
+                and (expected.calculated_lines or expected.worked_days)
+            )
+        ):
+            raise _state_conflict()
+        payslip = await self._action_payslip(company_id, payslip_id)
+        inputs = tuple(await self._all_inputs(company_id, payslip_id))
+        employees = await self.get_payroll_employees(
+            company_id,
+            (payslip.employee.id,),
+            PayrollPageRequest(limit=1),
+        )
+        if len(employees.items) != 1 or employees.next_cursor is not None:
+            raise _state_conflict()
+        contracts = await self.get_payroll_contract_segments(
+            company_id,
+            PayrollContractFilters(
+                employee_ids=(payslip.employee.id,),
+                period=PayrollPeriod(start=payslip.date_from, end=payslip.date_to),
+            ),
+            PayrollPageRequest(limit=200),
+        )
+        matching_contracts = [
+            item
+            for item in contracts.items
+            if item.id == payslip.contract_segment.id
+            and item.source_model == payslip.contract_source
+        ]
+        if len(matching_contracts) != 1 or contracts.next_cursor is not None:
+            raise _state_conflict()
+        structure = await self._structure(company_id, payslip.structure.id)
+        input_types = tuple(
+            [
+                await self._eligible_type(company_id, payslip, item.id)
+                for item in expected.input_types
+            ]
+        )
+        calculated_lines: tuple[PayslipLine, ...] = ()
+        worked_days: tuple[PayslipWorkedDay, ...] = ()
+        if include_calculation_sources:
+
+            async def fetch_lines(page: PayrollPageRequest) -> PayrollPage[PayslipLine]:
+                return await self.get_payslip_lines(
+                    company_id,
+                    PayslipChildFilters(payslip_ids=(payslip_id,)),
+                    page,
+                )
+
+            async def fetch_worked_days(
+                page: PayrollPageRequest,
+            ) -> PayrollPage[PayslipWorkedDay]:
+                return await self.get_payslip_worked_days(
+                    company_id,
+                    PayslipChildFilters(payslip_ids=(payslip_id,)),
+                    page,
+                )
+
+            calculated_lines = await self._complete_write_children(
+                fetch_lines,
+                cap=_MAX_WRITE_CALCULATED_LINES,
+            )
+            worked_days = await self._complete_write_children(
+                fetch_worked_days,
+                cap=_MAX_WRITE_WORKED_DAYS,
+            )
+        return PayrollWriteCheckpoint(
+            version=self._version,
+            payslip=payslip,
+            inputs=inputs,
+            employee=employees.items[0],
+            contract=matching_contracts[0],
+            structure=structure,
+            input_types=input_types,
+            calculated_lines=calculated_lines,
+            worked_days=worked_days,
+        )
+
+    async def _validated_write_checkpoint(
+        self,
+        company_id: int,
+        expected: PayrollWriteCheckpoint,
+        *,
+        payslip_id: int,
+        include_calculation_sources: bool = False,
+    ) -> PayrollWriteCheckpoint:
+        try:
+            observed = await self._read_write_checkpoint(
+                company_id,
+                expected,
+                payslip_id=payslip_id,
+                include_calculation_sources=include_calculation_sources,
+            )
+            final = await self._read_write_checkpoint(
+                company_id,
+                expected,
+                payslip_id=payslip_id,
+                include_calculation_sources=include_calculation_sources,
+            )
+        except OdooMcpError as exc:
+            if exc.code in _CHECKPOINT_CONFLICT_CODES:
+                raise PayrollWriteRejected(_state_conflict()) from None
+            raise
+        if observed != expected or final != expected:
+            raise PayrollWriteRejected(_state_conflict())
+        return final
+
     @staticmethod
     def _selected_input(inputs: list[PayslipInput], input_id: int) -> PayslipInput:
         matches = [item for item in inputs if item.id == input_id]
@@ -1503,22 +1674,6 @@ class PayrollReader:
                 "Use an exact input ID from the editable payslip.",
             )
         return page.items[0]
-
-    async def _input_by_id(self, company_id: int, input_id: int) -> PayslipInput:
-        input_id = _require_requested_id(input_id, "input")
-        domain: list[object] = [
-            ["payslip_id.company_id", "=", company_id],
-            ["id", "=", input_id],
-        ]
-        rows = await self._stable_rows("hr.payslip.input", company_id, domain, "id asc", cap=1)
-        if not rows:
-            raise OdooMcpError(
-                ErrorCode.PAYROLL_INPUT_NOT_FOUND,
-                "The requested Payroll input is unavailable.",
-                "Use an exact input ID from an editable payslip in this company.",
-            )
-        candidate = self._normalize_input(rows[0])
-        return await self._exact_input(company_id, candidate.payslip.id, input_id)
 
     async def _action_payslip(self, company_id: int, payslip_id: int) -> Payslip:
         payslip = await self._exact_payslip(company_id, payslip_id)
@@ -1592,11 +1747,24 @@ class PayrollReader:
             raise _state_conflict()
 
     async def create_draft_payslip_input(
-        self, company_id: int, payload: DraftPayslipInputCreate
+        self,
+        company_id: int,
+        payload: DraftPayslipInputCreate,
+        expected: PayrollWriteCheckpoint,
     ) -> PayslipInput:
-        payslip = await self._action_payslip(company_id, payload.payslip_id)
-        input_type = await self._eligible_type(company_id, payslip, payload.input_type_id)
-        current = await self._all_inputs(company_id, payslip.id)
+        checkpoint = await self._validated_write_checkpoint(
+            company_id,
+            expected,
+            payslip_id=payload.payslip_id,
+        )
+        payslip = checkpoint.payslip
+        current = list(checkpoint.inputs)
+        matching_types = [
+            item for item in checkpoint.input_types if item.id == payload.input_type_id
+        ]
+        if len(matching_types) != 1:
+            raise PayrollWriteRejected(_state_conflict())
+        input_type = matching_types[0]
         if any(
             item.input_type.id == input_type.id or item.code == input_type.code for item in current
         ):
@@ -1605,11 +1773,6 @@ class PayrollReader:
                 "The payslip already contains this Payroll input type.",
                 "Update the existing input instead of creating a duplicate.",
             )
-        fresh_payslip = await self._action_payslip(company_id, payslip.id)
-        fresh_type = await self._eligible_type(company_id, fresh_payslip, payload.input_type_id)
-        fresh_inputs = await self._all_inputs(company_id, fresh_payslip.id)
-        if fresh_payslip != payslip or fresh_type != input_type or fresh_inputs != current:
-            raise _state_conflict()
         ensure_payroll_action_allowed(self._version, "hr.payslip.input", "create_draft_input")
         values: dict[str, object] = {
             "name": payload.description,
@@ -1653,19 +1816,22 @@ class PayrollReader:
         company_id: int,
         input_id: int,
         payload: DraftPayslipInputUpdate,
+        expected: PayrollWriteCheckpoint,
     ) -> PayslipInput:
         input_id = _require_requested_id(input_id, "input")
-        payslip = await self._action_payslip(company_id, payload.payslip_id)
-        current_inputs = await self._all_inputs(company_id, payslip.id)
+        checkpoint = await self._validated_write_checkpoint(
+            company_id,
+            expected,
+            payslip_id=payload.payslip_id,
+        )
+        payslip = checkpoint.payslip
+        current_inputs = list(checkpoint.inputs)
         current = self._selected_input(current_inputs, input_id)
-        input_type = await self._eligible_type(company_id, payslip, current.input_type.id)
-        if current.code != input_type.code:
-            raise _inconsistent()
-        fresh_payslip = await self._action_payslip(company_id, payslip.id)
-        fresh_type = await self._eligible_type(company_id, fresh_payslip, current.input_type.id)
-        fresh_inputs = await self._all_inputs(company_id, fresh_payslip.id)
-        if fresh_payslip != payslip or fresh_type != input_type or fresh_inputs != current_inputs:
-            raise _state_conflict()
+        matching_types = [
+            item for item in checkpoint.input_types if item.id == current.input_type.id
+        ]
+        if len(matching_types) != 1 or current.code != matching_types[0].code:
+            raise PayrollWriteRejected(_state_conflict())
         ensure_payroll_action_allowed(self._version, "hr.payslip.input", "update_draft_input")
         values: dict[str, object] = {}
         if payload.description is not None:
@@ -1704,22 +1870,31 @@ class PayrollReader:
         return updated
 
     async def delete_draft_payslip_input(
-        self, company_id: int, input_id: int
+        self,
+        company_id: int,
+        payslip_id: int,
+        input_id: int,
+        expected: PayrollWriteCheckpoint,
     ) -> DeletedPayslipInput:
-        current = await self._input_by_id(company_id, input_id)
-        payslip = await self._action_payslip(company_id, current.payslip.id)
-        current_inputs = await self._all_inputs(company_id, payslip.id)
-        refreshed = self._selected_input(current_inputs, input_id)
-        if refreshed != current:
-            raise _state_conflict()
-        input_type = await self._eligible_type(company_id, payslip, current.input_type.id)
-        if current.code != input_type.code:
-            raise _inconsistent()
-        fresh_payslip = await self._action_payslip(company_id, payslip.id)
-        fresh_type = await self._eligible_type(company_id, fresh_payslip, current.input_type.id)
-        fresh_inputs = await self._all_inputs(company_id, fresh_payslip.id)
-        if fresh_payslip != payslip or fresh_type != input_type or fresh_inputs != current_inputs:
-            raise _state_conflict()
+        payslip_id = _require_requested_id(payslip_id, "payslip")
+        input_id = _require_requested_id(input_id, "input")
+        checkpoint = await self._validated_write_checkpoint(
+            company_id,
+            expected,
+            payslip_id=payslip_id,
+        )
+        payslip = checkpoint.payslip
+        current_inputs = list(checkpoint.inputs)
+        current = self._selected_input(current_inputs, input_id)
+        matching_types = [
+            item for item in checkpoint.input_types if item.id == current.input_type.id
+        ]
+        if (
+            current.payslip.id != payslip_id
+            or len(matching_types) != 1
+            or current.code != matching_types[0].code
+        ):
+            raise PayrollWriteRejected(_state_conflict())
         ensure_payroll_action_allowed(self._version, "hr.payslip.input", "delete_draft_input")
         try:
             result = await self._transport.execute_method(
@@ -1748,13 +1923,20 @@ class PayrollReader:
             raise _state_conflict()
         return DeletedPayslipInput(id=input_id, payslip_id=payslip.id)
 
-    async def recompute_draft_payslip(self, company_id: int, payslip_id: int) -> Payslip:
-        payslip = await self._action_payslip(company_id, payslip_id)
-        current_inputs = await self._all_inputs(company_id, payslip.id)
-        fresh_payslip = await self._action_payslip(company_id, payslip.id)
-        fresh_inputs = await self._all_inputs(company_id, fresh_payslip.id)
-        if fresh_payslip != payslip or fresh_inputs != current_inputs:
-            raise _state_conflict()
+    async def recompute_draft_payslip(
+        self,
+        company_id: int,
+        payslip_id: int,
+        expected: PayrollWriteCheckpoint,
+    ) -> Payslip:
+        checkpoint = await self._validated_write_checkpoint(
+            company_id,
+            expected,
+            payslip_id=payslip_id,
+            include_calculation_sources=True,
+        )
+        payslip = checkpoint.payslip
+        current_inputs = list(checkpoint.inputs)
         ensure_payroll_action_allowed(
             self._version, "hr.payslip", "compute_sheet_on_editable_payslip"
         )

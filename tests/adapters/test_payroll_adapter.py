@@ -25,6 +25,7 @@ from odoo_mcp.adapters.payroll import (
     PayrollPageRequest,
     PayrollPeriod,
     PayrollWorkEntryFilters,
+    PayrollWriteCheckpoint,
     PayrollWriteRejected,
     PayslipChildFilters,
     PayslipFilters,
@@ -411,6 +412,105 @@ def _reader(version: int, transport: FakePayrollTransport | None = None) -> Payr
     return PayrollReader(transport or FakePayrollTransport(version), version, lambda: (1, 2))
 
 
+async def _write_checkpoint(
+    reader: PayrollReader,
+    version: int,
+    *,
+    input_type_id: int | None = None,
+    include_calculation_sources: bool = False,
+) -> PayrollWriteCheckpoint:
+    payslip = (
+        await reader.get_payslips(
+            1,
+            PayslipFilters(payslip_ids=(101,)),
+            PayrollPageRequest(limit=1),
+        )
+    ).items[0]
+    inputs = (
+        await reader.get_payslip_inputs(
+            1,
+            PayslipChildFilters(payslip_ids=(101,)),
+            PayrollPageRequest(limit=200),
+        )
+    ).items
+    employee = (
+        await reader.get_payroll_employees(
+            1,
+            (payslip.employee.id,),
+            PayrollPageRequest(limit=1),
+        )
+    ).items[0]
+    contracts = (
+        await reader.get_payroll_contract_segments(
+            1,
+            PayrollContractFilters(
+                employee_ids=(payslip.employee.id,),
+                period=PayrollPeriod(start=payslip.date_from, end=payslip.date_to),
+            ),
+            PayrollPageRequest(limit=200),
+        )
+    ).items
+    contract = next(
+        item
+        for item in contracts
+        if item.id == payslip.contract_segment.id and item.source_model == payslip.contract_source
+    )
+    structure = await reader.get_payroll_structure(1, payslip.structure.id)
+    input_types = (
+        ()
+        if input_type_id is None
+        else tuple(
+            (
+                await reader.get_payroll_input_types(
+                    1,
+                    PayrollInputTypeFilters(
+                        structure_id=payslip.structure.id,
+                        input_type_ids=(input_type_id,),
+                    ),
+                    PayrollPageRequest(limit=1),
+                )
+            ).items
+        )
+    )
+    calculated_lines = (
+        tuple(
+            (
+                await reader.get_payslip_lines(
+                    1,
+                    PayslipChildFilters(payslip_ids=(101,)),
+                    PayrollPageRequest(limit=200),
+                )
+            ).items
+        )
+        if include_calculation_sources
+        else ()
+    )
+    worked_days = (
+        tuple(
+            (
+                await reader.get_payslip_worked_days(
+                    1,
+                    PayslipChildFilters(payslip_ids=(101,)),
+                    PayrollPageRequest(limit=200),
+                )
+            ).items
+        )
+        if include_calculation_sources
+        else ()
+    )
+    return PayrollWriteCheckpoint(
+        version=version,
+        payslip=payslip,
+        inputs=tuple(inputs),
+        employee=employee,
+        contract=contract,
+        structure=structure,
+        input_types=input_types,
+        calculated_lines=calculated_lines,
+        worked_days=worked_days,
+    )
+
+
 def test_payroll_source_constants_are_exact() -> None:
     common = {
         "hr.payslip.run": (
@@ -749,6 +849,7 @@ async def test_draft_input_actions_and_recalculation_use_only_fixed_methods(
     transport = FakePayrollTransport(version, rows)
     reader = _reader(version, transport)
 
+    create_checkpoint = await _write_checkpoint(reader, version, input_type_id=401)
     created = await reader.create_draft_payslip_input(
         1,
         DraftPayslipInputCreate(
@@ -757,7 +858,9 @@ async def test_draft_input_actions_and_recalculation_use_only_fixed_methods(
             description="Synthetic Adjustment",
             amount=Decimal("40.125"),
         ),
+        create_checkpoint,
     )
+    update_checkpoint = await _write_checkpoint(reader, version, input_type_id=401)
     updated = await reader.update_draft_payslip_input(
         1,
         created.id,
@@ -766,9 +869,25 @@ async def test_draft_input_actions_and_recalculation_use_only_fixed_methods(
             description="Synthetic Updated Adjustment",
             amount=Decimal("41.125"),
         ),
+        update_checkpoint,
     )
-    deleted = await reader.delete_draft_payslip_input(1, created.id)
-    recalculated = await reader.recompute_draft_payslip(1, 101)
+    delete_checkpoint = await _write_checkpoint(reader, version, input_type_id=401)
+    deleted = await reader.delete_draft_payslip_input(
+        1,
+        101,
+        created.id,
+        delete_checkpoint,
+    )
+    recalculation_checkpoint = await _write_checkpoint(
+        reader,
+        version,
+        include_calculation_sources=True,
+    )
+    recalculated = await reader.recompute_draft_payslip(
+        1,
+        101,
+        recalculation_checkpoint,
+    )
 
     contract_key = "contract_id" if version == 18 else "version_id"
     assert updated.name == "Synthetic Updated Adjustment"
@@ -828,22 +947,33 @@ async def test_draft_input_actions_and_recalculation_use_only_fixed_methods(
 @pytest.mark.parametrize(("version", "source_state"), [(18, "done"), (19, "validated")])
 async def test_noneditable_payslip_fails_before_mutation(version: int, source_state: str) -> None:
     transport = FakePayrollTransport(version)
-    transport.rows["hr.payslip"][0]["state"] = source_state
     reader = _reader(version, transport)
+    checkpoint = await _write_checkpoint(
+        reader,
+        version,
+        include_calculation_sources=True,
+    )
+    transport.rows["hr.payslip"][0]["state"] = source_state
 
-    with pytest.raises(OdooMcpError) as caught:
-        await reader.recompute_draft_payslip(1, 101)
+    with pytest.raises(PayrollWriteRejected) as caught:
+        await reader.recompute_draft_payslip(1, 101, checkpoint)
 
-    assert caught.value.code is ErrorCode.PAYROLL_STATE_NOT_EDITABLE
+    assert caught.value.error.code is ErrorCode.ODOO_STATE_CONFLICT
     assert transport.executions == []
 
 
 async def test_false_recalculation_result_has_payroll_error() -> None:
     transport = FakePayrollTransport(19)
     transport.compute_result = False
+    reader = _reader(19, transport)
+    checkpoint = await _write_checkpoint(
+        reader,
+        19,
+        include_calculation_sources=True,
+    )
 
     with pytest.raises(PayrollWriteRejected) as caught:
-        await _reader(19, transport).recompute_draft_payslip(1, 101)
+        await reader.recompute_draft_payslip(1, 101, checkpoint)
 
     assert caught.value.error.code is ErrorCode.PAYROLL_RECALCULATION_FAILED
 
@@ -857,8 +987,10 @@ async def test_authoritative_write_acl_denial_is_distinct_from_post_write_acl_fa
     before_dispatch = FakePayrollTransport(19)
     before_dispatch.rows["hr.payslip.input"] = []
     before_dispatch.execution_failure = denial
+    before_reader = _reader(19, before_dispatch)
+    before_checkpoint = await _write_checkpoint(before_reader, 19, input_type_id=401)
     with pytest.raises(PayrollWriteRejected) as rejected:
-        await _reader(19, before_dispatch).create_draft_payslip_input(
+        await before_reader.create_draft_payslip_input(
             1,
             DraftPayslipInputCreate(
                 payslip_id=101,
@@ -866,6 +998,7 @@ async def test_authoritative_write_acl_denial_is_distinct_from_post_write_acl_fa
                 description="Synthetic Adjustment",
                 amount=Decimal("1"),
             ),
+            before_checkpoint,
         )
     assert rejected.value.error.code is ErrorCode.ODOO_PERMISSION_DENIED
     assert before_dispatch.rows["hr.payslip.input"] == []
@@ -873,8 +1006,10 @@ async def test_authoritative_write_acl_denial_is_distinct_from_post_write_acl_fa
     after_dispatch = FakePayrollTransport(19)
     after_dispatch.rows["hr.payslip.input"] = []
     after_dispatch.post_execution_failure = denial
+    after_reader = _reader(19, after_dispatch)
+    after_checkpoint = await _write_checkpoint(after_reader, 19, input_type_id=401)
     with pytest.raises(OdooMcpError) as uncertain:
-        await _reader(19, after_dispatch).create_draft_payslip_input(
+        await after_reader.create_draft_payslip_input(
             1,
             DraftPayslipInputCreate(
                 payslip_id=101,
@@ -882,6 +1017,7 @@ async def test_authoritative_write_acl_denial_is_distinct_from_post_write_acl_fa
                 description="Synthetic Adjustment",
                 amount=Decimal("1"),
             ),
+            after_checkpoint,
         )
     assert uncertain.value.code is ErrorCode.ODOO_PERMISSION_DENIED
     assert len(after_dispatch.rows["hr.payslip.input"]) == 1
@@ -991,6 +1127,7 @@ async def test_input_change_during_prewrite_validation_blocks_mutation() -> None
         def __init__(self) -> None:
             super().__init__(19)
             self.input_count_calls = 0
+            self.race_enabled = False
 
         async def search_count(
             self,
@@ -1001,22 +1138,92 @@ async def test_input_change_during_prewrite_validation_blocks_mutation() -> None
         ) -> int:
             if model == "hr.payslip.input":
                 self.input_count_calls += 1
-                if self.input_count_calls == 3:
+                if self.race_enabled and self.input_count_calls == 3:
                     self.rows[model][0]["amount"] = "26.125"
                     self.rows[model][0]["write_date"] = "2026-09-02 10:00:00"
             return await super().search_count(model, domain, company_ids=company_ids)
 
     transport = InputRaceTransport()
+    reader = _reader(19, transport)
+    checkpoint = await _write_checkpoint(reader, 19, input_type_id=401)
+    transport.input_count_calls = 0
+    transport.race_enabled = True
 
-    with pytest.raises(OdooMcpError) as caught:
-        await _reader(19, transport).update_draft_payslip_input(
+    with pytest.raises(PayrollWriteRejected) as caught:
+        await reader.update_draft_payslip_input(
             1,
             141,
             DraftPayslipInputUpdate(payslip_id=101, amount=Decimal("30.125")),
+            checkpoint,
         )
 
-    assert caught.value.code is ErrorCode.ODOO_STATE_CONFLICT
+    assert caught.value.error.code is ErrorCode.ODOO_STATE_CONFLICT
     assert transport.executions == []
+
+
+@pytest.mark.parametrize("version", [18, 19])
+async def test_expected_checkpoint_blocks_added_reparented_and_calculation_source_races(
+    version: int,
+) -> None:
+    create_rows = _rows(version)
+    intervening_input = create_rows["hr.payslip.input"][0]
+    create_rows["hr.payslip.input"] = []
+    create_transport = FakePayrollTransport(version, create_rows)
+    create_reader = _reader(version, create_transport)
+    create_checkpoint = await _write_checkpoint(create_reader, version, input_type_id=401)
+    create_transport.rows["hr.payslip.input"].append(intervening_input)
+
+    with pytest.raises(PayrollWriteRejected) as create_conflict:
+        await create_reader.create_draft_payslip_input(
+            1,
+            DraftPayslipInputCreate(
+                payslip_id=101,
+                input_type_id=401,
+                description="Synthetic Adjustment",
+                amount=Decimal("1"),
+            ),
+            create_checkpoint,
+        )
+
+    remove_transport = FakePayrollTransport(version)
+    remove_reader = _reader(version, remove_transport)
+    remove_checkpoint = await _write_checkpoint(remove_reader, version, input_type_id=401)
+    remove_transport.rows["hr.payslip.input"][0]["payslip_id"] = [
+        102,
+        "Synthetic Payslip 102",
+    ]
+
+    with pytest.raises(PayrollWriteRejected) as remove_conflict:
+        await remove_reader.delete_draft_payslip_input(
+            1,
+            101,
+            141,
+            remove_checkpoint,
+        )
+
+    recalculate_transport = FakePayrollTransport(version)
+    recalculate_reader = _reader(version, recalculate_transport)
+    recalculate_checkpoint = await _write_checkpoint(
+        recalculate_reader,
+        version,
+        include_calculation_sources=True,
+    )
+    recalculate_transport.rows["hr.payslip.line"][0]["amount"] = "99"
+    recalculate_transport.rows["hr.payslip.line"][0]["write_date"] = "2026-09-02 10:00:00"
+
+    with pytest.raises(PayrollWriteRejected) as recalculate_conflict:
+        await recalculate_reader.recompute_draft_payslip(
+            1,
+            101,
+            recalculate_checkpoint,
+        )
+
+    assert create_conflict.value.error.code is ErrorCode.ODOO_STATE_CONFLICT
+    assert remove_conflict.value.error.code is ErrorCode.ODOO_STATE_CONFLICT
+    assert recalculate_conflict.value.error.code is ErrorCode.ODOO_STATE_CONFLICT
+    assert create_transport.executions == []
+    assert remove_transport.executions == []
+    assert recalculate_transport.executions == []
 
 
 async def test_source_cap_is_enforced_before_reading_rows() -> None:
@@ -1194,9 +1401,12 @@ async def test_unauthorized_company_fails_before_transport_access() -> None:
 
 async def test_boolean_direct_action_identifier_is_rejected_before_reads() -> None:
     transport = FakePayrollTransport(19)
+    reader = _reader(19, transport)
+    checkpoint = await _write_checkpoint(reader, 19, input_type_id=401)
+    transport.calls.clear()
 
     with pytest.raises(OdooMcpError) as caught:
-        await _reader(19, transport).delete_draft_payslip_input(1, True)
+        await reader.delete_draft_payslip_input(1, 101, True, checkpoint)
 
     assert caught.value.code is ErrorCode.INVALID_INPUT
     assert transport.calls == []
