@@ -18,7 +18,11 @@ from urllib.parse import parse_qs, urlsplit
 
 from mcp.server.auth.handlers.authorize import AuthorizationHandler
 from mcp.server.auth.handlers.metadata import MetadataHandler
-from mcp.server.auth.routes import build_metadata, create_auth_routes
+from mcp.server.auth.routes import (
+    build_metadata,
+    create_auth_routes,
+    create_protected_resource_routes,
+)
 from mcp.server.auth.settings import AuthSettings as McpAuthSettings
 from mcp.server.auth.settings import ClientRegistrationOptions, RevocationOptions
 from pydantic import AnyHttpUrl, ValidationError
@@ -594,9 +598,11 @@ def create_shared_app(
     else:
         selected_factory = adapter_factory
 
+    issuer_url = AnyHttpUrl(str(settings.issuer_url))
+    resource_url = AnyHttpUrl(str(settings.public_mcp_url))
     auth = McpAuthSettings(
-        issuer_url=AnyHttpUrl(str(settings.issuer_url)),
-        resource_server_url=AnyHttpUrl(str(settings.public_mcp_url)),
+        issuer_url=issuer_url,
+        resource_server_url=resource_url,
         required_scopes=["core_read"],
         validate_token_resource=True,
     )
@@ -807,7 +813,6 @@ def create_shared_app(
             return JSONResponse({"error": "invalid_session"}, status_code=400)
         return RedirectResponse(f"{base_path}/enroll", status_code=303)
 
-    issuer_url = AnyHttpUrl(str(settings.issuer_url))
     registration_options = ClientRegistrationOptions(
         enabled=True,
         valid_scopes=sorted(permissions),
@@ -830,6 +835,11 @@ def create_shared_app(
     oauth_metadata.revocation_endpoint_auth_methods_supported = ["none"]
     metadata_handler = MetadataHandler(oauth_metadata)
     authorization_handler = AuthorizationHandler(provider)
+    protected_resource_routes = create_protected_resource_routes(
+        resource_url=resource_url,
+        authorization_servers=[issuer_url],
+        scopes_supported=sorted(permissions),
+    )
 
     async def authorize(request: Request) -> Response:
         if request.query_params.get("code_challenge_method") != "S256":
@@ -864,8 +874,11 @@ def create_shared_app(
             )
         )
 
+    replaced_paths = {route.path for route in protected_resource_routes}
     mcp_app.router.routes[:] = [
-        route for route in mcp_app.router.routes if getattr(route, "path", None) != "/healthz"
+        route
+        for route in mcp_app.router.routes
+        if getattr(route, "path", None) not in {"/healthz", *replaced_paths}
     ]
 
     @asynccontextmanager
@@ -881,6 +894,7 @@ def create_shared_app(
         Route(f"{base_path}/revoke", revoke, methods=["POST"]),
         Route(f"{base_path}/authorize", authorize, methods=["GET"]),
         *scoped_auth_routes,
+        *protected_resource_routes,
         Route(f"{base_path}/enroll", enrollment, methods=["GET"]),
         Route(f"{base_path}/enroll/prepare", prepare, methods=["POST"]),
         Route(f"{base_path}/enroll/commit", commit, methods=["POST"]),

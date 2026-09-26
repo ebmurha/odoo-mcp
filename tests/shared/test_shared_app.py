@@ -2,16 +2,29 @@ from __future__ import annotations
 
 import base64
 import hashlib
+from unittest.mock import patch
 from urllib.parse import parse_qs, urlsplit
 
 import pytest
+from starlette.routing import Mount
 from starlette.testclient import TestClient
 
 from odoo_mcp.adapters.base import CapabilitySnapshot, Company, OdooAdapter
 from odoo_mcp.adapters.odoo.enrollment import VerifiedEnrollment
+from odoo_mcp.app import shared as shared_app_module
 from odoo_mcp.app.settings import OdooEnrollmentCredentials, SharedHostedSettings
 from odoo_mcp.app.shared import CSRF_COOKIE, SingleWriterLease, create_shared_app
+from odoo_mcp.app.shared_auth import VALID_SCOPES
 from odoo_mcp.storage import EncryptionKeyring, Storage
+
+EXPECTED_PERMISSIONS = (
+    "accounting_propose",
+    "accounting_read",
+    "core_read",
+    "payroll_draft_write",
+    "payroll_read",
+)
+EXPECTED_SCOPE = " ".join(EXPECTED_PERMISSIONS)
 
 
 class Validator:
@@ -53,7 +66,7 @@ def _settings(base_path: str = "") -> SharedHostedSettings:
     )
 
 
-def test_registration_defaults_to_all_enabled_permissions(tmp_path) -> None:
+def test_registration_normalizes_every_valid_scope_input_to_all_permissions(tmp_path) -> None:
     storage = Storage.open(
         tmp_path / "registration.sqlite3",
         keyring=EncryptionKeyring(1, {1: b"a" * 32}),
@@ -63,7 +76,6 @@ def test_registration_defaults_to_all_enabled_permissions(tmp_path) -> None:
         storage,
         validator=Validator(),
         adapter_factory=_adapter_factory,
-        permissions=frozenset({"core_read", "accounting_read", "accounting_propose"}),
     )
     registration = {
         "client_name": "Synthetic client",
@@ -75,14 +87,55 @@ def test_registration_defaults_to_all_enabled_permissions(tmp_path) -> None:
 
     with TestClient(app, base_url="https://testserver") as client:
         defaulted = client.post("/odoo/register", json=registration)
+        complete = client.post(
+            "/odoo/register",
+            json={**registration, "scope": " ".join(reversed(EXPECTED_PERMISSIONS))},
+        )
         narrowed = client.post("/odoo/register", json={**registration, "scope": "core_read"})
         invalid = client.post("/odoo/register", json={**registration, "scope": "unknown_scope"})
 
-    assert defaulted.status_code == 201
-    assert defaulted.json()["scope"] == "accounting_propose accounting_read core_read"
-    assert narrowed.status_code == 201
-    assert narrowed.json()["scope"] == "core_read"
+    assert VALID_SCOPES == frozenset(EXPECTED_PERMISSIONS)
+    assert [response.status_code for response in (defaulted, complete, narrowed)] == [201] * 3
+    assert [response.json()["scope"] for response in (defaulted, complete, narrowed)] == [
+        EXPECTED_SCOPE
+    ] * 3
     assert invalid.status_code == 400
+
+
+def test_resource_metadata_replaces_sdk_route_without_broadening_bearer_scope(tmp_path) -> None:
+    storage = Storage.open(
+        tmp_path / "resource-metadata.sqlite3",
+        keyring=EncryptionKeyring(1, {1: b"a" * 32}),
+    )
+    with patch(
+        "odoo_mcp.app.shared.create_mcp_server", wraps=shared_app_module.create_mcp_server
+    ) as factory:
+        app = create_shared_app(
+            _settings("/odoo"),
+            storage,
+            validator=Validator(),
+            adapter_factory=_adapter_factory,
+        )
+
+    metadata_path = "/.well-known/oauth-protected-resource/odoo"
+    outer_routes = [route for route in app.routes if getattr(route, "path", None) == metadata_path]
+    mounted_apps = [route.app for route in app.routes if isinstance(route, Mount)]
+    nested_routes = [
+        route
+        for mounted in mounted_apps
+        for route in mounted.router.routes
+        if getattr(route, "path", None) == metadata_path
+    ]
+
+    auth = factory.call_args.kwargs["auth"]
+    assert auth.required_scopes == ["core_read"]
+    assert len(outer_routes) == 1
+    assert nested_routes == []
+
+    with TestClient(app, base_url="https://testserver") as client:
+        metadata = client.get(metadata_path)
+    assert metadata.status_code == 200
+    assert metadata.json()["scopes_supported"] == list(EXPECTED_PERMISSIONS)
 
 
 @pytest.mark.parametrize(
@@ -101,7 +154,6 @@ def test_complete_shared_hosted_flow_and_fail_closed_mcp(
         storage,
         validator=Validator(),
         adapter_factory=_adapter_factory,
-        permissions=frozenset({"core_read", "accounting_read", "accounting_propose"}),
     )
     endpoint = lambda suffix: f"{base_path}{suffix}"  # noqa: E731
     resource_url = f"https://testserver{resource_path}"
@@ -127,6 +179,7 @@ def test_complete_shared_hosted_flow_and_fail_closed_mcp(
                 "token_endpoint_auth_method": "none",
                 "grant_types": ["authorization_code", "refresh_token"],
                 "response_types": ["code"],
+                "scope": " ".join(resource.json()["scopes_supported"]),
             },
         )
         unsafe_registrations = [
@@ -198,7 +251,7 @@ def test_complete_shared_hosted_flow_and_fail_closed_mcp(
                 "response_type": "code",
                 "code_challenge": challenge,
                 "code_challenge_method": "S256",
-                "scope": "accounting_propose accounting_read core_read",
+                "scope": "core_read",
                 "resource": resource_url,
                 "state": "client-state",
             },
@@ -293,7 +346,7 @@ def test_complete_shared_hosted_flow_and_fail_closed_mcp(
                 "params": {"name": "get_erp_capabilities", "arguments": {}},
             },
         )
-        narrowed_tokens = client.post(
+        refreshed_tokens = client.post(
             endpoint("/token"),
             data={
                 "grant_type": "refresh_token",
@@ -303,25 +356,18 @@ def test_complete_shared_hosted_flow_and_fail_closed_mcp(
                 "resource": resource_url,
             },
         )
-        narrowed_headers = {
+        refreshed_headers = {
             **mcp_headers,
-            "Authorization": f"Bearer {narrowed_tokens.json()['access_token']}",
+            "Authorization": f"Bearer {refreshed_tokens.json()['access_token']}",
         }
-        denied_accounting = client.post(
+        refreshed_call = client.post(
             resource_path,
-            headers=narrowed_headers,
+            headers=refreshed_headers,
             json={
                 "jsonrpc": "2.0",
                 "id": 4,
                 "method": "tools/call",
-                "params": {
-                    "name": "get_trial_balance",
-                    "arguments": {
-                        "company_id": 1,
-                        "period_start": "2026-01-01",
-                        "period_end": "2026-01-31",
-                    },
-                },
+                "params": {"name": "get_erp_capabilities", "arguments": {}},
             },
         )
         reset_context = client.post(
@@ -345,9 +391,13 @@ def test_complete_shared_hosted_flow_and_fail_closed_mcp(
 
     assert metadata.status_code == 200
     assert resource.status_code == 200
+    assert metadata.json()["issuer"] == str(_settings(base_path).issuer_url)
+    assert resource.json()["resource"] == resource_url
+    assert metadata.json()["scopes_supported"] == list(EXPECTED_PERMISSIONS)
+    assert resource.json()["scopes_supported"] == list(EXPECTED_PERMISSIONS)
     assert unauthorized.status_code == 401
     assert registration.status_code == 201
-    assert registration.json()["scope"] == "accounting_propose accounting_read core_read"
+    assert registration.json()["scope"] == EXPECTED_SCOPE
     assert [response.status_code for response in unsafe_registrations] == [400, 400]
     assert [response.status_code for response in native_registrations] == [201, 201]
     assert wrong_redirect.status_code == 400
@@ -376,6 +426,7 @@ def test_complete_shared_hosted_flow_and_fail_closed_mcp(
     assert "synthetic-secret" not in rejected_csrf.text
     assert prepared.status_code == 200
     assert "Choose company access" in prepared.text
+    assert ", ".join(EXPECTED_PERMISSIONS) in prepared.text
     assert "Default company (always authorized)" in prepared.text
     assert 'data-pending-label="Authorizing..."' in prepared.text
     assert "script-src 'sha256-" in prepared.headers["content-security-policy"]
@@ -399,16 +450,14 @@ def test_complete_shared_hosted_flow_and_fail_closed_mcp(
     )
     assert parse_qs(completed_redirect.query)["state"] == ["client-state"]
     assert tokens.status_code == 200
-    assert tokens.json()["scope"] == "accounting_propose accounting_read core_read"
+    assert tokens.json()["scope"] == EXPECTED_SCOPE
     assert initialize.status_code == 200
     assert called.status_code == 200
     assert called.json()["result"]["structuredContent"]["status"] == "ok"
-    assert narrowed_tokens.status_code == 200
-    assert narrowed_tokens.json()["scope"] == "core_read"
-    assert denied_accounting.status_code == 200
-    assert (
-        denied_accounting.json()["result"]["structuredContent"]["error_code"] == "ODOO_AUTH_FAILED"
-    )
+    assert refreshed_tokens.status_code == 200
+    assert refreshed_tokens.json()["scope"] == EXPECTED_SCOPE
+    assert refreshed_call.status_code == 200
+    assert refreshed_call.json()["result"]["structuredContent"]["status"] == "ok"
     assert reset_context.status_code == 401
     assert [response.status_code for response in root_fallbacks] == [404] * len(root_fallbacks)
 
