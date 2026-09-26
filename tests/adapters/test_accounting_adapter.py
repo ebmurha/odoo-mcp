@@ -269,8 +269,9 @@ def _move(identifier: int) -> dict[str, Any]:
 async def _validated_client(
     connection: OdooConnectionSettings,
     transport: FakeTransport,
+    version: int = 19,
 ) -> OdooClient:
-    client = OdooClient(connection, 19, transport)
+    client = OdooClient(connection, version, transport)
     transport.rows["res.company"] = [
         {"id": 1, "name": "Synthetic Company"},
         {"id": 2, "name": "Synthetic Company 2"},
@@ -961,6 +962,73 @@ async def test_unauthorized_company_and_company_filter_injection_fail_before_tra
     assert unauthorized.value.code is ErrorCode.COMPANY_NOT_FOUND
     assert injected.value.code is ErrorCode.INVALID_INPUT
     assert transport.calls == []
+
+
+@pytest.mark.parametrize("version", [18, 19])
+async def test_currency_rate_read_is_exact_root_scoped_and_typed(
+    connection: OdooConnectionSettings,
+    version: int,
+) -> None:
+    transport = FakeTransport({})
+    client = await _validated_client(connection, transport, version)
+    transport.rows["res.company"] = [
+        {
+            "id": 1,
+            "currency_id": [40, "KES"],
+            "root_id": [10, "Root Company"],
+        }
+    ]
+    transport.rows["res.currency.rate"] = [
+        {
+            "id": 90,
+            "name": "2026-09-01",
+            "currency_id": [41, "USD"],
+            "company_id": [10, "Root Company"],
+            "company_rate": "129.123456",
+            "inverse_company_rate": "0.00774453",
+        }
+    ]
+
+    result = await client.get_currency_rates(1, 41, date(2026, 9, 30), page=PageRequest(limit=10))
+
+    assert result.company_currency.id == 40
+    assert result.root_company_id == 10
+    assert result.items[0].company_rate == Decimal("129.123456")
+    call = transport.calls[-1]
+    assert call["model"] == "res.currency.rate"
+    assert ["currency_id", "=", 41] in call["domain"]
+    assert ["company_id", "in", [False, 10]] in call["domain"]
+    assert ["name", "<=", "2026-09-30"] in call["domain"]
+    assert call["company_ids"] == (1,)
+
+
+async def test_currency_rate_read_rejects_cross_company_substitution(
+    connection: OdooConnectionSettings,
+) -> None:
+    transport = FakeTransport({})
+    client = await _validated_client(connection, transport)
+    transport.rows["res.company"] = [
+        {
+            "id": 1,
+            "currency_id": [40, "KES"],
+            "root_id": [10, "Root Company"],
+        }
+    ]
+    transport.rows["res.currency.rate"] = [
+        {
+            "id": 90,
+            "name": "2026-09-01",
+            "currency_id": [41, "USD"],
+            "company_id": [99, "Other Company"],
+            "company_rate": "129",
+            "inverse_company_rate": "0.01",
+        }
+    ]
+
+    with pytest.raises(OdooMcpError) as caught:
+        await client.get_currency_rates(1, 41, date(2026, 9, 30))
+
+    assert caught.value.code is ErrorCode.ODOO_API_ERROR
 
 
 @pytest.mark.parametrize("value", ["not-a-date", "NaN", [True, "Broken relation"]])

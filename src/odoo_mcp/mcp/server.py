@@ -29,6 +29,8 @@ from odoo_mcp.adapters.base import CapabilitySnapshot, Company, OdooAdapter
 from odoo_mcp.adapters.odoo.client import OdooClient
 from odoo_mcp.adapters.odoo.connections import ConnectionBinding, ConnectionResolver
 from odoo_mcp.mcp.error_codes import ErrorCode, ErrorResponse, OdooMcpError
+from odoo_mcp.mcp.payroll import register_payroll_tools
+from odoo_mcp.mcp.payroll_writes import register_payroll_write_tools
 from odoo_mcp.mcp.registry import TOOL_REGISTRY, ToolDefinition, get_tool_definition
 from odoo_mcp.mcp.request_ids import new_request_id
 from odoo_mcp.mcp.schemas import (
@@ -44,6 +46,8 @@ from odoo_mcp.mcp.schemas import (
     CreateInvoiceInput,
     CreateJournalEntryInput,
     CreditNoteInput,
+    CurrencyRateHistoryInput,
+    CurrencyRateHistoryResponse,
     InvoiceLineInput,
     JournalEntriesInput,
     JournalEntriesResponse,
@@ -72,6 +76,7 @@ from odoo_mcp.policy.write_safety import (
 )
 from odoo_mcp.storage import AuditEvent, Storage
 from odoo_mcp.workflows.accounting.cashbook import get_cashbook
+from odoo_mcp.workflows.accounting.currency_rates import get_currency_rate_history
 from odoo_mcp.workflows.accounting.invoicing import (
     execute_invoice_draft,
     list_open_documents,
@@ -110,6 +115,7 @@ ReportResponse: TypeAlias = (
     | UnmatchedStatementLinesResponse
     | OpenDocumentsResponse
     | JournalEntriesResponse
+    | CurrencyRateHistoryResponse
 )
 ReportOperation = Callable[[OdooAdapter, Company, str], Awaitable[ReportResponse]]
 LOGGER = logging.getLogger(__name__)
@@ -613,6 +619,56 @@ def create_mcp_server(
             except Exception:
                 LOGGER.warning("Accounting write audit persistence failed; details suppressed.")
         return response
+
+    currency_rate_definition = get_tool_definition("get_currency_rate_history")
+
+    async def currency_rate_history_tool(
+        company_id: PositiveCompanyId,
+        currency_id: PositiveIdentifier,
+        period_start: date,
+        period_end: date,
+        limit: ReportLimit = 100,
+        cursor: ReportCursor = None,
+    ) -> AccountingToolResponse:
+        try:
+            request = CurrencyRateHistoryInput(
+                company_id=company_id,
+                currency_id=currency_id,
+                period_start=period_start,
+                period_end=period_end,
+                limit=limit,
+                cursor=cursor,
+            )
+        except ValidationError:
+            return await invalid_accounting_report(
+                currency_rate_definition,
+                company_id,
+                {
+                    "company_id": company_id,
+                    "currency_id": currency_id,
+                    "period_start": period_start.isoformat(),
+                    "period_end": period_end.isoformat(),
+                    "limit": limit,
+                    "cursor": cursor,
+                },
+            )
+
+        async def run(adapter: OdooAdapter, company: Company, request_id: str) -> ReportResponse:
+            return await get_currency_rate_history(
+                adapter, request, company=company, request_id=request_id
+            )
+
+        return await accounting_report(currency_rate_definition, request, run)
+
+    server.add_tool(
+        currency_rate_history_tool,
+        name=currency_rate_definition.name,
+        title=currency_rate_definition.title,
+        description=currency_rate_definition.description,
+        annotations=currency_rate_definition.annotations,
+        meta=currency_rate_definition.protocol_meta(),
+        structured_output=True,
+    )
 
     trial_definition = get_tool_definition("get_trial_balance")
 
@@ -1856,6 +1912,18 @@ def create_mcp_server(
         annotations=post_journal_definition.annotations,
         meta=post_journal_definition.protocol_meta(),
         structured_output=True,
+    )
+    register_payroll_tools(
+        server,
+        resolver,
+        adapter_factory=adapter_factory,
+        storage=storage,
+    )
+    register_payroll_write_tools(
+        server,
+        resolver,
+        adapter_factory=adapter_factory,
+        storage=storage,
     )
     return server
 

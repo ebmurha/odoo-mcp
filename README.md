@@ -5,17 +5,20 @@
 `odoo-mcp` is a workflow-native MCP server for Odoo Enterprise. It exposes
 read-only capability discovery, trial-balance reporting, aged receivables and
 payables reporting, cashbook visibility, unmatched bank-line detection, and
-proposal-only bank reconciliation.
+proposal-only bank reconciliation. It also exposes bounded, read-only Payroll
+evidence for exact periods, batches, payslips, employees, salary rules, and
+payroll work entries, plus deterministic Payroll comparison and anomaly review.
 
 The initial accounting release also supports bounded invoice, supplier-bill,
 credit-note, payment-registration, and manual-journal workflows. Mutating tools
 are preview-only by default and require explicit execution plus idempotency.
 
-The internal accounting adapter provides bounded, typed, company-scoped read
-primitives for the reporting workflows. It enforces fixed model/action allowlists,
-strips denied fields, normalizes dates, decimals, relations, and cursor pages,
-and translates Odoo authentication, permission, and transport failures into
-safe errors. It does not expose generic CRUD or an Odoo configuration surface.
+The internal Odoo adapter provides bounded, typed, company-scoped primitives
+for the accounting and Payroll workflows. It enforces fixed model/action
+allowlists, strips denied fields, normalizes dates, decimals, relations, and
+cursor pages, and translates Odoo authentication, permission, and transport
+failures into safe errors. It does not expose generic CRUD or an Odoo
+configuration surface.
 
 Supported connection targets are Odoo.sh and self-hosted Odoo Enterprise:
 
@@ -155,6 +158,9 @@ boundary and never expand the technical user's Odoo permissions.
 
 ## Accounting workflows
 
+- `get_currency_rate_history` returns the selected company's Odoo rate history
+  for one exact currency, preserving company-over-shared precedence and both
+  rate directions without performing conversions.
 - `get_trial_balance` returns posted opening balances, inclusive-period debit
   and credit movement, closing balances, totals, and a Markdown artifact.
 - `get_profit_and_loss` classifies posted lines by Odoo's income and expense
@@ -205,6 +211,71 @@ distribution to exact analytic account IDs. These reports do not infer custom
 chart-of-accounts groups, fiscal-year closing rules, consolidation, eliminations,
 or localization-specific report layouts. Unsupported account classifications
 fail explicitly instead of being guessed.
+
+## Payroll evidence workflows
+
+- `list_payroll_periods` lists exact date pairs observed on company-scoped
+  payslips, with bounded status, batch, and currency evidence.
+- `get_payroll_batch` returns one exact batch, compact payslips, complete
+  employee and state counts, and currency-partitioned observed rule/category
+  totals.
+- `list_payslips` lists compact payslip facts for an exact batch, exact period,
+  or both. `get_payslip` returns one exact payslip with all bounded calculated
+  lines, worked days, and one-off inputs.
+- `get_employee_payroll_context` returns only the employee and contract/version
+  evidence applicable to an exact period.
+- `list_salary_rules` reports rule metadata observed on eligible payslip lines;
+  it is not a Payroll configuration catalogue.
+- `get_attendance_summary` summarizes Payroll work entries by employee, type,
+  code, and state. It does not read raw attendance or claim proof of physical
+  attendance.
+- `compare_payroll_periods` compares exact employee sets, contract facts,
+  work-entry hours, and currency-partitioned observed line, rule, and category
+  totals across two non-overlapping periods.
+- `analyze_employee_payroll_change` separates directly observed changes from
+  correlations and unresolved causes for one exact employee.
+- `detect_payroll_anomalies` applies fixed public percentage thresholds and an
+  optional request-time modified-z-score check. It does not learn or retain a
+  customer baseline; its source-linked Markdown summary is returned inline and
+  is not stored as an artifact. The percentage thresholds are 5% (`strict`),
+  10% (`standard`), and 20% (`relaxed`). Statistical checks require six
+  comparable history values and an absolute modified z-score of at least 3.5;
+  fewer values or a zero median absolute deviation is reported as unavailable.
+- `explain_payslip` organizes Odoo-returned line arithmetic, categories,
+  worked-day evidence, and contract context without evaluating salary-rule
+  code or reproducing gross-to-net calculation.
+- `prepare_payroll_approval_pack` returns one request-time JSON and inline
+  Markdown review pack with source-linked totals, optional prior-period
+  variance, anomalies, exceptions, limitations, recommended human review
+  actions, and a sign-off checklist. It neither approves payroll nor creates a
+  durable pack or workflow record.
+
+These evidence tools require `payroll_read` and the accessible Odoo Payroll
+capability. They are read-only, use request-bound pagination, return Odoo source
+IDs, and store only non-sensitive invocation metadata in the audit chain.
+Payroll responses are not persisted as artifacts, proposals, idempotency
+records, or workflow state. Monetary comparisons never combine or convert
+currencies; recognized `BASIC`, `GROSS`, and `NET` totals require those exact
+Odoo rule codes, and employer cost remains explicitly unavailable.
+
+## Controlled draft Payroll writes
+
+- `set_draft_payroll_input` previews or explicitly creates or updates one
+  eligible one-off input on one editable payslip.
+- `remove_draft_payroll_input` previews or explicitly removes one exact,
+  eligible one-off input.
+- `recalculate_draft_payslip` separately invokes Odoo's standard payslip
+  calculation and returns fresh payslip evidence.
+
+These tools require `payroll_draft_write` and the accessible Odoo Payroll
+capability. Every call defaults to a mutation-free preview. Execution requires
+`dry_run: false` and a non-empty idempotency key, rechecks the complete current
+input state, and serializes writes per payslip. Input changes never trigger
+recalculation automatically. Recalculation remains limited to an editable
+payslip and cannot confirm, post, close, pay, or otherwise finalize Payroll.
+Only operational IDs and statuses are retained for audit and replay; input
+descriptions, amounts, employee details, and calculated Payroll values are not
+stored by these write workflows.
 
 ## Verification
 

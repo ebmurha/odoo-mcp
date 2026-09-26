@@ -18,6 +18,8 @@ from odoo_mcp.adapters.accounting import (
     AnalyticAccount,
     BankStatementLine,
     Currency,
+    CurrencyRate,
+    CurrencyRatePage,
     DatePeriod,
     FilterClause,
     InvoiceDraft,
@@ -108,6 +110,14 @@ _PARTIAL_RECONCILIATION_FIELDS = [
 ]
 _JOURNAL_FIELDS = ["id", "name", "code", "type", "company_id", "currency_id"]
 _CURRENCY_FIELDS = ["id", "name", "rounding"]
+_CURRENCY_RATE_FIELDS = [
+    "id",
+    "name",
+    "currency_id",
+    "company_id",
+    "company_rate",
+    "inverse_company_rate",
+]
 _BANK_STATEMENT_LINE_FIELDS = [
     "id",
     "date",
@@ -485,6 +495,19 @@ def _normalize_currency(raw: RawRecord) -> Currency:
     )
 
 
+def _normalize_currency_rate(raw: RawRecord) -> CurrencyRate:
+    return CurrencyRate(
+        id=_read_field(raw, "res.currency.rate", "id", _positive_int),
+        effective_date=_read_field(raw, "res.currency.rate", "name", _date),
+        currency_id=_read_field(raw, "res.currency.rate", "currency_id", _relation).id,
+        company_id=_read_field(raw, "res.currency.rate", "company_id", _optional_company_id),
+        company_rate=_read_field(raw, "res.currency.rate", "company_rate", _positive_decimal),
+        inverse_company_rate=_read_field(
+            raw, "res.currency.rate", "inverse_company_rate", _positive_decimal
+        ),
+    )
+
+
 def _normalize_bank_statement_line(raw: RawRecord) -> BankStatementLine:
     return BankStatementLine(
         id=_positive_int(raw.get("id")),
@@ -833,6 +856,62 @@ class AccountingReader:
         if any(item.id not in currency_ids for item in result.items):
             raise _invalid_response()
         return result
+
+    async def get_currency_rates(
+        self,
+        company_id: int,
+        currency_id: int,
+        through_date: date,
+        *,
+        page: PageRequest = DEFAULT_PAGE_REQUEST,
+    ) -> CurrencyRatePage:
+        self._require_company(company_id)
+        if not isinstance(currency_id, int) or isinstance(currency_id, bool) or currency_id <= 0:
+            raise _invalid_input("The currency ID is invalid.", "Use a positive currency ID.")
+        ensure_model_read_allowed("res.company", module=None)
+        companies = await self._transport.search_read(
+            "res.company",
+            [["id", "=", company_id]],
+            ["id", "currency_id", "root_id"],
+            limit=2,
+            offset=0,
+            order="id asc",
+            company_ids=(company_id,),
+        )
+        if len(companies) != 1:
+            raise _invalid_response()
+        company = _record(companies[0])
+        if _positive_int(company.get("id")) != company_id:
+            raise _invalid_response()
+        company_currency = _relation(company.get("currency_id"))
+        root_company_id = _relation(company.get("root_id")).id
+
+        result = await self._read_page(
+            "res.currency.rate",
+            company_id,
+            [
+                ["currency_id", "=", currency_id],
+                ["company_id", "in", [False, root_company_id]],
+                ["name", "<=", through_date.isoformat()],
+            ],
+            ReadFilters(),
+            page,
+            _CURRENCY_RATE_FIELDS,
+            _normalize_currency_rate,
+        )
+        if any(
+            item.currency_id != currency_id
+            or item.company_id not in {None, root_company_id}
+            or item.effective_date > through_date
+            for item in result.items
+        ):
+            raise _invalid_response()
+        return CurrencyRatePage(
+            company_currency=company_currency,
+            root_company_id=root_company_id,
+            items=result.items,
+            next_cursor=result.next_cursor,
+        )
 
     async def get_bank_statement_lines(
         self,

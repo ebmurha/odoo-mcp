@@ -131,6 +131,7 @@ def test_streamable_http_lists_the_shared_registry(
     assert listed.status_code == 200
     assert [tool["name"] for tool in listed.json()["result"]["tools"]] == [
         "get_erp_capabilities",
+        "get_currency_rate_history",
         "get_trial_balance",
         "get_profit_and_loss",
         "get_balance_sheet",
@@ -149,6 +150,21 @@ def test_streamable_http_lists_the_shared_registry(
         "list_journal_entries",
         "create_journal_entry",
         "post_journal_entry",
+        "list_payroll_periods",
+        "get_payroll_batch",
+        "list_payslips",
+        "get_payslip",
+        "get_employee_payroll_context",
+        "list_salary_rules",
+        "get_attendance_summary",
+        "compare_payroll_periods",
+        "analyze_employee_payroll_change",
+        "detect_payroll_anomalies",
+        "explain_payslip",
+        "prepare_payroll_approval_pack",
+        "set_draft_payroll_input",
+        "remove_draft_payroll_input",
+        "recalculate_draft_payslip",
     ]
     assert called.status_code == 200
     assert called.json()["result"]["structuredContent"]["status"] == "ok"
@@ -283,6 +299,7 @@ async def test_stdio_profile_lists_the_shared_registry(tmp_path) -> None:
 
     assert [tool.name for tool in listed.tools] == [
         "get_erp_capabilities",
+        "get_currency_rate_history",
         "get_trial_balance",
         "get_profit_and_loss",
         "get_balance_sheet",
@@ -301,4 +318,19 @@ async def test_stdio_profile_lists_the_shared_registry(tmp_path) -> None:
         "list_journal_entries",
         "create_journal_entry",
         "post_journal_entry",
+        "list_payroll_periods",
+        "get_payroll_batch",
+        "list_payslips",
+        "get_payslip",
+        "get_employee_payroll_context",
+        "list_salary_rules",
+        "get_attendance_summary",
+        "compare_payroll_periods",
+        "analyze_employee_payroll_change",
+        "detect_payroll_anomalies",
+        "explain_payslip",
+        "prepare_payroll_approval_pack",
+        "set_draft_payroll_input",
+        "remove_draft_payroll_input",
+        "recalculate_draft_payslip",
     ]

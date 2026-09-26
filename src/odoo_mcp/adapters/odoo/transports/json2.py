@@ -22,7 +22,7 @@ class Json2Transport:
         self._headers = {
             "Authorization": f"bearer {connection.api_key.get_secret_value()}",
             "X-Odoo-Database": connection.database,
-            "User-Agent": "odoo-mcp/0.1.0",
+            "User-Agent": "odoo-mcp/0.3.0",
         }
 
     async def _call(

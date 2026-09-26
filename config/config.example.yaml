@@ -2,6 +2,7 @@ permissions:
   core_read:
     - get_erp_capabilities
   accounting_read:
+    - get_currency_rate_history
     - get_trial_balance
     - get_profit_and_loss
     - get_balance_sheet
@@ -21,3 +22,20 @@ permissions:
     - register_payment
     - create_journal_entry
     - post_journal_entry
+  payroll_read:
+    - list_payroll_periods
+    - get_payroll_batch
+    - list_payslips
+    - get_payslip
+    - get_employee_payroll_context
+    - list_salary_rules
+    - get_attendance_summary
+    - compare_payroll_periods
+    - analyze_employee_payroll_change
+    - detect_payroll_anomalies
+    - explain_payslip
+    - prepare_payroll_approval_pack
+  payroll_draft_write:
+    - set_draft_payroll_input
+    - remove_draft_payroll_input
+    - recalculate_draft_payslip

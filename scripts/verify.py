@@ -32,6 +32,7 @@ REQUIRED_SDIST_SUFFIXES = {
     "/docs/operations.md",
     "/scripts/verify_docker.py",
     "/scripts/verify_live_invoicing_odoo19.py",
+    "/scripts/verify_live_payroll_odoo19.py",
     "/scripts/verify_shared.py",
     "/server.json",
 }
@@ -118,7 +119,7 @@ def _verify_wheel_install(wheel: Path, *, temp: Path) -> None:
             (
                 "import odoo_mcp; "
                 "from odoo_mcp.app.main import main; "
-                "assert odoo_mcp.__version__ == '0.1.0'; "
+                "assert odoo_mcp.__version__ == '0.3.0'; "
                 "main(['--help'])"
             ),
         ],

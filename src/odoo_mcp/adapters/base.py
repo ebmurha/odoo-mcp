@@ -15,6 +15,7 @@ from odoo_mcp.adapters.accounting import (
     AnalyticAccount,
     BankStatementLine,
     Currency,
+    CurrencyRatePage,
     DatePeriod,
     InvoiceDraft,
     InvoiceEffect,
@@ -33,6 +34,31 @@ from odoo_mcp.adapters.accounting import (
     RecordPage,
     RelatedRecord,
 )
+from odoo_mcp.adapters.payroll import (
+    DEFAULT_PAYROLL_PAGE_REQUEST,
+    DeletedPayslipInput,
+    DraftPayslipInputCreate,
+    DraftPayslipInputUpdate,
+    PayrollBatch,
+    PayrollBatchFilters,
+    PayrollContractFilters,
+    PayrollContractSegment,
+    PayrollEmployee,
+    PayrollInputType,
+    PayrollInputTypeFilters,
+    PayrollPage,
+    PayrollPageRequest,
+    PayrollStructure,
+    PayrollWorkEntry,
+    PayrollWorkEntryFilters,
+    PayrollWriteCheckpoint,
+    Payslip,
+    PayslipChildFilters,
+    PayslipFilters,
+    PayslipInput,
+    PayslipLine,
+    PayslipWorkedDay,
+)
 
 
 class Company(BaseModel):
@@ -41,6 +67,7 @@ class Company(BaseModel):
     id: int
     name: str
     currency: RelatedRecord | None = None
+    root_id: int | None = None
 
 
 class CapabilitySnapshot(BaseModel):
@@ -82,6 +109,15 @@ class OdooAdapter(Protocol):
         *,
         page: PageRequest = DEFAULT_PAGE_REQUEST,
     ) -> RecordPage[Currency]: ...
+
+    async def get_currency_rates(
+        self,
+        company_id: int,
+        currency_id: int,
+        through_date: Date,
+        *,
+        page: PageRequest = DEFAULT_PAGE_REQUEST,
+    ) -> CurrencyRatePage: ...
 
     async def get_bank_statement_lines(
         self,
@@ -153,3 +189,102 @@ class OdooAdapter(Protocol):
     ) -> PaymentRegistrationPreview: ...
 
     async def register_payment(self, registration: PaymentRegistration) -> InvoiceEffect: ...
+
+    async def get_payroll_batches(
+        self,
+        company_id: int,
+        filters: PayrollBatchFilters,
+        page: PayrollPageRequest = DEFAULT_PAYROLL_PAGE_REQUEST,
+    ) -> PayrollPage[PayrollBatch]: ...
+
+    async def get_payslips(
+        self,
+        company_id: int,
+        filters: PayslipFilters,
+        page: PayrollPageRequest = DEFAULT_PAYROLL_PAGE_REQUEST,
+    ) -> PayrollPage[Payslip]: ...
+
+    async def get_payslip_lines(
+        self,
+        company_id: int,
+        filters: PayslipChildFilters,
+        page: PayrollPageRequest = DEFAULT_PAYROLL_PAGE_REQUEST,
+    ) -> PayrollPage[PayslipLine]: ...
+
+    async def get_payslip_worked_days(
+        self,
+        company_id: int,
+        filters: PayslipChildFilters,
+        page: PayrollPageRequest = DEFAULT_PAYROLL_PAGE_REQUEST,
+    ) -> PayrollPage[PayslipWorkedDay]: ...
+
+    async def get_payslip_inputs(
+        self,
+        company_id: int,
+        filters: PayslipChildFilters,
+        page: PayrollPageRequest = DEFAULT_PAYROLL_PAGE_REQUEST,
+    ) -> PayrollPage[PayslipInput]: ...
+
+    async def get_payroll_input_types(
+        self,
+        company_id: int,
+        filters: PayrollInputTypeFilters,
+        page: PayrollPageRequest = DEFAULT_PAYROLL_PAGE_REQUEST,
+    ) -> PayrollPage[PayrollInputType]: ...
+
+    async def get_payroll_structure(
+        self,
+        company_id: int,
+        structure_id: int,
+    ) -> PayrollStructure: ...
+
+    async def get_payroll_employees(
+        self,
+        company_id: int,
+        employee_ids: tuple[int, ...],
+        page: PayrollPageRequest = DEFAULT_PAYROLL_PAGE_REQUEST,
+    ) -> PayrollPage[PayrollEmployee]: ...
+
+    async def get_payroll_contract_segments(
+        self,
+        company_id: int,
+        filters: PayrollContractFilters,
+        page: PayrollPageRequest = DEFAULT_PAYROLL_PAGE_REQUEST,
+    ) -> PayrollPage[PayrollContractSegment]: ...
+
+    async def get_payroll_work_entries(
+        self,
+        company_id: int,
+        filters: PayrollWorkEntryFilters,
+        page: PayrollPageRequest = DEFAULT_PAYROLL_PAGE_REQUEST,
+    ) -> PayrollPage[PayrollWorkEntry]: ...
+
+    async def create_draft_payslip_input(
+        self,
+        company_id: int,
+        payload: DraftPayslipInputCreate,
+        expected: PayrollWriteCheckpoint,
+    ) -> PayslipInput: ...
+
+    async def update_draft_payslip_input(
+        self,
+        company_id: int,
+        input_id: int,
+        payload: DraftPayslipInputUpdate,
+        expected: PayrollWriteCheckpoint,
+    ) -> PayslipInput: ...
+
+    async def delete_draft_payslip_input(
+        self,
+        company_id: int,
+        payslip_id: int,
+        input_id: int,
+        expected: PayrollWriteCheckpoint,
+    ) -> DeletedPayslipInput: ...
+
+    async def recompute_draft_payslip(
+        self,
+        company_id: int,
+        payslip_id: int,
+        expected: PayrollWriteCheckpoint,
+    ) -> Payslip: ...

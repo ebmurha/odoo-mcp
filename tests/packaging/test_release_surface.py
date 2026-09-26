@@ -14,7 +14,7 @@ def test_release_metadata_is_consistent_and_installable() -> None:
     registry = json.loads((ROOT / "server.json").read_text(encoding="utf-8"))
     package = registry["packages"][0]
 
-    assert project["project"]["version"] == "0.1.0"
+    assert project["project"]["version"] == "0.3.0"
     assert project["project"]["name"] == "odoo-erp-mcp"
     assert registry["name"] == "io.github.ebmurha/odoo-mcp"
     assert registry["version"] == project["project"]["version"]
@@ -62,6 +62,7 @@ def test_release_documentation_and_deployment_templates_are_present() -> None:
         "deploy/reverse-proxy/nginx.conf",
         "scripts/verify_docker.py",
         "scripts/verify_live_invoicing_odoo19.py",
+        "scripts/verify_live_payroll_odoo19.py",
         "scripts/verify_shared.py",
     )
     assert all((ROOT / path).is_file() for path in required)

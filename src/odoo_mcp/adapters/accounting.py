@@ -72,6 +72,22 @@ class Currency(AdapterValue):
     rounding: Decimal = Field(gt=0)
 
 
+class CurrencyRate(AdapterValue):
+    id: int = Field(gt=0)
+    effective_date: Date
+    currency_id: int = Field(gt=0)
+    company_id: int | None = Field(default=None, gt=0)
+    company_rate: Decimal = Field(gt=0)
+    inverse_company_rate: Decimal = Field(gt=0)
+
+
+class CurrencyRatePage(AdapterValue):
+    company_currency: RelatedRecord
+    root_company_id: int = Field(gt=0)
+    items: list[CurrencyRate]
+    next_cursor: str | None = None
+
+
 ItemT = TypeVar("ItemT", bound=AdapterValue)
 
 

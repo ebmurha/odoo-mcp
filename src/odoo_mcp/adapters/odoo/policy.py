@@ -22,6 +22,7 @@ MODULE_MODEL_READ_ALLOWLIST: dict[str, frozenset[str]] = {
             "account.partial.reconcile",
             "account.analytic.account",
             "res.currency",
+            "res.currency.rate",
             "res.partner",
             "product.product",
         }
@@ -39,6 +40,47 @@ ACCOUNTING_MODEL_ACTION_ALLOWLIST: dict[str, frozenset[str]] = {
             "execute_standard_workflow",
         }
     ),
+}
+
+PAYROLL_MODEL_READ_ALLOWLIST_BY_VERSION: dict[int, frozenset[str]] = {
+    18: frozenset(
+        {
+            "hr.payslip",
+            "hr.payslip.run",
+            "hr.payslip.line",
+            "hr.payslip.worked_days",
+            "hr.payslip.input",
+            "hr.payslip.input.type",
+            "hr.payroll.structure",
+            "hr.employee",
+            "hr.contract",
+            "hr.work.entry",
+        }
+    ),
+    19: frozenset(
+        {
+            "hr.payslip",
+            "hr.payslip.run",
+            "hr.payslip.line",
+            "hr.payslip.worked_days",
+            "hr.payslip.input",
+            "hr.payslip.input.type",
+            "hr.payroll.structure",
+            "hr.employee",
+            "hr.version",
+            "hr.work.entry",
+        }
+    ),
+}
+
+PAYROLL_MODEL_ACTION_ALLOWLIST_BY_VERSION: dict[int, dict[str, frozenset[str]]] = {
+    version: {
+        "hr.payslip.input": frozenset(
+            {"create_draft_input", "update_draft_input", "delete_draft_input"}
+        ),
+        "hr.payslip": frozenset({"compute_sheet_on_editable_payslip"}),
+    }
+    for version in (18, 19)
 }
 
 FIELD_DENYLIST = frozenset(
@@ -71,11 +113,27 @@ def ensure_accounting_action_allowed(model: str, action: str) -> None:
         raise _model_denied()
 
 
+def ensure_payroll_model_read_allowed(version: int, model: str) -> None:
+    if model not in PAYROLL_MODEL_READ_ALLOWLIST_BY_VERSION.get(version, frozenset()):
+        raise _model_denied()
+
+
+def ensure_payroll_action_allowed(version: int, model: str, action: str) -> None:
+    allowed = PAYROLL_MODEL_ACTION_ALLOWLIST_BY_VERSION.get(version, {}).get(model, frozenset())
+    if action in {"create", "write", "unlink"} or action not in allowed:
+        raise _model_denied()
+
+
 def ensure_probe_allowed(capability: str, model: str) -> None:
     from odoo_mcp.adapters.odoo.capabilities import CAPABILITY_PROBES
 
-    read_allowed = model in CORE_MODEL_READ_ALLOWLIST or any(
-        model in module_models for module_models in MODULE_MODEL_READ_ALLOWLIST.values()
+    read_allowed = (
+        model in CORE_MODEL_READ_ALLOWLIST
+        or any(model in module_models for module_models in MODULE_MODEL_READ_ALLOWLIST.values())
+        or any(
+            model in version_models
+            for version_models in PAYROLL_MODEL_READ_ALLOWLIST_BY_VERSION.values()
+        )
     )
     if CAPABILITY_PROBES.get(capability) != model or not read_allowed:
         raise _model_denied()

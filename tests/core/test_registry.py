@@ -14,7 +14,7 @@ from odoo_mcp.app.settings import (
     OdooConnectionSettings,
     load_permission_config,
 )
-from odoo_mcp.mcp.registry import TOOL_REGISTRY
+from odoo_mcp.mcp.registry import PERMISSION_GROUPS, TOOL_REGISTRY
 from odoo_mcp.mcp.server import create_mcp_server
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -88,6 +88,7 @@ async def test_all_profiles_expose_identical_registry_and_discovery(
     assert contracts[0] == contracts[1] == contracts[2]
     assert [tool["name"] for tool in contracts[0]] == [
         "get_erp_capabilities",
+        "get_currency_rate_history",
         "get_trial_balance",
         "get_profit_and_loss",
         "get_balance_sheet",
@@ -106,6 +107,21 @@ async def test_all_profiles_expose_identical_registry_and_discovery(
         "list_journal_entries",
         "create_journal_entry",
         "post_journal_entry",
+        "list_payroll_periods",
+        "get_payroll_batch",
+        "list_payslips",
+        "get_payslip",
+        "get_employee_payroll_context",
+        "list_salary_rules",
+        "get_attendance_summary",
+        "compare_payroll_periods",
+        "analyze_employee_payroll_change",
+        "detect_payroll_anomalies",
+        "explain_payslip",
+        "prepare_payroll_approval_pack",
+        "set_draft_payroll_input",
+        "remove_draft_payroll_input",
+        "recalculate_draft_payslip",
     ]
     for output in outputs:
         output.pop("request_id")
@@ -123,53 +139,111 @@ async def test_registry_metadata_and_schemas_match_the_contract(
     server = create_mcp_server(Resolver(_binding(DeploymentProfile.LOCAL, connection)))
     tools = await server.list_tools()
 
-    assert len(TOOL_REGISTRY) == 19
-    assert len(tools) == 19
+    assert len(TOOL_REGISTRY) == 35
+    assert len(tools) == 35
     assert [tool.name for tool in tools] == [definition.name for definition in TOOL_REGISTRY]
     for tool, definition in zip(tools, TOOL_REGISTRY, strict=True):
         assert tool.input_schema["type"] == "object"
         assert tool.output_schema is not None
         assert tool.annotations is not None
         assert tool.annotations.read_only_hint is (definition.risk_level == "read")
-        assert tool.annotations.destructive_hint is (definition.risk_level == "confirm_write")
+        assert tool.annotations.destructive_hint is definition.annotations.destructive_hint
         assert tool.annotations.idempotent_hint is True
         assert tool.annotations.open_world_hint is True
         assert tool.meta == definition.protocol_meta()
     assert tools[0].input_schema.get("properties") == {}
     assert set(tools[1].input_schema["required"]) == {
+        "company_id",
+        "currency_id",
         "period_start",
         "period_end",
-        "company_id",
     }
     assert set(tools[2].input_schema["required"]) == {
         "period_start",
         "period_end",
         "company_id",
     }
-    assert set(tools[3].input_schema["required"]) == {"as_of_date", "company_id"}
-    assert set(tools[4].input_schema["required"]) == {"as_of_date", "company_id"}
-    assert set(tools[6].input_schema["required"]) == {
+    assert set(tools[3].input_schema["required"]) == {
         "period_start",
         "period_end",
         "company_id",
     }
-    assert set(tools[8].input_schema["required"]) == {
+    assert set(tools[4].input_schema["required"]) == {"as_of_date", "company_id"}
+    assert set(tools[5].input_schema["required"]) == {"as_of_date", "company_id"}
+    assert set(tools[7].input_schema["required"]) == {
+        "period_start",
+        "period_end",
+        "company_id",
+    }
+    assert set(tools[9].input_schema["required"]) == {
         "period",
         "company_id",
         "bank_journal_id",
         "statement_line_ids",
     }
-    assert "vendor_reference" not in tools[11].input_schema["properties"]
-    assert "vendor_reference" in tools[12].input_schema["properties"]
-    assert tools[14].annotations.destructive_hint is True
+    assert "vendor_reference" not in tools[12].input_schema["properties"]
+    assert "vendor_reference" in tools[13].input_schema["properties"]
     assert tools[15].annotations.destructive_hint is True
-    assert set(tools[16].input_schema["required"]) == {
+    assert tools[16].annotations.destructive_hint is True
+    assert set(tools[17].input_schema["required"]) == {
         "period_start",
         "period_end",
         "company_id",
     }
-    assert tools[17].annotations.destructive_hint is False
-    assert tools[18].annotations.destructive_hint is True
+    assert tools[18].annotations.destructive_hint is False
+    assert tools[19].annotations.destructive_hint is True
+    assert set(tools[20].input_schema["required"]) == {
+        "window_start",
+        "window_end",
+        "company_id",
+    }
+    assert set(tools[21].input_schema["required"]) == {"batch_id", "company_id"}
+    assert set(tools[22].input_schema["required"]) == {"company_id"}
+    assert set(tools[23].input_schema["required"]) == {"payslip_id", "company_id"}
+    assert set(tools[24].input_schema["required"]) == {
+        "employee_id",
+        "period_start",
+        "period_end",
+        "company_id",
+    }
+    assert set(tools[25].input_schema["required"]) == {"company_id"}
+    assert set(tools[26].input_schema["required"]) == {
+        "employee_ids",
+        "period_start",
+        "period_end",
+        "company_id",
+    }
+    assert set(tools[27].input_schema["required"]) == {
+        "baseline_period",
+        "target_period",
+        "company_id",
+    }
+    assert set(tools[28].input_schema["required"]) == {
+        "employee_id",
+        "baseline_period",
+        "target_period",
+        "company_id",
+    }
+    assert set(tools[29].input_schema["required"]) == {
+        "baseline_period",
+        "target_period",
+        "company_id",
+    }
+    assert set(tools[30].input_schema["required"]) == {"payslip_id", "company_id"}
+    assert all(tool.annotations.read_only_hint is True for tool in tools[20:32])
+    assert all("dry_run" not in tool.input_schema["properties"] for tool in tools[20:32])
+    assert set(tools[32].input_schema["required"]) == {"company_id", "payslip_id"}
+    assert set(tools[33].input_schema["required"]) == {
+        "company_id",
+        "payslip_id",
+        "input_id",
+    }
+    assert set(tools[34].input_schema["required"]) == {"company_id", "payslip_id"}
+    assert tools[32].annotations.destructive_hint is False
+    assert tools[33].annotations.destructive_hint is True
+    assert tools[34].annotations.destructive_hint is True
+    assert all(tool.annotations.read_only_hint is False for tool in tools[32:])
+    assert all("dry_run" in tool.input_schema["properties"] for tool in tools[32:])
 
 
 async def test_permission_denial_happens_before_adapter_creation(
@@ -231,6 +305,7 @@ def test_public_permission_example_matches_registry() -> None:
     assert mapped == {
         "core_read": {"get_erp_capabilities"},
         "accounting_read": {
+            "get_currency_rate_history",
             "get_trial_balance",
             "get_profit_and_loss",
             "get_balance_sheet",
@@ -252,4 +327,32 @@ def test_public_permission_example_matches_registry() -> None:
             "create_journal_entry",
             "post_journal_entry",
         },
+        "payroll_read": {
+            "list_payroll_periods",
+            "get_payroll_batch",
+            "list_payslips",
+            "get_payslip",
+            "get_employee_payroll_context",
+            "list_salary_rules",
+            "get_attendance_summary",
+            "compare_payroll_periods",
+            "analyze_employee_payroll_change",
+            "detect_payroll_anomalies",
+            "explain_payslip",
+            "prepare_payroll_approval_pack",
+        },
+        "payroll_draft_write": {
+            "set_draft_payroll_input",
+            "remove_draft_payroll_input",
+            "recalculate_draft_payslip",
+        },
     }
+    assert PERMISSION_GROUPS == frozenset(
+        {
+            "core_read",
+            "accounting_read",
+            "accounting_propose",
+            "payroll_read",
+            "payroll_draft_write",
+        }
+    )

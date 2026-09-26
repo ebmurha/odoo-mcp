@@ -11,6 +11,16 @@ from odoo_mcp.workflows.core.capabilities import ToolAvailability
 
 RiskLevel = Literal["read", "propose", "draft_write", "confirm_write"]
 
+PERMISSION_GROUPS = frozenset(
+    {
+        "core_read",
+        "accounting_read",
+        "accounting_propose",
+        "payroll_read",
+        "payroll_draft_write",
+    }
+)
+
 
 @dataclass(frozen=True)
 class ToolDefinition:
@@ -31,10 +41,15 @@ class ToolDefinition:
                 and self.annotations.idempotent_hint is True
             )
         else:
-            expected_destructive = self.risk_level == "confirm_write"
+            destructive_hint = self.annotations.destructive_hint
+            destructive_is_valid = (
+                isinstance(destructive_hint, bool)
+                if self.risk_level == "draft_write"
+                else destructive_hint is (self.risk_level == "confirm_write")
+            )
             valid = (
                 self.annotations.read_only_hint is False
-                and self.annotations.destructive_hint is expected_destructive
+                and destructive_is_valid
                 and self.annotations.idempotent_hint is True
                 and self.annotations.open_world_hint is True
             )
@@ -69,6 +84,24 @@ TOOL_REGISTRY: tuple[ToolDefinition, ...] = (
         risk_level="read",
         required_permission="core_read",
         required_capability=None,
+        annotations=ToolAnnotations(
+            read_only_hint=True,
+            destructive_hint=False,
+            idempotent_hint=True,
+            open_world_hint=True,
+        ),
+    ),
+    ToolDefinition(
+        name="get_currency_rate_history",
+        version="1.0.0",
+        title="Get currency rate history",
+        description=(
+            "Return company-scoped Odoo currency-rate history for an exact currency "
+            "and inclusive period."
+        ),
+        risk_level="read",
+        required_permission="accounting_read",
+        required_capability="account",
         annotations=ToolAnnotations(
             read_only_hint=True,
             destructive_hint=False,
@@ -361,6 +394,256 @@ TOOL_REGISTRY: tuple[ToolDefinition, ...] = (
         risk_level="confirm_write",
         required_permission="accounting_propose",
         required_capability="account",
+        annotations=ToolAnnotations(
+            read_only_hint=False,
+            destructive_hint=True,
+            idempotent_hint=True,
+            open_world_hint=True,
+        ),
+    ),
+    ToolDefinition(
+        name="list_payroll_periods",
+        version="1.0.0",
+        title="List payroll periods",
+        description="List bounded exact periods observed in authorized Odoo payslips.",
+        risk_level="read",
+        required_permission="payroll_read",
+        required_capability="hr_payroll",
+        annotations=ToolAnnotations(
+            read_only_hint=True,
+            destructive_hint=False,
+            idempotent_hint=True,
+            open_world_hint=True,
+        ),
+    ),
+    ToolDefinition(
+        name="get_payroll_batch",
+        version="1.0.0",
+        title="Get payroll batch",
+        description=(
+            "Return one exact payroll batch with compact payslips and complete observed totals."
+        ),
+        risk_level="read",
+        required_permission="payroll_read",
+        required_capability="hr_payroll",
+        annotations=ToolAnnotations(
+            read_only_hint=True,
+            destructive_hint=False,
+            idempotent_hint=True,
+            open_world_hint=True,
+        ),
+    ),
+    ToolDefinition(
+        name="list_payslips",
+        version="1.0.0",
+        title="List payslips",
+        description="List compact payslips for an exact batch, exact period, or both.",
+        risk_level="read",
+        required_permission="payroll_read",
+        required_capability="hr_payroll",
+        annotations=ToolAnnotations(
+            read_only_hint=True,
+            destructive_hint=False,
+            idempotent_hint=True,
+            open_world_hint=True,
+        ),
+    ),
+    ToolDefinition(
+        name="get_payslip",
+        version="1.0.0",
+        title="Get payslip",
+        description=(
+            "Return one exact payslip with bounded calculated lines, worked days, and inputs."
+        ),
+        risk_level="read",
+        required_permission="payroll_read",
+        required_capability="hr_payroll",
+        annotations=ToolAnnotations(
+            read_only_hint=True,
+            destructive_hint=False,
+            idempotent_hint=True,
+            open_world_hint=True,
+        ),
+    ),
+    ToolDefinition(
+        name="get_employee_payroll_context",
+        version="1.0.0",
+        title="Get employee payroll context",
+        description=(
+            "Return one employee's bounded contract evidence for an exact payroll period."
+        ),
+        risk_level="read",
+        required_permission="payroll_read",
+        required_capability="hr_payroll",
+        annotations=ToolAnnotations(
+            read_only_hint=True,
+            destructive_hint=False,
+            idempotent_hint=True,
+            open_world_hint=True,
+        ),
+    ),
+    ToolDefinition(
+        name="list_salary_rules",
+        version="1.0.0",
+        title="List observed salary rules",
+        description=(
+            "List salary-rule snapshots observed on eligible company-scoped payslip lines."
+        ),
+        risk_level="read",
+        required_permission="payroll_read",
+        required_capability="hr_payroll",
+        annotations=ToolAnnotations(
+            read_only_hint=True,
+            destructive_hint=False,
+            idempotent_hint=True,
+            open_world_hint=True,
+        ),
+    ),
+    ToolDefinition(
+        name="get_attendance_summary",
+        version="1.0.0",
+        title="Get payroll work-entry summary",
+        description=(
+            "Summarize bounded Odoo payroll work-entry evidence without claiming attendance."
+        ),
+        risk_level="read",
+        required_permission="payroll_read",
+        required_capability="hr_payroll",
+        annotations=ToolAnnotations(
+            read_only_hint=True,
+            destructive_hint=False,
+            idempotent_hint=True,
+            open_world_hint=True,
+        ),
+    ),
+    ToolDefinition(
+        name="compare_payroll_periods",
+        version="1.0.0",
+        title="Compare payroll periods",
+        description=(
+            "Compare two exact payroll periods using current, source-linked Odoo evidence."
+        ),
+        risk_level="read",
+        required_permission="payroll_read",
+        required_capability="hr_payroll",
+        annotations=ToolAnnotations(
+            read_only_hint=True,
+            destructive_hint=False,
+            idempotent_hint=True,
+            open_world_hint=True,
+        ),
+    ),
+    ToolDefinition(
+        name="analyze_employee_payroll_change",
+        version="1.0.0",
+        title="Analyze employee payroll change",
+        description=(
+            "Analyze one employee's exact line, contract, and work-entry changes across periods."
+        ),
+        risk_level="read",
+        required_permission="payroll_read",
+        required_capability="hr_payroll",
+        annotations=ToolAnnotations(
+            read_only_hint=True,
+            destructive_hint=False,
+            idempotent_hint=True,
+            open_world_hint=True,
+        ),
+    ),
+    ToolDefinition(
+        name="detect_payroll_anomalies",
+        version="1.0.0",
+        title="Detect payroll anomalies",
+        description=(
+            "Apply fixed, explainable thresholds and optional request-time history "
+            "to payroll evidence."
+        ),
+        risk_level="read",
+        required_permission="payroll_read",
+        required_capability="hr_payroll",
+        annotations=ToolAnnotations(
+            read_only_hint=True,
+            destructive_hint=False,
+            idempotent_hint=True,
+            open_world_hint=True,
+        ),
+    ),
+    ToolDefinition(
+        name="explain_payslip",
+        version="1.0.0",
+        title="Explain payslip evidence",
+        description=(
+            "Organize one exact payslip's Odoo-returned lines and context without recalculating it."
+        ),
+        risk_level="read",
+        required_permission="payroll_read",
+        required_capability="hr_payroll",
+        annotations=ToolAnnotations(
+            read_only_hint=True,
+            destructive_hint=False,
+            idempotent_hint=True,
+            open_world_hint=True,
+        ),
+    ),
+    ToolDefinition(
+        name="prepare_payroll_approval_pack",
+        version="1.0.0",
+        title="Prepare payroll approval pack",
+        description=(
+            "Prepare an inline, source-linked payroll review pack without approving payroll."
+        ),
+        risk_level="read",
+        required_permission="payroll_read",
+        required_capability="hr_payroll",
+        annotations=ToolAnnotations(
+            read_only_hint=True,
+            destructive_hint=False,
+            idempotent_hint=True,
+            open_world_hint=True,
+        ),
+    ),
+    ToolDefinition(
+        name="set_draft_payroll_input",
+        version="1.0.0",
+        title="Set draft payroll input",
+        description=(
+            "Preview or explicitly create or update one eligible input on one editable payslip."
+        ),
+        risk_level="draft_write",
+        required_permission="payroll_draft_write",
+        required_capability="hr_payroll",
+        annotations=ToolAnnotations(
+            read_only_hint=False,
+            destructive_hint=False,
+            idempotent_hint=True,
+            open_world_hint=True,
+        ),
+    ),
+    ToolDefinition(
+        name="remove_draft_payroll_input",
+        version="1.0.0",
+        title="Remove draft payroll input",
+        description=("Preview or explicitly remove one eligible input from one editable payslip."),
+        risk_level="draft_write",
+        required_permission="payroll_draft_write",
+        required_capability="hr_payroll",
+        annotations=ToolAnnotations(
+            read_only_hint=False,
+            destructive_hint=True,
+            idempotent_hint=True,
+            open_world_hint=True,
+        ),
+    ),
+    ToolDefinition(
+        name="recalculate_draft_payslip",
+        version="1.0.0",
+        title="Recalculate draft payslip",
+        description=(
+            "Preview or explicitly invoke Odoo's standard calculation on one editable payslip."
+        ),
+        risk_level="draft_write",
+        required_permission="payroll_draft_write",
+        required_capability="hr_payroll",
         annotations=ToolAnnotations(
             read_only_hint=False,
             destructive_hint=True,
