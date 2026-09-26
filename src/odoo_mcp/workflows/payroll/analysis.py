@@ -908,7 +908,7 @@ def _finding(
     *,
     code: str,
     severity: str,
-    baseline: PayrollPeriodRange,
+    baseline: PayrollPeriodRange | None,
     target: PayrollPeriodRange,
     calculation: str,
     rule: str,
@@ -1229,7 +1229,7 @@ def _threshold_findings(
 
 
 def _work_entry_conflict_findings(
-    baseline: _Snapshot,
+    baseline: _Snapshot | None,
     target: _Snapshot,
 ) -> list[PayrollFinding]:
     grouped: dict[int, list[PayrollWorkEntry]] = defaultdict(list)
@@ -1241,17 +1241,19 @@ def _work_entry_conflict_findings(
     for employee_id, rows in sorted(grouped.items()):
         refs = evidence._source_refs({"hr.work.entry": (row.id for row in rows)})
         count = sum(int(row.conflict or row.state == "conflict") for row in rows)
-        fact = _fact("work_entry_conflict_count", "0", str(count), refs)
+        baseline_value = None if baseline is None else "0"
+        fact = _fact("work_entry_conflict_count", baseline_value, str(count), refs)
         result.append(
             _finding(
                 code="work_entry_conflict",
                 severity="critical",
-                baseline=baseline.period,
+                baseline=None if baseline is None else baseline.period,
                 target=target.period,
                 employee=_named(employee_id, names[employee_id]),
-                baseline_value="0",
+                baseline_value=baseline_value,
                 target_value=str(count),
-                absolute_delta=Decimal(count),
+                absolute_delta=None if baseline is None else Decimal(count),
+                observed_delta=Decimal(count),
                 calculation="count of target work entries marked conflict",
                 rule="Any target work-entry conflict is critical review evidence.",
                 refs=refs,
@@ -1845,22 +1847,21 @@ def _approval_pack_findings(
     *,
     profile: ThresholdProfile,
 ) -> list[PayrollFinding]:
-    if baseline is None:
-        return []
-    line_changes = _line_changes(baseline, target)
-    contract_changes = _contract_changes(baseline, target)
-    work_hours = _work_entry_hours(baseline, target)
-    findings = _base_findings(baseline, target, line_changes, contract_changes)
-    findings.extend(
-        _threshold_findings(
-            baseline,
-            target,
-            line_changes,
-            work_hours,
-            profile=profile,
+    findings = _work_entry_conflict_findings(baseline, target)
+    if baseline is not None:
+        line_changes = _line_changes(baseline, target)
+        contract_changes = _contract_changes(baseline, target)
+        work_hours = _work_entry_hours(baseline, target)
+        findings.extend(_base_findings(baseline, target, line_changes, contract_changes))
+        findings.extend(
+            _threshold_findings(
+                baseline,
+                target,
+                line_changes,
+                work_hours,
+                profile=profile,
+            )
         )
-    )
-    findings.extend(_work_entry_conflict_findings(baseline, target))
     findings.sort(
         key=lambda value: (
             value.finding_code,
@@ -1962,6 +1963,93 @@ def _render_recognized_period(value: PayrollRecognizedPeriodValue) -> str:
     if value.status == "unavailable":
         return f"unavailable (`{value.reason}`)"
     return ", ".join(f"currency `{item.currency.id}` = `{item.total}`" for item in value.values)
+
+
+def _render_optional(value: object | None) -> str:
+    return "not applicable" if value is None else f"`{_markdown_text(value)}`"
+
+
+def _render_finding(finding: PayrollFinding) -> list[str]:
+    employee = (
+        "company scope"
+        if finding.employee is None
+        else f"employee `{finding.employee.id}` ({_markdown_text(finding.employee.name)})"
+    )
+    baseline_period = (
+        "not requested"
+        if finding.baseline_period is None
+        else (
+            f"`{finding.baseline_period.period_start.isoformat()}` to "
+            f"`{finding.baseline_period.period_end.isoformat()}`"
+        )
+    )
+    rows = [
+        f"### `{finding.finding_code}` — {employee}",
+        "",
+        f"- Severity: `{finding.severity}`",
+        f"- Baseline period: {baseline_period}",
+        (
+            f"- Target period: `{finding.target_period.period_start.isoformat()}` to "
+            f"`{finding.target_period.period_end.isoformat()}`"
+        ),
+        (
+            "- Currency: not applicable"
+            if finding.currency is None
+            else (f"- Currency: `{finding.currency.id}` ({_markdown_text(finding.currency.name)})")
+        ),
+        (
+            "- Salary rule: not applicable"
+            if finding.salary_rule is None
+            else (
+                f"- Salary rule: `{finding.salary_rule.id}` "
+                f"({_markdown_text(finding.salary_rule.name)})"
+            )
+        ),
+        f"- Rule code: {_render_optional(finding.code)}",
+        f"- Baseline value: {_render_optional(finding.baseline_value)}",
+        f"- Target value: {_render_optional(finding.target_value)}",
+        f"- Absolute delta: {_render_optional(finding.absolute_delta)}",
+        f"- Percentage delta: {_render_optional(finding.percentage_delta)}",
+        f"- Observed delta: {_render_optional(finding.observed_delta)}",
+        f"- Threshold: {_render_optional(finding.threshold)}",
+        f"- Threshold profile: {_render_optional(finding.threshold_profile)}",
+        f"- Calculation: {_markdown_text(finding.calculation)}",
+        f"- Rule: {_markdown_text(finding.rule)}",
+        "- Source references:",
+    ]
+    rows.extend([f"  - {value}" for value in _render_refs(finding.source_refs)] or ["  - None."])
+    rows.append("- Evidence:")
+    rows.extend(
+        [
+            (
+                f"  - `{_markdown_text(value.fact)}`: "
+                f"{_render_optional(value.baseline_value)} to "
+                f"{_render_optional(value.target_value)}; sources "
+                + (", ".join(_render_refs(value.source_refs)) or "none")
+            )
+            for value in finding.evidence
+        ]
+        or ["  - None."]
+    )
+    rows.append("- Correlations:")
+    rows.extend(
+        [
+            (
+                f"  - `{_markdown_text(value.fact)}`: "
+                f"{_render_optional(value.baseline_value)} to "
+                f"{_render_optional(value.target_value)}; sources "
+                + (", ".join(_render_refs(value.source_refs)) or "none")
+            )
+            for value in finding.correlations
+        ]
+        or ["  - None."]
+    )
+    rows.append("- Finding limitations:")
+    rows.extend(
+        [f"  - `{_markdown_text(value)}`" for value in finding.limitations] or ["  - None."]
+    )
+    rows.append("")
+    return rows
 
 
 def _render_approval_pack(
@@ -2115,24 +2203,20 @@ def _render_approval_pack(
                 f"{_render_recognized_period(comparison.target)}"
             )
     rows.extend(["", "## Anomalies", ""])
+    if not anomalies:
+        rows.append("- No anomaly was observed under the selected rules.")
+    for finding in anomalies:
+        rows.extend(_render_finding(finding))
+    rows.extend(["", "## Exceptions", ""])
     rows.extend(
         [
             (
-                f"- `{value.finding_code}` / `{value.severity}` / employee "
-                + ("company scope" if value.employee is None else f"`{value.employee.id}`")
-                + f"; baseline `{_markdown_text(value.baseline_value)}`; target "
-                + f"`{_markdown_text(value.target_value)}`; calculation "
-                + f"{_markdown_text(value.calculation)}; rule {_markdown_text(value.rule)}; "
-                + "sources "
-                + (", ".join(_render_refs(value.source_refs)) or "none")
+                f"- `{value.finding_code}` / `{value.severity}` / "
+                + ("company scope" if value.employee is None else f"employee `{value.employee.id}`")
+                + "; see the complete source-linked finding in **Anomalies**."
             )
-            for value in anomalies
+            for value in exceptions
         ]
-        or ["- No anomaly was observed under the selected rules."]
-    )
-    rows.extend(["", "## Exceptions", ""])
-    rows.extend(
-        [f"- `{value.finding_code}` / `{value.severity}`" for value in exceptions]
         or ["- No critical exception was observed."]
     )
     rows.extend(["", "## Evidence", ""])

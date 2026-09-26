@@ -625,6 +625,25 @@ async def test_approval_pack_uses_one_evidence_set_and_renders_json_parity() -> 
         assert f"`{total.total}`" in response.rendered_markdown
     for finding in response.anomalies:
         assert finding.finding_code in response.rendered_markdown
+        assert finding.calculation in response.rendered_markdown
+        assert finding.rule in response.rendered_markdown
+        if finding.threshold is not None:
+            assert f"Threshold: `{finding.threshold}`" in response.rendered_markdown
+        if finding.threshold_profile is not None:
+            assert f"Threshold profile: `{finding.threshold_profile}`" in response.rendered_markdown
+        if finding.observed_delta is not None:
+            assert f"Observed delta: `{finding.observed_delta}`" in response.rendered_markdown
+        for item in finding.evidence:
+            assert item.fact in response.rendered_markdown
+            for reference in item.source_refs:
+                assert reference.source_model in response.rendered_markdown
+                for identifier in reference.source_ids:
+                    assert f"`{identifier}`" in response.rendered_markdown
+        for item in finding.correlations:
+            assert item.fact in response.rendered_markdown
+        for limitation in finding.limitations:
+            assert limitation in response.rendered_markdown
+    assert "- Correlations:\n  - None." in response.rendered_markdown
     for reference in response.source_refs:
         assert reference.source_model in response.rendered_markdown
         for identifier in reference.source_ids:
@@ -647,6 +666,30 @@ async def test_approval_pack_without_baseline_marks_comparison_not_requested() -
     assert response.exceptions == []
     assert "Status: `not_requested`" in response.rendered_markdown
     assert "unchanged" not in response.rendered_markdown
+
+
+async def test_approval_pack_without_baseline_retains_target_conflict() -> None:
+    response = await prepare_payroll_approval_pack(
+        AnalysisAdapter(),  # type: ignore[arg-type]
+        _pack_request(baseline=None, employee_ids=(101,)),
+        request_id="req-pack-target-conflict",
+        observed_at=OBSERVED_AT,
+    )
+
+    assert response.variance.status == "not_requested"
+    assert len(response.anomalies) == 1
+    finding = response.anomalies[0]
+    assert finding.finding_code == "work_entry_conflict"
+    assert finding.severity == "critical"
+    assert finding.baseline_period is None
+    assert finding.baseline_value is None
+    assert finding.absolute_delta is None
+    assert finding.observed_delta == Decimal("1")
+    assert response.exceptions == [finding]
+    assert "Baseline period: not requested" in response.rendered_markdown
+    assert "work_entry_conflict_count" in response.rendered_markdown
+    assert "work_entries_do_not_prove_physical_attendance" in response.rendered_markdown
+    assert "see the complete source-linked finding in **Anomalies**" in (response.rendered_markdown)
 
 
 async def test_approval_pack_empty_target_is_explicit_success() -> None:

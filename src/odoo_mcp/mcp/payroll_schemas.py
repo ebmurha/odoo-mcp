@@ -669,7 +669,7 @@ class PayrollFinding(PayrollSchema):
     finding_code: PayrollFindingCode
     severity: PayrollFindingSeverity
     employee: PayrollNamedReference | None
-    baseline_period: PayrollPeriodRange
+    baseline_period: PayrollPeriodRange | None
     target_period: PayrollPeriodRange
     currency: PayrollCurrencyReference | None
     salary_rule: PayrollNamedReference | None
