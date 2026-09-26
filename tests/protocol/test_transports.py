@@ -161,6 +161,7 @@ def test_streamable_http_lists_the_shared_registry(
         "analyze_employee_payroll_change",
         "detect_payroll_anomalies",
         "explain_payslip",
+        "prepare_payroll_approval_pack",
     ]
     assert called.status_code == 200
     assert called.json()["result"]["structuredContent"]["status"] == "ok"
@@ -325,4 +326,5 @@ async def test_stdio_profile_lists_the_shared_registry(tmp_path) -> None:
         "analyze_employee_payroll_change",
         "detect_payroll_anomalies",
         "explain_payslip",
+        "prepare_payroll_approval_pack",
     ]

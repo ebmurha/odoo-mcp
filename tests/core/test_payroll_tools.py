@@ -29,6 +29,7 @@ from odoo_mcp.mcp.payroll_schemas import (
     ListPayslipsInput,
     ListSalaryRulesInput,
     PayrollPeriodRange,
+    PreparePayrollApprovalPackInput,
 )
 from odoo_mcp.mcp.registry import get_tool_definition
 from odoo_mcp.mcp.server import create_mcp_server
@@ -370,6 +371,7 @@ async def test_capability_discovery_reports_only_registered_payroll_tools(
             "analyze_employee_payroll_change",
             "detect_payroll_anomalies",
             "explain_payslip",
+            "prepare_payroll_approval_pack",
         ]
     )
 
@@ -447,6 +449,12 @@ def test_every_payroll_read_uses_identifier_free_audit_input_projection() -> Non
             employee_ids=(456_789,),
         ),
         "explain_payslip": ExplainPayslipInput(company_id=1, payslip_id=345_678),
+        "prepare_payroll_approval_pack": PreparePayrollApprovalPackInput(
+            company_id=1,
+            baseline_period=baseline,
+            target_period=target,
+            employee_ids=(456_789,),
+        ),
     }
 
     for name, request in requests.items():
@@ -459,6 +467,7 @@ def test_every_payroll_read_uses_identifier_free_audit_input_projection() -> Non
                 "compare_payroll_periods",
                 "analyze_employee_payroll_change",
                 "detect_payroll_anomalies",
+                "prepare_payroll_approval_pack",
             }
         )
         assert projection["history_requested"] is (name == "detect_payroll_anomalies")
@@ -475,3 +484,10 @@ def test_every_payroll_read_uses_identifier_free_audit_input_projection() -> Non
             "private-",
         ):
             assert forbidden not in encoded
+
+    without_baseline = _audit_input(
+        get_tool_definition("prepare_payroll_approval_pack"),
+        PreparePayrollApprovalPackInput(company_id=1, target_period=target),
+    )
+    assert without_baseline["period_filter_count"] == 1
+    assert without_baseline["comparison_requested"] is False

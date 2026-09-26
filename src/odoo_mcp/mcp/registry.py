@@ -580,6 +580,23 @@ TOOL_REGISTRY: tuple[ToolDefinition, ...] = (
             open_world_hint=True,
         ),
     ),
+    ToolDefinition(
+        name="prepare_payroll_approval_pack",
+        version="1.0.0",
+        title="Prepare payroll approval pack",
+        description=(
+            "Prepare an inline, source-linked payroll review pack without approving payroll."
+        ),
+        risk_level="read",
+        required_permission="payroll_read",
+        required_capability="hr_payroll",
+        annotations=ToolAnnotations(
+            read_only_hint=True,
+            destructive_hint=False,
+            idempotent_hint=True,
+            open_world_hint=True,
+        ),
+    ),
 )
 
 

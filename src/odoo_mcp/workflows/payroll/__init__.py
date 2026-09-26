@@ -5,6 +5,7 @@ from odoo_mcp.workflows.payroll.analysis import (
     compare_payroll_periods,
     detect_payroll_anomalies,
     explain_payslip,
+    prepare_payroll_approval_pack,
 )
 from odoo_mcp.workflows.payroll.evidence import (
     get_attendance_summary,
@@ -28,4 +29,5 @@ __all__ = [
     "list_payroll_periods",
     "list_payslips",
     "list_salary_rules",
+    "prepare_payroll_approval_pack",
 ]

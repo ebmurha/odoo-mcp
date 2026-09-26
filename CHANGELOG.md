@@ -10,6 +10,8 @@ All notable public changes are documented here.
   adapter support and metadata-only auditing.
 - Add deterministic Payroll period comparison, employee change analysis,
   fixed-threshold anomaly detection, and evidence-only payslip explanation.
+- Add inline, source-linked Payroll approval packs with optional variance,
+  anomaly review, unresolved issues, and human sign-off guidance.
 
 ## 0.1.0
 

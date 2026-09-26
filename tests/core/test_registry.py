@@ -118,6 +118,7 @@ async def test_all_profiles_expose_identical_registry_and_discovery(
         "analyze_employee_payroll_change",
         "detect_payroll_anomalies",
         "explain_payslip",
+        "prepare_payroll_approval_pack",
     ]
     for output in outputs:
         output.pop("request_id")
@@ -135,8 +136,8 @@ async def test_registry_metadata_and_schemas_match_the_contract(
     server = create_mcp_server(Resolver(_binding(DeploymentProfile.LOCAL, connection)))
     tools = await server.list_tools()
 
-    assert len(TOOL_REGISTRY) == 31
-    assert len(tools) == 31
+    assert len(TOOL_REGISTRY) == 32
+    assert len(tools) == 32
     assert [tool.name for tool in tools] == [definition.name for definition in TOOL_REGISTRY]
     for tool, definition in zip(tools, TOOL_REGISTRY, strict=True):
         assert tool.input_schema["type"] == "object"
@@ -323,6 +324,7 @@ def test_public_permission_example_matches_registry() -> None:
             "analyze_employee_payroll_change",
             "detect_payroll_anomalies",
             "explain_payslip",
+            "prepare_payroll_approval_pack",
         },
         "payroll_draft_write": set(),
     }

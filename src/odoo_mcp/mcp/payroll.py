@@ -41,6 +41,7 @@ from odoo_mcp.mcp.payroll_schemas import (
     PayrollPeriodRange,
     PayrollToolResponse,
     PositiveIdentifier,
+    PreparePayrollApprovalPackInput,
     ThresholdProfile,
 )
 from odoo_mcp.mcp.registry import ToolDefinition, get_tool_definition
@@ -51,6 +52,7 @@ from odoo_mcp.workflows.payroll.analysis import (
     compare_payroll_periods,
     detect_payroll_anomalies,
     explain_payslip,
+    prepare_payroll_approval_pack,
 )
 from odoo_mcp.workflows.payroll.evidence import (
     get_attendance_summary,
@@ -132,7 +134,9 @@ def _audit_input(definition: ToolDefinition, request: object) -> dict[str, objec
             1 if isinstance(request, (GetPayslipInput, ExplainPayslipInput)) else 0
         ),
         period_filter_count=(
-            2 + len(request.history_periods)
+            1 + (request.baseline_period is not None)
+            if isinstance(request, PreparePayrollApprovalPackInput)
+            else 2 + len(request.history_periods)
             if isinstance(request, DetectPayrollAnomaliesInput)
             else 2
             if isinstance(
@@ -158,7 +162,11 @@ def _audit_input(definition: ToolDefinition, request: object) -> dict[str, objec
                 ComparePayrollPeriodsInput,
                 AnalyzeEmployeePayrollChangeInput,
                 DetectPayrollAnomaliesInput,
+                PreparePayrollApprovalPackInput,
             ),
+        )
+        and not (
+            isinstance(request, PreparePayrollApprovalPackInput) and request.baseline_period is None
         ),
         history_requested=(
             bool(request.history_periods)
@@ -180,6 +188,8 @@ def _result_projection(
         limitations: list[str] = []
     else:
         findings = getattr(response, "findings", None)
+        if findings is None:
+            findings = getattr(response, "anomalies", None)
         if isinstance(
             response,
             (
@@ -1019,5 +1029,61 @@ def register_payroll_tools(
         description=explain_definition.description,
         annotations=explain_definition.annotations,
         meta=explain_definition.protocol_meta(),
+        structured_output=True,
+    )
+
+    approval_pack_definition = get_tool_definition("prepare_payroll_approval_pack")
+
+    async def prepare_payroll_approval_pack_tool(
+        target_period: PayrollPeriodRange,
+        company_id: PositiveIdentifier,
+        baseline_period: PayrollPeriodRange | None = None,
+        employee_ids: EmployeeIds = (),
+        states: tuple[PayrollState, ...] = DEFAULT_PAYROLL_STATES,
+        threshold_profile: ThresholdProfile = "standard",
+    ) -> PayrollToolResponse:
+        safe = _safe_input(
+            approval_pack_definition.name,
+            states=tuple(states),
+            employee_filter_count=len(employee_ids),
+            period_filter_count=1 + (baseline_period is not None),
+            comparison_requested=baseline_period is not None,
+        )
+        try:
+            request = PreparePayrollApprovalPackInput(
+                company_id=company_id,
+                target_period=target_period,
+                baseline_period=baseline_period,
+                employee_ids=employee_ids,
+                states=states,
+                threshold_profile=threshold_profile,
+            )
+        except ValidationError:
+            return await invalid_request(approval_pack_definition, company_id, safe)
+
+        async def operation(
+            adapter: OdooAdapter, request_id: str, observed_at: datetime
+        ) -> PayrollEvidenceResponse:
+            return await prepare_payroll_approval_pack(
+                adapter,
+                request,
+                request_id=request_id,
+                observed_at=observed_at,
+            )
+
+        return await run(
+            approval_pack_definition,
+            request.company_id,
+            _audit_input(approval_pack_definition, request),
+            operation,
+        )
+
+    server.add_tool(
+        prepare_payroll_approval_pack_tool,
+        name=approval_pack_definition.name,
+        title=approval_pack_definition.title,
+        description=approval_pack_definition.description,
+        annotations=approval_pack_definition.annotations,
+        meta=approval_pack_definition.protocol_meta(),
         structured_output=True,
     )

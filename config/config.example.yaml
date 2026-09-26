@@ -34,4 +34,5 @@ permissions:
     - analyze_employee_payroll_change
     - detect_payroll_anomalies
     - explain_payslip
+    - prepare_payroll_approval_pack
   payroll_draft_write: []

@@ -265,6 +265,28 @@ class DetectPayrollAnomaliesInput(ComparePayrollPeriodsInput):
         return self
 
 
+class PreparePayrollApprovalPackInput(PayrollSchema):
+    company_id: PositiveIdentifier
+    target_period: PayrollPeriodRange
+    baseline_period: PayrollPeriodRange | None = None
+    employee_ids: tuple[PositiveIdentifier, ...] = Field(default=(), max_length=100)
+    states: tuple[PayrollState, ...] = DEFAULT_PAYROLL_STATES
+    threshold_profile: ThresholdProfile = "standard"
+
+    @field_validator("states", mode="before")
+    @classmethod
+    def normalize_default_states(cls, value: object) -> object:
+        return DEFAULT_PAYROLL_STATES if value in (None, (), []) else value
+
+    @model_validator(mode="after")
+    def validate_filters(self) -> PreparePayrollApprovalPackInput:
+        if self.baseline_period is not None:
+            _validate_comparison_periods(self.baseline_period, self.target_period)
+        _validate_unique(self.employee_ids, "employee_ids")
+        _validate_unique(self.states, "states")
+        return self
+
+
 class ExplainPayslipInput(PayrollSchema):
     company_id: PositiveIdentifier
     payslip_id: PositiveIdentifier
@@ -573,6 +595,41 @@ class PayrollUnavailableMetric(PayrollSchema):
     reason: str
 
 
+class PayrollApprovalPackVariance(PayrollSchema):
+    status: Literal["available", "not_requested"]
+    baseline_period: PayrollPeriodRange | None = None
+    headcount: PayrollCountComparison | None = None
+    employee_changes: PayrollEmployeeSetChanges | None = None
+    payslip_totals: list[PayrollPayslipTotalComparison] | None = None
+    rule_totals: list[PayrollRuleTotalComparison] | None = None
+    category_totals: list[PayrollCategoryTotalComparison] | None = None
+    recognized_rule_totals: list[PayrollRecognizedRuleComparison] | None = None
+    changed_employees: list[PayrollNamedReference] | None = None
+
+    @model_validator(mode="after")
+    def validate_status(self) -> PayrollApprovalPackVariance:
+        details = (
+            self.baseline_period,
+            self.headcount,
+            self.employee_changes,
+            self.payslip_totals,
+            self.rule_totals,
+            self.category_totals,
+            self.recognized_rule_totals,
+            self.changed_employees,
+        )
+        if self.status == "available" and any(value is None for value in details):
+            raise ValueError("available variance requires all comparison fields")
+        if self.status == "not_requested" and any(value is not None for value in details):
+            raise ValueError("not-requested variance cannot contain comparison fields")
+        return self
+
+
+class PayrollReviewAction(PayrollSchema):
+    action: str
+    source_refs: list[PayrollSourceReference]
+
+
 class PayrollEvidenceChange(PayrollSchema):
     fact: str
     baseline_value: str | None
@@ -698,6 +755,24 @@ class DetectPayrollAnomaliesResponse(PayrollSuccess):
     rendered_markdown: str
 
 
+class PreparePayrollApprovalPackResponse(PayrollSuccess):
+    company: PayrollNamedReference
+    target_period: PayrollPeriodRange
+    threshold_profile: ThresholdProfile
+    headcount: int = Field(ge=0)
+    rule_totals: list[ObservedRuleTotal]
+    category_totals: list[ObservedCategoryTotal]
+    recognized_rule_totals: list[PayrollRecognizedRuleValue]
+    employer_cost: PayrollUnavailableMetric
+    variance: PayrollApprovalPackVariance
+    anomalies: list[PayrollFinding]
+    exceptions: list[PayrollFinding]
+    unresolved_issues: list[str]
+    recommended_review_actions: list[PayrollReviewAction]
+    sign_off_checklist: list[str]
+    rendered_markdown: str
+
+
 class ExplainPayslipResponse(PayrollSuccess):
     payslip: CompactPayslip
     line_groups: list[PayrollExplanationGroup]
@@ -764,6 +839,7 @@ PayrollEvidenceResponse: TypeAlias = (
     | ComparePayrollPeriodsResponse
     | AnalyzeEmployeePayrollChangeResponse
     | DetectPayrollAnomaliesResponse
+    | PreparePayrollApprovalPackResponse
     | ExplainPayslipResponse
 )
 
@@ -798,11 +874,13 @@ class PayrollToolResponse(PayrollSchema):
     contract_segments: list[PayrollContractSegmentItem] | None = None
     baseline_period: PayrollPeriodRange | None = None
     target_period: PayrollPeriodRange | None = None
-    headcount: PayrollCountComparison | None = None
+    headcount: PayrollCountComparison | int | None = None
     employee_changes: PayrollEmployeeSetChanges | None = None
     payslip_totals: list[PayrollPayslipTotalComparison] | None = None
-    rule_totals: list[PayrollRuleTotalComparison] | None = None
-    category_totals: list[PayrollCategoryTotalComparison] | None = None
+    rule_totals: list[PayrollRuleTotalComparison] | list[ObservedRuleTotal] | None = None
+    category_totals: list[PayrollCategoryTotalComparison] | list[ObservedCategoryTotal] | None = (
+        None
+    )
     recognized_rule_totals: (
         list[PayrollRecognizedRuleComparison] | list[PayrollRecognizedRuleValue] | None
     ) = None
@@ -811,6 +889,13 @@ class PayrollToolResponse(PayrollSchema):
     work_entry_hours: list[PayrollWorkEntryHoursComparison] | None = None
     changed_employees: list[PayrollNamedReference] | None = None
     findings: list[PayrollFinding] | None = None
+    company: PayrollNamedReference | None = None
+    variance: PayrollApprovalPackVariance | None = None
+    anomalies: list[PayrollFinding] | None = None
+    exceptions: list[PayrollFinding] | None = None
+    unresolved_issues: list[str] | None = None
+    recommended_review_actions: list[PayrollReviewAction] | None = None
+    sign_off_checklist: list[str] | None = None
     baseline_payslips: list[CompactPayslip] | None = None
     target_payslips: list[CompactPayslip] | None = None
     line_changes: list[PayrollLineChange] | None = None

@@ -42,6 +42,7 @@ from odoo_mcp.mcp.payroll_schemas import (
     DetectPayrollAnomaliesInput,
     ExplainPayslipInput,
     PayrollPeriodRange,
+    PreparePayrollApprovalPackInput,
     ThresholdProfile,
 )
 from odoo_mcp.mcp.server import create_mcp_server
@@ -52,6 +53,7 @@ from odoo_mcp.workflows.payroll.analysis import (
     compare_payroll_periods,
     detect_payroll_anomalies,
     explain_payslip,
+    prepare_payroll_approval_pack,
 )
 
 OBSERVED_AT = datetime(2026, 9, 26, 12, tzinfo=UTC)
@@ -500,6 +502,19 @@ def _detect_request(
     )
 
 
+def _pack_request(
+    *,
+    baseline: PayrollPeriodRange | None = BASELINE,
+    employee_ids: tuple[int, ...] = (),
+) -> PreparePayrollApprovalPackInput:
+    return PreparePayrollApprovalPackInput(
+        company_id=1,
+        baseline_period=baseline,
+        target_period=TARGET,
+        employee_ids=employee_ids,
+    )
+
+
 def test_analysis_inputs_reject_overlap_history_order_and_duplicates() -> None:
     with pytest.raises(ValidationError):
         ComparePayrollPeriodsInput(
@@ -524,6 +539,18 @@ def test_analysis_inputs_reject_overlap_history_order_and_duplicates() -> None:
             target_period=TARGET,
             history_periods=(HISTORY[0], HISTORY[0]),
         )
+    with pytest.raises(ValidationError):
+        PreparePayrollApprovalPackInput(
+            company_id=1,
+            baseline_period=TARGET,
+            target_period=TARGET,
+        )
+    with pytest.raises(ValidationError):
+        PreparePayrollApprovalPackInput(
+            company_id=1,
+            target_period=TARGET,
+            employee_ids=tuple(range(1, 102)),
+        )
 
 
 async def test_compare_no_change_is_source_linked_and_has_no_findings() -> None:
@@ -547,6 +574,120 @@ async def test_compare_no_change_is_source_linked_and_has_no_findings() -> None:
         "hr.version",
         "hr.work.entry",
     }
+
+
+async def test_approval_pack_uses_one_evidence_set_and_renders_json_parity() -> None:
+    response = await prepare_payroll_approval_pack(
+        AnalysisAdapter(target_basic="200"),  # type: ignore[arg-type]
+        _pack_request(),
+        request_id="req-pack",
+        observed_at=OBSERVED_AT,
+    )
+
+    assert response.company.id == 1
+    assert response.headcount == 4
+    assert response.variance.status == "available"
+    assert response.variance.employee_changes is not None
+    assert {value.id for value in response.variance.employee_changes.new_employees} == {
+        103,
+        105,
+    }
+    assert {value.id for value in response.variance.employee_changes.missing_employees} == {102}
+    assert response.variance.changed_employees
+    assert response.rule_totals
+    assert response.category_totals
+    assert {value.code for value in response.recognized_rule_totals} == {"GROSS", "NET"}
+    assert all(value.value.status == "unavailable" for value in response.recognized_rule_totals)
+    assert response.employer_cost.status == "unavailable"
+    assert response.anomalies
+    assert response.exceptions
+    assert all(value.severity == "critical" for value in response.exceptions)
+    assert response.unresolved_issues
+    assert response.recommended_review_actions
+    assert len(response.sign_off_checklist) == 4
+    required_sections = (
+        "## Period",
+        "## Executive Summary",
+        "## Headcount Movement",
+        "## Odoo Rule/Category Totals",
+        "## Recognized Gross/Net Availability",
+        "## Variance Analysis",
+        "## Anomalies",
+        "## Exceptions",
+        "## Evidence",
+        "## Limitations",
+        "## Sign-Off Checklist",
+    )
+    assert all(value in response.rendered_markdown for value in required_sections)
+    for total in response.rule_totals:
+        assert f"`{total.salary_rule.id}`" in response.rendered_markdown
+        assert f"`{total.currency.id}`" in response.rendered_markdown
+        assert f"`{total.total}`" in response.rendered_markdown
+    for finding in response.anomalies:
+        assert finding.finding_code in response.rendered_markdown
+    for reference in response.source_refs:
+        assert reference.source_model in response.rendered_markdown
+        for identifier in reference.source_ids:
+            assert f"`{identifier}`" in response.rendered_markdown
+    for limitation in response.limitations:
+        assert limitation in response.rendered_markdown
+
+
+async def test_approval_pack_without_baseline_marks_comparison_not_requested() -> None:
+    response = await prepare_payroll_approval_pack(
+        AnalysisAdapter(changed=False, target_basic="100"),  # type: ignore[arg-type]
+        _pack_request(baseline=None),
+        request_id="req-pack-no-baseline",
+        observed_at=OBSERVED_AT,
+    )
+
+    assert response.variance.status == "not_requested"
+    assert response.variance.baseline_period is None
+    assert response.anomalies == []
+    assert response.exceptions == []
+    assert "Status: `not_requested`" in response.rendered_markdown
+    assert "unchanged" not in response.rendered_markdown
+
+
+async def test_approval_pack_empty_target_is_explicit_success() -> None:
+    response = await prepare_payroll_approval_pack(
+        AnalysisAdapter(),  # type: ignore[arg-type]
+        _pack_request(baseline=None, employee_ids=(999,)),
+        request_id="req-pack-empty",
+        observed_at=OBSERVED_AT,
+    )
+
+    assert response.headcount == 0
+    assert response.rule_totals == []
+    assert response.category_totals == []
+    assert response.variance.status == "not_requested"
+    assert all(value.value.status == "unavailable" for value in response.recognized_rule_totals)
+    assert "No eligible rule total" in response.rendered_markdown
+
+
+async def test_repeat_approval_pack_reads_current_source_without_retaining_pack() -> None:
+    adapter = AnalysisAdapter(changed=False, target_basic="100")
+    first = await prepare_payroll_approval_pack(
+        adapter,  # type: ignore[arg-type]
+        _pack_request(),
+        request_id="req-pack-first",
+        observed_at=OBSERVED_AT,
+    )
+    target_line = next(value for value in adapter.lines if value.id == 601)
+    adapter.lines[adapter.lines.index(target_line)] = target_line.model_copy(
+        update={"amount": Decimal("250"), "total": Decimal("250")}
+    )
+    second = await prepare_payroll_approval_pack(
+        adapter,  # type: ignore[arg-type]
+        _pack_request(),
+        request_id="req-pack-second",
+        observed_at=OBSERVED_AT,
+    )
+
+    first_basic = next(value for value in first.rule_totals if value.code == "BASIC")
+    second_basic = next(value for value in second.rule_totals if value.code == "BASIC")
+    assert first_basic.total == Decimal("100")
+    assert second_basic.total == Decimal("250")
 
 
 async def test_detects_every_contractual_finding_and_keeps_currency_uncompared() -> None:
@@ -810,6 +951,22 @@ async def test_relation_substitution_fails_instead_of_returning_changed_evidence
     assert raised.value.code == ErrorCode.PAYROLL_SOURCE_INCONSISTENT
 
 
+async def test_approval_pack_rejects_changed_source_metadata() -> None:
+    adapter = AnalysisAdapter(changed=False, target_basic="100")
+    index = next(index for index, value in enumerate(adapter.payslips) if value.id == 401)
+    adapter.payslips[index] = adapter.payslips[index].model_copy(
+        update={"employee": RelatedRecord(id=101, name="Substituted Employee")}
+    )
+    with pytest.raises(OdooMcpError) as raised:
+        await prepare_payroll_approval_pack(
+            adapter,  # type: ignore[arg-type]
+            _pack_request(),
+            request_id="req-pack-substitution",
+            observed_at=OBSERVED_AT,
+        )
+    assert raised.value.code == ErrorCode.PAYROLL_SOURCE_INCONSISTENT
+
+
 async def test_missing_exact_employee_comparison_is_not_empty_success() -> None:
     with pytest.raises(OdooMcpError) as raised:
         await analyze_employee_payroll_change(
@@ -900,6 +1057,15 @@ class Resolver:
             "explain_payslip",
             {"company_id": 1, "payslip_id": 401},
             "line_groups",
+        ),
+        (
+            "prepare_payroll_approval_pack",
+            {
+                "company_id": 1,
+                "baseline_period": BASELINE.model_dump(mode="json"),
+                "target_period": TARGET.model_dump(mode="json"),
+            },
+            "sign_off_checklist",
         ),
     ],
 )
@@ -1028,3 +1194,162 @@ async def test_analysis_tool_audit_is_metadata_only_and_retains_no_payroll_state
         "idempotency_keys": 0,
         "capabilities_cache": 0,
     }
+
+
+async def test_approval_pack_repeats_without_persisting_pack_or_workflow_state(
+    connection: OdooConnectionSettings,
+    tmp_path: Path,
+) -> None:
+    storage_path = tmp_path / "approval-pack.sqlite3"
+    storage = Storage.open(storage_path)
+    binding = ConnectionBinding(
+        profile=DeploymentProfile.LOCAL,
+        tenant_id="tenant-approval-pack",
+        authenticated_subject="synthetic-subject",
+        mcp_client="synthetic-client",
+        permissions=frozenset({"payroll_read"}),
+        connection=connection,
+    )
+
+    async def factory(_connection: object) -> OdooAdapter:
+        return AnalysisAdapter(target_basic="200")  # type: ignore[return-value]
+
+    server = create_mcp_server(
+        Resolver(binding),
+        adapter_factory=factory,
+        storage=storage,
+    )
+    arguments = {
+        "company_id": 1,
+        "baseline_period": BASELINE.model_dump(mode="json"),
+        "target_period": TARGET.model_dump(mode="json"),
+        "employee_ids": [101],
+    }
+    async with Client(server) as client:
+        first = await client.call_tool("prepare_payroll_approval_pack", arguments)
+        second = await client.call_tool("prepare_payroll_approval_pack", arguments)
+
+    assert first.is_error is False and second.is_error is False
+    assert first.structured_content is not None
+    assert second.structured_content is not None
+    assert first.structured_content["rule_totals"] == second.structured_content["rule_totals"]
+    audits = storage.audit.list_for_tenant("tenant-approval-pack")
+    assert len(audits) == 2
+    assert all(
+        value.input_payload
+        == {
+            "batch_filter_count": 0,
+            "comparison_requested": True,
+            "continuation_requested": False,
+            "employee_filter_count": 1,
+            "history_requested": False,
+            "normalized_states": ["waiting", "done", "paid"],
+            "payslip_filter_count": 0,
+            "period_filter_count": 2,
+            "query_kind": "prepare_payroll_approval_pack",
+        }
+        for value in audits
+    )
+    serialized = json.dumps(
+        [{"input": value.input_payload, "result": value.actual_result} for value in audits],
+        sort_keys=True,
+    )
+    assert "rendered_markdown" not in serialized
+    assert "Synthetic Employee" not in serialized
+    with sqlite3.connect(storage_path) as database:
+        counts = {
+            table: database.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+            for table in ("proposals", "artifacts", "idempotency_keys", "capabilities_cache")
+        }
+    assert counts == {
+        "proposals": 0,
+        "artifacts": 0,
+        "idempotency_keys": 0,
+        "capabilities_cache": 0,
+    }
+
+
+async def test_approval_pack_denial_is_structured_and_skips_odoo(
+    connection: OdooConnectionSettings,
+    tmp_path: Path,
+) -> None:
+    storage = Storage.open(tmp_path / "approval-pack-denied.sqlite3")
+    binding = ConnectionBinding(
+        profile=DeploymentProfile.LOCAL,
+        tenant_id="tenant-approval-pack-denied",
+        authenticated_subject="synthetic-subject",
+        mcp_client="synthetic-client",
+        permissions=frozenset(),
+        connection=connection,
+    )
+    calls = 0
+
+    async def factory(_connection: object) -> OdooAdapter:
+        nonlocal calls
+        calls += 1
+        return AnalysisAdapter()  # type: ignore[return-value]
+
+    server = create_mcp_server(Resolver(binding), adapter_factory=factory, storage=storage)
+    async with Client(server) as client:
+        result = await client.call_tool(
+            "prepare_payroll_approval_pack",
+            {
+                "company_id": 1,
+                "target_period": TARGET.model_dump(mode="json"),
+            },
+        )
+
+    assert result.structured_content is not None
+    assert result.structured_content["status"] == "failed"
+    assert result.structured_content["error_code"] == "ODOO_AUTH_FAILED"
+    assert calls == 0
+
+
+async def test_approval_pack_timeout_is_safe_and_audited(
+    connection: OdooConnectionSettings,
+    tmp_path: Path,
+) -> None:
+    class TimeoutAdapter(AnalysisAdapter):
+        async def get_payslips(
+            self,
+            company_id: int,
+            filters: PayslipFilters,
+            page: PayrollPageRequest,
+        ) -> PayrollPage[Payslip]:
+            del company_id, filters, page
+            raise TimeoutError
+
+    storage = Storage.open(tmp_path / "approval-pack-timeout.sqlite3")
+    binding = ConnectionBinding(
+        profile=DeploymentProfile.LOCAL,
+        tenant_id="tenant-approval-pack-timeout",
+        authenticated_subject="synthetic-subject",
+        mcp_client="synthetic-client",
+        permissions=frozenset({"payroll_read"}),
+        connection=connection,
+    )
+
+    async def factory(_connection: object) -> OdooAdapter:
+        return TimeoutAdapter()  # type: ignore[return-value]
+
+    server = create_mcp_server(Resolver(binding), adapter_factory=factory, storage=storage)
+    async with Client(server) as client:
+        result = await client.call_tool(
+            "prepare_payroll_approval_pack",
+            {
+                "company_id": 1,
+                "target_period": TARGET.model_dump(mode="json"),
+            },
+        )
+
+    assert result.structured_content is not None
+    assert result.structured_content == {
+        "status": "failed",
+        "request_id": result.structured_content["request_id"],
+        "error_code": "UNKNOWN_ERROR",
+        "error_message": "The Payroll evidence request failed unexpectedly.",
+        "remediation_hint": "Retry the request or contact the service operator.",
+    }
+    audit = storage.audit.list_for_tenant("tenant-approval-pack-timeout")
+    assert len(audit) == 1
+    assert audit[0].final_status == "failed"

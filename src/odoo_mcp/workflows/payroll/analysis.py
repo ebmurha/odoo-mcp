@@ -32,6 +32,9 @@ from odoo_mcp.mcp.payroll_schemas import (
     ExplainPayslipResponse,
     GetPayslipInput,
     GetPayslipResponse,
+    ObservedCategoryTotal,
+    ObservedRuleTotal,
+    PayrollApprovalPackVariance,
     PayrollCategoryTotalComparison,
     PayrollChangeKind,
     PayrollContractFactChange,
@@ -52,11 +55,14 @@ from odoo_mcp.mcp.payroll_schemas import (
     PayrollRecognizedPeriodValue,
     PayrollRecognizedRuleComparison,
     PayrollRecognizedRuleValue,
+    PayrollReviewAction,
     PayrollRuleTotalComparison,
     PayrollSalaryLineItem,
     PayrollSourceReference,
     PayrollUnavailableMetric,
     PayrollWorkEntryHoursComparison,
+    PreparePayrollApprovalPackInput,
+    PreparePayrollApprovalPackResponse,
     ThresholdProfile,
 )
 from odoo_mcp.workflows.payroll import evidence
@@ -1792,6 +1798,463 @@ async def detect_payroll_anomalies(
             rendered_limitations,
             refs,
         ),
+    )
+
+
+def _approval_pack_variance(
+    baseline: _Snapshot | None,
+    target: _Snapshot,
+) -> tuple[PayrollApprovalPackVariance, list[PayrollNamedReference]]:
+    if baseline is None:
+        return PayrollApprovalPackVariance(status="not_requested"), []
+    line_changes = _line_changes(baseline, target)
+    contract_changes = _contract_changes(baseline, target)
+    work_hours = _work_entry_hours(baseline, target)
+    employee_sets = _employee_sets(baseline, target)
+    changed_ids = (
+        {value.employee.id for value in line_changes}
+        | {value.employee.id for value in contract_changes}
+        | {value.employee.id for value in work_hours if value.hours.change != "unchanged"}
+        | {value.id for value in employee_sets.new_employees}
+        | {value.id for value in employee_sets.missing_employees}
+    )
+    names = {**_employee_names(baseline), **_employee_names(target)}
+    changed = [_named(value, names[value]) for value in sorted(changed_ids)]
+    return (
+        PayrollApprovalPackVariance(
+            status="available",
+            baseline_period=baseline.period,
+            headcount=_count_comparison(
+                len(_employee_names(baseline)),
+                len(_employee_names(target)),
+            ),
+            employee_changes=employee_sets,
+            payslip_totals=_payslip_totals(baseline, target),
+            rule_totals=_rule_totals(baseline, target),
+            category_totals=_category_totals(baseline, target),
+            recognized_rule_totals=_recognized_comparisons(baseline, target),
+            changed_employees=changed,
+        ),
+        changed,
+    )
+
+
+def _approval_pack_findings(
+    baseline: _Snapshot | None,
+    target: _Snapshot,
+    *,
+    profile: ThresholdProfile,
+) -> list[PayrollFinding]:
+    if baseline is None:
+        return []
+    line_changes = _line_changes(baseline, target)
+    contract_changes = _contract_changes(baseline, target)
+    work_hours = _work_entry_hours(baseline, target)
+    findings = _base_findings(baseline, target, line_changes, contract_changes)
+    findings.extend(
+        _threshold_findings(
+            baseline,
+            target,
+            line_changes,
+            work_hours,
+            profile=profile,
+        )
+    )
+    findings.extend(_work_entry_conflict_findings(baseline, target))
+    findings.sort(
+        key=lambda value: (
+            value.finding_code,
+            -1 if value.employee is None else value.employee.id,
+            -1 if value.salary_rule is None else value.salary_rule.id,
+            value.code or "",
+        )
+    )
+    return findings
+
+
+def _recognized_target_values(target: _Snapshot) -> list[PayrollRecognizedRuleValue]:
+    return [
+        PayrollRecognizedRuleValue(
+            code=code,
+            value=_recognized_value(target.lines, code),
+        )
+        for code in ("GROSS", "NET")
+    ]
+
+
+def _approval_pack_limitations(
+    baseline: _Snapshot | None,
+    target: _Snapshot,
+    recognized: Sequence[PayrollRecognizedRuleValue],
+    *,
+    states: Sequence[PayrollState],
+) -> list[str]:
+    values = set(_limitations(baseline or target, target, states=states))
+    for metric in recognized:
+        if metric.value.status == "unavailable":
+            values.add(f"recognized_{metric.code.lower()}_unavailable_{metric.value.reason}")
+    return sorted(values)
+
+
+def _approval_pack_issues(
+    findings: Sequence[PayrollFinding],
+    recognized: Sequence[PayrollRecognizedRuleValue],
+) -> list[str]:
+    issues = [
+        (
+            f"Source-linked finding {value.finding_code} for company scope remains "
+            "subject to human review."
+            if value.employee is None
+            else (
+                f"Source-linked finding {value.finding_code} for employee "
+                f"{value.employee.id} remains subject to human review."
+            )
+        )
+        for value in findings
+    ]
+    issues.extend(
+        f"Recognized {value.code} total is unavailable: {value.value.reason}."
+        for value in recognized
+        if value.value.status == "unavailable"
+    )
+    issues.append(
+        "Employer cost is unavailable because the supported source contract has no "
+        "authoritative aggregate."
+    )
+    return issues
+
+
+def _approval_pack_actions(
+    findings: Sequence[PayrollFinding],
+    source_refs: Sequence[PayrollSourceReference],
+) -> list[PayrollReviewAction]:
+    actions = [
+        PayrollReviewAction(
+            action=(
+                f"Review the source-linked {value.finding_code} finding in Odoo "
+                "before making any payroll decision."
+            ),
+            source_refs=value.source_refs,
+        )
+        for value in findings
+    ]
+    actions.append(
+        PayrollReviewAction(
+            action=(
+                "Review the source-linked totals, availability statements, and "
+                "limitations in Odoo with an authorized payroll reviewer."
+            ),
+            source_refs=list(source_refs),
+        )
+    )
+    return actions
+
+
+def _render_refs(source_refs: Sequence[PayrollSourceReference]) -> list[str]:
+    return [
+        f"`{value.source_model}`: "
+        + ", ".join(f"`{identifier}`" for identifier in value.source_ids)
+        for value in source_refs
+    ]
+
+
+def _render_recognized_period(value: PayrollRecognizedPeriodValue) -> str:
+    if value.status == "unavailable":
+        return f"unavailable (`{value.reason}`)"
+    return ", ".join(f"currency `{item.currency.id}` = `{item.total}`" for item in value.values)
+
+
+def _render_approval_pack(
+    *,
+    company: PayrollNamedReference,
+    request: PreparePayrollApprovalPackInput,
+    headcount: int,
+    rule_totals: Sequence[ObservedRuleTotal],
+    category_totals: Sequence[ObservedCategoryTotal],
+    recognized: Sequence[PayrollRecognizedRuleValue],
+    employer_cost: PayrollUnavailableMetric,
+    variance: PayrollApprovalPackVariance,
+    anomalies: Sequence[PayrollFinding],
+    exceptions: Sequence[PayrollFinding],
+    source_refs: Sequence[PayrollSourceReference],
+    limitations: Sequence[str],
+    unresolved_issues: Sequence[str],
+    actions: Sequence[PayrollReviewAction],
+    checklist: Sequence[str],
+) -> str:
+    rows = [
+        "# Payroll Approval Pack",
+        "",
+        "## Period",
+        "",
+        f"- Company: `{company.id}` ({_markdown_text(company.name)})",
+        (
+            f"- Target: `{request.target_period.period_start.isoformat()}` to "
+            f"`{request.target_period.period_end.isoformat()}`"
+        ),
+        (
+            "- Baseline: not requested"
+            if request.baseline_period is None
+            else (
+                f"- Baseline: `{request.baseline_period.period_start.isoformat()}` to "
+                f"`{request.baseline_period.period_end.isoformat()}`"
+            )
+        ),
+        f"- Threshold profile: `{request.threshold_profile}`",
+        "",
+        "## Executive Summary",
+        "",
+        f"- Target headcount: `{headcount}`",
+        f"- Anomalies: `{len(anomalies)}`",
+        f"- Exceptions: `{len(exceptions)}`",
+        f"- Variance status: `{variance.status}`",
+        "",
+        "## Headcount Movement",
+        "",
+    ]
+    if variance.status == "not_requested":
+        rows.append("- Status: `not_requested`")
+    else:
+        assert variance.headcount is not None
+        assert variance.employee_changes is not None
+        rows.extend(
+            [
+                f"- Baseline headcount: `{variance.headcount.baseline}`",
+                f"- Target headcount: `{variance.headcount.target}`",
+                f"- Absolute delta: `{variance.headcount.absolute_delta}`",
+                "- Joiners: "
+                + (
+                    ", ".join(f"`{value.id}`" for value in variance.employee_changes.new_employees)
+                    or "none"
+                ),
+                "- Leavers: "
+                + (
+                    ", ".join(
+                        f"`{value.id}`" for value in variance.employee_changes.missing_employees
+                    )
+                    or "none"
+                ),
+                "- Changed employees: "
+                + (
+                    ", ".join(f"`{value.id}`" for value in variance.changed_employees or [])
+                    or "none"
+                ),
+            ]
+        )
+    rows.extend(["", "## Odoo Rule/Category Totals", ""])
+    rows.extend(
+        [
+            (
+                f"- Rule `{value.salary_rule.id}` ({_markdown_text(value.salary_rule.name)}) / "
+                f"`{_markdown_text(value.code)}` / currency `{value.currency.id}` "
+                f"({_markdown_text(value.currency.name)}): `{value.total}`"
+            )
+            for value in rule_totals
+        ]
+        or ["- No eligible rule total."]
+    )
+    rows.extend(
+        [
+            (
+                f"- Category `{value.category.id}` ({_markdown_text(value.category.name)}) / "
+                f"currency `{value.currency.id}` ({_markdown_text(value.currency.name)}): "
+                f"`{value.total}`"
+            )
+            for value in category_totals
+        ]
+        or ["- No eligible category total."]
+    )
+    rows.extend(["", "## Recognized Gross/Net Availability", ""])
+    for value in recognized:
+        if value.value.status == "unavailable":
+            rows.append(f"- `{value.code}`: unavailable (`{value.value.reason}`)")
+        else:
+            rows.extend(
+                f"- `{value.code}` / currency `{item.currency.id}`: `{item.total}`"
+                for item in value.value.values
+            )
+    rows.append(f"- Employer cost: unavailable ({_markdown_text(employer_cost.reason)})")
+    rows.extend(["", "## Variance Analysis", ""])
+    if variance.status == "not_requested":
+        rows.append("- Status: `not_requested`")
+    else:
+        assert variance.payslip_totals is not None
+        assert variance.rule_totals is not None
+        assert variance.category_totals is not None
+        assert variance.recognized_rule_totals is not None
+        rows.append("- Status: `available`")
+        rows.extend(
+            (
+                f"- Employee `{value.employee.id}` / currency `{value.currency.id}` "
+                f"observed lines: baseline `{value.observed_line_total.baseline}`, "
+                f"target `{value.observed_line_total.target}`, delta "
+                f"`{value.observed_line_total.absolute_delta}`"
+            )
+            for value in variance.payslip_totals
+        )
+        rows.extend(
+            (
+                f"- Rule `{value.salary_rule.id}` / `{_markdown_text(value.code)}` / "
+                f"currency `{value.currency.id}`: baseline `{value.total.baseline}`, "
+                f"target `{value.total.target}`, delta `{value.total.absolute_delta}`"
+            )
+            for value in variance.rule_totals
+        )
+        rows.extend(
+            (
+                f"- Category `{value.category.id}` / currency `{value.currency.id}` "
+                f"baseline `{value.total.baseline}`, target `{value.total.target}`, "
+                f"delta `{value.total.absolute_delta}`"
+            )
+            for value in variance.category_totals
+        )
+        for comparison in variance.recognized_rule_totals:
+            rows.append(
+                f"- Recognized `{comparison.code}`: baseline "
+                f"{_render_recognized_period(comparison.baseline)}; target "
+                f"{_render_recognized_period(comparison.target)}"
+            )
+    rows.extend(["", "## Anomalies", ""])
+    rows.extend(
+        [
+            (
+                f"- `{value.finding_code}` / `{value.severity}` / employee "
+                + ("company scope" if value.employee is None else f"`{value.employee.id}`")
+                + f"; baseline `{_markdown_text(value.baseline_value)}`; target "
+                + f"`{_markdown_text(value.target_value)}`; calculation "
+                + f"{_markdown_text(value.calculation)}; rule {_markdown_text(value.rule)}; "
+                + "sources "
+                + (", ".join(_render_refs(value.source_refs)) or "none")
+            )
+            for value in anomalies
+        ]
+        or ["- No anomaly was observed under the selected rules."]
+    )
+    rows.extend(["", "## Exceptions", ""])
+    rows.extend(
+        [f"- `{value.finding_code}` / `{value.severity}`" for value in exceptions]
+        or ["- No critical exception was observed."]
+    )
+    rows.extend(["", "## Evidence", ""])
+    rows.extend([f"- {value}" for value in _render_refs(source_refs)] or ["- No source record."])
+    rows.extend(["", "## Limitations", ""])
+    rows.extend([f"- `{_markdown_text(value)}`" for value in limitations] or ["- None."])
+    rows.extend(["", "## Unresolved Issues", ""])
+    rows.extend([f"- {_markdown_text(value)}" for value in unresolved_issues] or ["- None."])
+    rows.extend(["", "## Recommended Human Review Actions", ""])
+    rows.extend(
+        [
+            f"- {_markdown_text(value.action)} Sources: "
+            + (", ".join(_render_refs(value.source_refs)) or "none")
+            for value in actions
+        ]
+    )
+    rows.extend(["", "## Sign-Off Checklist", ""])
+    rows.extend([f"- [ ] {_markdown_text(value)}" for value in checklist])
+    return "\n".join(rows)
+
+
+async def prepare_payroll_approval_pack(
+    adapter: OdooAdapter,
+    request: PreparePayrollApprovalPackInput,
+    *,
+    request_id: str,
+    observed_at: datetime,
+) -> PreparePayrollApprovalPackResponse:
+    companies = await adapter.get_companies()
+    matching = [value for value in companies if value.id == request.company_id]
+    if len(matching) != 1:
+        raise _invalid_source()
+    company = _named(matching[0].id, matching[0].name)
+    baseline = (
+        None
+        if request.baseline_period is None
+        else await _load_snapshot(
+            adapter,
+            company_id=request.company_id,
+            period=request.baseline_period,
+            employee_ids=request.employee_ids,
+            states=request.states,
+        )
+    )
+    target = await _load_snapshot(
+        adapter,
+        company_id=request.company_id,
+        period=request.target_period,
+        employee_ids=request.employee_ids,
+        states=request.states,
+    )
+    snapshots = [value for value in (baseline, target) if value is not None]
+    _enforce_combined_caps(snapshots)
+    _validate_cross_snapshot_metadata(snapshots)
+    rule_totals, category_totals = evidence._observed_totals(list(target.lines))
+    recognized = _recognized_target_values(target)
+    variance, _changed = _approval_pack_variance(baseline, target)
+    anomalies = _approval_pack_findings(
+        baseline,
+        target,
+        profile=request.threshold_profile,
+    )
+    exceptions = [value for value in anomalies if value.severity == "critical"]
+    refs = _merge_source_refs(
+        evidence._source_refs({"res.company": (company.id,)}),
+        *(_snapshot_refs(value) for value in snapshots),
+    )
+    limitations = _approval_pack_limitations(
+        baseline,
+        target,
+        recognized,
+        states=request.states,
+    )
+    employer_cost = PayrollUnavailableMetric(
+        reason="No authoritative employer-cost aggregate is in the supported source contract."
+    )
+    issues = _approval_pack_issues(anomalies, recognized)
+    actions = _approval_pack_actions(anomalies, refs)
+    checklist = [
+        "Verify the company, target period, filters, and source references in Odoo.",
+        "Review currency-partitioned totals and gross/net availability in Odoo.",
+        "Review every anomaly, exception, unresolved issue, and limitation.",
+        "Complete any corrective work in Odoo before a separately authorized payroll action.",
+    ]
+    rendered = _render_approval_pack(
+        company=company,
+        request=request,
+        headcount=len(_employee_names(target)),
+        rule_totals=rule_totals,
+        category_totals=category_totals,
+        recognized=recognized,
+        employer_cost=employer_cost,
+        variance=variance,
+        anomalies=anomalies,
+        exceptions=exceptions,
+        source_refs=refs,
+        limitations=limitations,
+        unresolved_issues=issues,
+        actions=actions,
+        checklist=checklist,
+    )
+    return PreparePayrollApprovalPackResponse(
+        request_id=request_id,
+        company_id=request.company_id,
+        observed_at=observed_at,
+        source_refs=refs,
+        limitations=limitations,
+        company=company,
+        target_period=request.target_period,
+        threshold_profile=request.threshold_profile,
+        headcount=len(_employee_names(target)),
+        rule_totals=rule_totals,
+        category_totals=category_totals,
+        recognized_rule_totals=recognized,
+        employer_cost=employer_cost,
+        variance=variance,
+        anomalies=anomalies,
+        exceptions=exceptions,
+        unresolved_issues=issues,
+        recommended_review_actions=actions,
+        sign_off_checklist=checklist,
+        rendered_markdown=rendered,
     )
 
 

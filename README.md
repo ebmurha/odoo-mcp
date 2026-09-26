@@ -244,6 +244,11 @@ fail explicitly instead of being guessed.
 - `explain_payslip` organizes Odoo-returned line arithmetic, categories,
   worked-day evidence, and contract context without evaluating salary-rule
   code or reproducing gross-to-net calculation.
+- `prepare_payroll_approval_pack` returns one request-time JSON and inline
+  Markdown review pack with source-linked totals, optional prior-period
+  variance, anomalies, exceptions, limitations, recommended human review
+  actions, and a sign-off checklist. It neither approves payroll nor creates a
+  durable pack or workflow record.
 
 These tools require `payroll_read` and the accessible Odoo Payroll capability.
 They are read-only, use request-bound pagination, return Odoo source IDs, and
