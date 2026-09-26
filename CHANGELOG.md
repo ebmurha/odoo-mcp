@@ -2,7 +2,13 @@
 
 All notable public changes are documented here.
 
-## 0.2.0 — Unreleased
+## 0.3.0 — Unreleased
+
+- Add preview-first, idempotent draft Payroll input create, update, and removal.
+- Add separately confirmed Odoo payslip recalculation with fresh evidence,
+  payslip-scoped concurrency control, and metadata-only persistence.
+
+## 0.2.0
 
 - Add company-scoped Odoo currency-rate history with deterministic precedence,
   pagination, structured evidence, and Markdown output.

@@ -250,13 +250,32 @@ fail explicitly instead of being guessed.
   actions, and a sign-off checklist. It neither approves payroll nor creates a
   durable pack or workflow record.
 
-These tools require `payroll_read` and the accessible Odoo Payroll capability.
-They are read-only, use request-bound pagination, return Odoo source IDs, and
-store only non-sensitive invocation metadata in the audit chain. Payroll
-responses are not persisted as artifacts, proposals, idempotency records, or
-workflow state. Monetary comparisons never combine or convert currencies;
-recognized `BASIC`, `GROSS`, and `NET` totals require those exact Odoo rule
-codes, and employer cost remains explicitly unavailable.
+These evidence tools require `payroll_read` and the accessible Odoo Payroll
+capability. They are read-only, use request-bound pagination, return Odoo source
+IDs, and store only non-sensitive invocation metadata in the audit chain.
+Payroll responses are not persisted as artifacts, proposals, idempotency
+records, or workflow state. Monetary comparisons never combine or convert
+currencies; recognized `BASIC`, `GROSS`, and `NET` totals require those exact
+Odoo rule codes, and employer cost remains explicitly unavailable.
+
+## Controlled draft Payroll writes
+
+- `set_draft_payroll_input` previews or explicitly creates or updates one
+  eligible one-off input on one editable payslip.
+- `remove_draft_payroll_input` previews or explicitly removes one exact,
+  eligible one-off input.
+- `recalculate_draft_payslip` separately invokes Odoo's standard payslip
+  calculation and returns fresh payslip evidence.
+
+These tools require `payroll_draft_write` and the accessible Odoo Payroll
+capability. Every call defaults to a mutation-free preview. Execution requires
+`dry_run: false` and a non-empty idempotency key, rechecks the complete current
+input state, and serializes writes per payslip. Input changes never trigger
+recalculation automatically. Recalculation remains limited to an editable
+payslip and cannot confirm, post, close, pay, or otherwise finalize Payroll.
+Only operational IDs and statuses are retained for audit and replay; input
+descriptions, amounts, employee details, and calculated Payroll values are not
+stored by these write workflows.
 
 ## Verification
 

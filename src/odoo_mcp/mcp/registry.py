@@ -41,10 +41,15 @@ class ToolDefinition:
                 and self.annotations.idempotent_hint is True
             )
         else:
-            expected_destructive = self.risk_level == "confirm_write"
+            destructive_hint = self.annotations.destructive_hint
+            destructive_is_valid = (
+                isinstance(destructive_hint, bool)
+                if self.risk_level == "draft_write"
+                else destructive_hint is (self.risk_level == "confirm_write")
+            )
             valid = (
                 self.annotations.read_only_hint is False
-                and self.annotations.destructive_hint is expected_destructive
+                and destructive_is_valid
                 and self.annotations.idempotent_hint is True
                 and self.annotations.open_world_hint is True
             )
@@ -593,6 +598,55 @@ TOOL_REGISTRY: tuple[ToolDefinition, ...] = (
         annotations=ToolAnnotations(
             read_only_hint=True,
             destructive_hint=False,
+            idempotent_hint=True,
+            open_world_hint=True,
+        ),
+    ),
+    ToolDefinition(
+        name="set_draft_payroll_input",
+        version="1.0.0",
+        title="Set draft payroll input",
+        description=(
+            "Preview or explicitly create or update one eligible input on one editable payslip."
+        ),
+        risk_level="draft_write",
+        required_permission="payroll_draft_write",
+        required_capability="hr_payroll",
+        annotations=ToolAnnotations(
+            read_only_hint=False,
+            destructive_hint=False,
+            idempotent_hint=True,
+            open_world_hint=True,
+        ),
+    ),
+    ToolDefinition(
+        name="remove_draft_payroll_input",
+        version="1.0.0",
+        title="Remove draft payroll input",
+        description=("Preview or explicitly remove one eligible input from one editable payslip."),
+        risk_level="draft_write",
+        required_permission="payroll_draft_write",
+        required_capability="hr_payroll",
+        annotations=ToolAnnotations(
+            read_only_hint=False,
+            destructive_hint=True,
+            idempotent_hint=True,
+            open_world_hint=True,
+        ),
+    ),
+    ToolDefinition(
+        name="recalculate_draft_payslip",
+        version="1.0.0",
+        title="Recalculate draft payslip",
+        description=(
+            "Preview or explicitly invoke Odoo's standard calculation on one editable payslip."
+        ),
+        risk_level="draft_write",
+        required_permission="payroll_draft_write",
+        required_capability="hr_payroll",
+        annotations=ToolAnnotations(
+            read_only_hint=False,
+            destructive_hint=True,
             idempotent_hint=True,
             open_world_hint=True,
         ),

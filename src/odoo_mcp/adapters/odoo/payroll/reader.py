@@ -41,6 +41,7 @@ from odoo_mcp.adapters.payroll import (
     PayrollWorkEntry,
     PayrollWorkEntryFilters,
     PayrollWorkEntryState,
+    PayrollWriteRejected,
     Payslip,
     PayslipChildFilters,
     PayslipFilters,
@@ -1087,7 +1088,7 @@ class PayrollReader:
             self._normalize_input,
         )
 
-    async def _structure(self, company_id: int, structure_id: int) -> PayrollStructure:
+    async def get_payroll_structure(self, company_id: int, structure_id: int) -> PayrollStructure:
         domain: list[object] = [["id", "=", structure_id]]
         rows = await self._stable_rows("hr.payroll.structure", company_id, domain, "id asc", cap=1)
         if not rows:
@@ -1100,6 +1101,9 @@ class PayrollReader:
         if structure.id != structure_id:
             raise _inconsistent()
         return structure
+
+    async def _structure(self, company_id: int, structure_id: int) -> PayrollStructure:
+        return await self.get_payroll_structure(company_id, structure_id)
 
     async def get_payroll_input_types(
         self,
@@ -1550,10 +1554,11 @@ class PayrollReader:
                 "The payslip contract evidence is unavailable.",
                 "Check the payslip contract or version in Odoo, then retry.",
             )
-        await self._structure(company_id, payslip.structure.id)
+        structure = await self._structure(company_id, payslip.structure.id)
         fresh = await self._exact_payslip(company_id, payslip_id)
+        fresh_structure = await self._structure(company_id, payslip.structure.id)
         self._require_editable(fresh)
-        if fresh != payslip:
+        if fresh != payslip or fresh_structure != structure:
             raise _state_conflict()
         return fresh
 
@@ -1613,12 +1618,17 @@ class PayrollReader:
             "amount": str(payload.amount),
             "contract_id" if self._version == 18 else "version_id": payslip.contract_segment.id,
         }
-        result = await self._transport.execute_method(
-            "hr.payslip.input",
-            "create",
-            named={"vals_list": values},
-            company_ids=(company_id,),
-        )
+        try:
+            result = await self._transport.execute_method(
+                "hr.payslip.input",
+                "create",
+                named={"vals_list": values},
+                company_ids=(company_id,),
+            )
+        except OdooMcpError as exc:
+            if exc.code is ErrorCode.ODOO_PERMISSION_DENIED:
+                raise PayrollWriteRejected(exc) from None
+            raise
         created_id = _created_id(result)
         created = await self._exact_input(company_id, payslip.id, created_id)
         if (
@@ -1662,13 +1672,18 @@ class PayrollReader:
             values["name"] = payload.description
         if payload.amount is not None:
             values["amount"] = str(payload.amount)
-        result = await self._transport.execute_method(
-            "hr.payslip.input",
-            "write",
-            ids=(input_id,),
-            named={"vals": values},
-            company_ids=(company_id,),
-        )
+        try:
+            result = await self._transport.execute_method(
+                "hr.payslip.input",
+                "write",
+                ids=(input_id,),
+                named={"vals": values},
+                company_ids=(company_id,),
+            )
+        except OdooMcpError as exc:
+            if exc.code is ErrorCode.ODOO_PERMISSION_DENIED:
+                raise PayrollWriteRejected(exc) from None
+            raise
         if result is not True:
             raise _api_error("Odoo returned an invalid Payroll input update result.")
         updated = await self._exact_input(company_id, payslip.id, input_id)
@@ -1706,12 +1721,17 @@ class PayrollReader:
         if fresh_payslip != payslip or fresh_type != input_type or fresh_inputs != current_inputs:
             raise _state_conflict()
         ensure_payroll_action_allowed(self._version, "hr.payslip.input", "delete_draft_input")
-        result = await self._transport.execute_method(
-            "hr.payslip.input",
-            "unlink",
-            ids=(input_id,),
-            company_ids=(company_id,),
-        )
+        try:
+            result = await self._transport.execute_method(
+                "hr.payslip.input",
+                "unlink",
+                ids=(input_id,),
+                company_ids=(company_id,),
+            )
+        except OdooMcpError as exc:
+            if exc.code is ErrorCode.ODOO_PERMISSION_DENIED:
+                raise PayrollWriteRejected(exc) from None
+            raise
         if result is not True:
             raise _api_error("Odoo returned an invalid Payroll input deletion result.")
         remaining = await self.get_payslip_inputs(
@@ -1738,17 +1758,24 @@ class PayrollReader:
         ensure_payroll_action_allowed(
             self._version, "hr.payslip", "compute_sheet_on_editable_payslip"
         )
-        result = await self._transport.execute_method(
-            "hr.payslip",
-            "compute_sheet",
-            ids=(payslip_id,),
-            company_ids=(company_id,),
-        )
+        try:
+            result = await self._transport.execute_method(
+                "hr.payslip",
+                "compute_sheet",
+                ids=(payslip_id,),
+                company_ids=(company_id,),
+            )
+        except OdooMcpError as exc:
+            if exc.code is ErrorCode.ODOO_PERMISSION_DENIED:
+                raise PayrollWriteRejected(exc) from None
+            raise
         if result is False:
-            raise OdooMcpError(
-                ErrorCode.PAYROLL_RECALCULATION_FAILED,
-                "Odoo did not recalculate the draft payslip.",
-                "Review the draft payslip in Odoo and retry after correcting it.",
+            raise PayrollWriteRejected(
+                OdooMcpError(
+                    ErrorCode.PAYROLL_RECALCULATION_FAILED,
+                    "Odoo did not recalculate the draft payslip.",
+                    "Review the draft payslip in Odoo and retry after correcting it.",
+                )
             )
         if result is not None and result is not True:
             raise _api_error("Odoo returned an invalid Payroll recalculation result.")

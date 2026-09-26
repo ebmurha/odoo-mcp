@@ -30,6 +30,7 @@ from odoo_mcp.adapters.odoo.client import OdooClient
 from odoo_mcp.adapters.odoo.connections import ConnectionBinding, ConnectionResolver
 from odoo_mcp.mcp.error_codes import ErrorCode, ErrorResponse, OdooMcpError
 from odoo_mcp.mcp.payroll import register_payroll_tools
+from odoo_mcp.mcp.payroll_writes import register_payroll_write_tools
 from odoo_mcp.mcp.registry import TOOL_REGISTRY, ToolDefinition, get_tool_definition
 from odoo_mcp.mcp.request_ids import new_request_id
 from odoo_mcp.mcp.schemas import (
@@ -1913,6 +1914,12 @@ def create_mcp_server(
         structured_output=True,
     )
     register_payroll_tools(
+        server,
+        resolver,
+        adapter_factory=adapter_factory,
+        storage=storage,
+    )
+    register_payroll_write_tools(
         server,
         resolver,
         adapter_factory=adapter_factory,

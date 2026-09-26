@@ -119,7 +119,7 @@ def _verify_wheel_install(wheel: Path, *, temp: Path) -> None:
             (
                 "import odoo_mcp; "
                 "from odoo_mcp.app.main import main; "
-                "assert odoo_mcp.__version__ == '0.2.0'; "
+                "assert odoo_mcp.__version__ == '0.3.0'; "
                 "main(['--help'])"
             ),
         ],

@@ -119,6 +119,9 @@ async def test_all_profiles_expose_identical_registry_and_discovery(
         "detect_payroll_anomalies",
         "explain_payslip",
         "prepare_payroll_approval_pack",
+        "set_draft_payroll_input",
+        "remove_draft_payroll_input",
+        "recalculate_draft_payslip",
     ]
     for output in outputs:
         output.pop("request_id")
@@ -136,15 +139,15 @@ async def test_registry_metadata_and_schemas_match_the_contract(
     server = create_mcp_server(Resolver(_binding(DeploymentProfile.LOCAL, connection)))
     tools = await server.list_tools()
 
-    assert len(TOOL_REGISTRY) == 32
-    assert len(tools) == 32
+    assert len(TOOL_REGISTRY) == 35
+    assert len(tools) == 35
     assert [tool.name for tool in tools] == [definition.name for definition in TOOL_REGISTRY]
     for tool, definition in zip(tools, TOOL_REGISTRY, strict=True):
         assert tool.input_schema["type"] == "object"
         assert tool.output_schema is not None
         assert tool.annotations is not None
         assert tool.annotations.read_only_hint is (definition.risk_level == "read")
-        assert tool.annotations.destructive_hint is (definition.risk_level == "confirm_write")
+        assert tool.annotations.destructive_hint is definition.annotations.destructive_hint
         assert tool.annotations.idempotent_hint is True
         assert tool.annotations.open_world_hint is True
         assert tool.meta == definition.protocol_meta()
@@ -227,8 +230,20 @@ async def test_registry_metadata_and_schemas_match_the_contract(
         "company_id",
     }
     assert set(tools[30].input_schema["required"]) == {"payslip_id", "company_id"}
-    assert all(tool.annotations.read_only_hint is True for tool in tools[20:])
-    assert all("dry_run" not in tool.input_schema["properties"] for tool in tools[20:])
+    assert all(tool.annotations.read_only_hint is True for tool in tools[20:32])
+    assert all("dry_run" not in tool.input_schema["properties"] for tool in tools[20:32])
+    assert set(tools[32].input_schema["required"]) == {"company_id", "payslip_id"}
+    assert set(tools[33].input_schema["required"]) == {
+        "company_id",
+        "payslip_id",
+        "input_id",
+    }
+    assert set(tools[34].input_schema["required"]) == {"company_id", "payslip_id"}
+    assert tools[32].annotations.destructive_hint is False
+    assert tools[33].annotations.destructive_hint is True
+    assert tools[34].annotations.destructive_hint is True
+    assert all(tool.annotations.read_only_hint is False for tool in tools[32:])
+    assert all("dry_run" in tool.input_schema["properties"] for tool in tools[32:])
 
 
 async def test_permission_denial_happens_before_adapter_creation(
@@ -326,7 +341,11 @@ def test_public_permission_example_matches_registry() -> None:
             "explain_payslip",
             "prepare_payroll_approval_pack",
         },
-        "payroll_draft_write": set(),
+        "payroll_draft_write": {
+            "set_draft_payroll_input",
+            "remove_draft_payroll_input",
+            "recalculate_draft_payslip",
+        },
     }
     assert PERMISSION_GROUPS == frozenset(
         {

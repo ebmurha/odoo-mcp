@@ -25,6 +25,7 @@ from odoo_mcp.adapters.payroll import (
     PayrollPageRequest,
     PayrollPeriod,
     PayrollWorkEntryFilters,
+    PayrollWriteRejected,
     PayslipChildFilters,
     PayslipFilters,
 )
@@ -210,6 +211,8 @@ class FakePayrollTransport:
         self.short_page_model: str | None = None
         self.count_overrides: dict[str, int] = {}
         self.failure: OdooMcpError | None = None
+        self.execution_failure: OdooMcpError | None = None
+        self.post_execution_failure: OdooMcpError | None = None
         self.compute_result: object = True
 
     async def authenticate(self) -> None:
@@ -363,6 +366,8 @@ class FakePayrollTransport:
                 "company_ids": company_ids,
             }
         )
+        if self.execution_failure is not None:
+            raise self.execution_failure
         if model == "hr.payslip.input" and method == "create":
             assert named is not None
             values = dict(named["vals_list"])
@@ -383,6 +388,7 @@ class FakePayrollTransport:
                     "write_date": "2026-09-02 10:00:00",
                 }
             )
+            self.failure = self.post_execution_failure
             return identifier
         if model == "hr.payslip.input" and method == "write":
             assert named is not None and len(ids) == 1
@@ -836,10 +842,49 @@ async def test_false_recalculation_result_has_payroll_error() -> None:
     transport = FakePayrollTransport(19)
     transport.compute_result = False
 
-    with pytest.raises(OdooMcpError) as caught:
+    with pytest.raises(PayrollWriteRejected) as caught:
         await _reader(19, transport).recompute_draft_payslip(1, 101)
 
-    assert caught.value.code is ErrorCode.PAYROLL_RECALCULATION_FAILED
+    assert caught.value.error.code is ErrorCode.PAYROLL_RECALCULATION_FAILED
+
+
+async def test_authoritative_write_acl_denial_is_distinct_from_post_write_acl_failure() -> None:
+    denial = OdooMcpError(
+        ErrorCode.ODOO_PERMISSION_DENIED,
+        "Synthetic permission denial.",
+        "Use synthetic access.",
+    )
+    before_dispatch = FakePayrollTransport(19)
+    before_dispatch.rows["hr.payslip.input"] = []
+    before_dispatch.execution_failure = denial
+    with pytest.raises(PayrollWriteRejected) as rejected:
+        await _reader(19, before_dispatch).create_draft_payslip_input(
+            1,
+            DraftPayslipInputCreate(
+                payslip_id=101,
+                input_type_id=401,
+                description="Synthetic Adjustment",
+                amount=Decimal("1"),
+            ),
+        )
+    assert rejected.value.error.code is ErrorCode.ODOO_PERMISSION_DENIED
+    assert before_dispatch.rows["hr.payslip.input"] == []
+
+    after_dispatch = FakePayrollTransport(19)
+    after_dispatch.rows["hr.payslip.input"] = []
+    after_dispatch.post_execution_failure = denial
+    with pytest.raises(OdooMcpError) as uncertain:
+        await _reader(19, after_dispatch).create_draft_payslip_input(
+            1,
+            DraftPayslipInputCreate(
+                payslip_id=101,
+                input_type_id=401,
+                description="Synthetic Adjustment",
+                amount=Decimal("1"),
+            ),
+        )
+    assert uncertain.value.code is ErrorCode.ODOO_PERMISSION_DENIED
+    assert len(after_dispatch.rows["hr.payslip.input"]) == 1
 
 
 @pytest.mark.parametrize(

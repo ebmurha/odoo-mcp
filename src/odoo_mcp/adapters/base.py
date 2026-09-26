@@ -48,6 +48,7 @@ from odoo_mcp.adapters.payroll import (
     PayrollInputTypeFilters,
     PayrollPage,
     PayrollPageRequest,
+    PayrollStructure,
     PayrollWorkEntry,
     PayrollWorkEntryFilters,
     Payslip,
@@ -229,6 +230,12 @@ class OdooAdapter(Protocol):
         filters: PayrollInputTypeFilters,
         page: PayrollPageRequest = DEFAULT_PAYROLL_PAGE_REQUEST,
     ) -> PayrollPage[PayrollInputType]: ...
+
+    async def get_payroll_structure(
+        self,
+        company_id: int,
+        structure_id: int,
+    ) -> PayrollStructure: ...
 
     async def get_payroll_employees(
         self,

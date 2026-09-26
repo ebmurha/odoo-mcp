@@ -10,6 +10,7 @@ from typing import Annotated, Generic, Literal, TypeVar
 from pydantic import BaseModel, ConfigDict, Field, StrictInt, field_validator, model_validator
 
 from odoo_mcp.adapters.accounting import RelatedRecord
+from odoo_mcp.mcp.error_codes import OdooMcpError
 
 PayrollState = Literal["draft", "waiting", "done", "paid", "cancelled"]
 PayrollBatchState = Literal["draft", "ready", "done", "paid", "cancelled"]
@@ -368,3 +369,11 @@ class DeletedPayslipInput(PayrollValue):
     id: _PositiveIdentifier
     payslip_id: _PositiveIdentifier
     deleted: Literal[True] = True
+
+
+class PayrollWriteRejected(RuntimeError):
+    """Odoo authoritatively rejected the dispatched Payroll mutation."""
+
+    def __init__(self, error: OdooMcpError) -> None:
+        super().__init__(error.safe_message)
+        self.error = error

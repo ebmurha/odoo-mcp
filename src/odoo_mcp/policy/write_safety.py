@@ -32,6 +32,10 @@ class WriteCommand:
     request_payload: Mapping[str, object]
     dry_run: bool = True
     idempotency_key: str | None = None
+    audit_payload: Mapping[str, object] | None = None
+    retained_proposed_action_keys: tuple[str, ...] | None = None
+    retained_material_effect_keys: tuple[str, ...] | None = None
+    compact_persistence: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -105,10 +109,15 @@ def validate_write_tool_definition(definition: ToolDefinition) -> None:
     annotations = definition.annotations
     if definition.risk_level == "read":
         raise ValueError("Write safety requires a write-capable risk level")
-    expected_destructive = definition.risk_level == "confirm_write"
+    destructive_hint = annotations.destructive_hint
+    destructive_is_valid = (
+        isinstance(destructive_hint, bool)
+        if definition.risk_level == "draft_write"
+        else destructive_hint is (definition.risk_level == "confirm_write")
+    )
     if (
         annotations.read_only_hint is not False
-        or annotations.destructive_hint is not expected_destructive
+        or not destructive_is_valid
         or annotations.idempotent_hint is not True
         or annotations.open_world_hint is not True
     ):
@@ -133,11 +142,12 @@ class WriteSafetyCoordinator:
         validate_current_state: ValidateCurrentState,
         execute: ExecuteWrite,
         request_id: str | None = None,
+        preflight_error: OdooMcpError | None = None,
     ) -> WriteSafetyResponse:
         validate_write_tool_definition(definition)
         selected_request_id = request_id or new_request_id()
 
-        gate_error = self._gate_error(binding, definition, snapshot, command)
+        gate_error = preflight_error or self._gate_error(binding, definition, snapshot, command)
         if gate_error is not None:
             response = self._failure(
                 gate_error,
@@ -316,7 +326,7 @@ class WriteSafetyCoordinator:
             )
         if decision.disposition is IdempotencyDisposition.REPLAY:
             try:
-                response = WriteSafetyResponse.model_validate(decision.response)
+                response = self._restore_persisted_response(command, decision.response)
             except Exception:
                 return self._failure(
                     self._unexpected_pre_write_error(),
@@ -506,7 +516,7 @@ class WriteSafetyCoordinator:
                 ),
                 idempotency_key,
                 IdempotencyState.SUCCEEDED,
-                response.model_dump(mode="json"),
+                self._response_mapping_for_persistence(command, response),
             )
         except Exception:
             LOGGER.warning("Write outcome persistence failed; details were suppressed.")
@@ -774,7 +784,138 @@ class WriteSafetyCoordinator:
             ),
             idempotency_key,
             state,
-            response.model_dump(mode="json"),
+            self._response_mapping_for_persistence(command, response),
+        )
+
+    @staticmethod
+    def _filtered_mapping(
+        value: Mapping[str, object] | None,
+        retained_keys: tuple[str, ...] | None,
+    ) -> dict[str, object] | None:
+        if value is None:
+            return None
+        if retained_keys is None:
+            return dict(value)
+        allowed = frozenset(retained_keys)
+        return {key: item for key, item in value.items() if key in allowed}
+
+    @classmethod
+    def _response_for_persistence(
+        cls,
+        command: WriteCommand,
+        response: WriteSafetyResponse,
+    ) -> WriteSafetyResponse:
+        if (
+            command.retained_proposed_action_keys is None
+            and command.retained_material_effect_keys is None
+        ):
+            return response
+        return WriteSafetyResponse(
+            status=response.status,
+            outcome=response.outcome,
+            request_id=response.request_id,
+            company_id=response.company_id,
+            proposed_action=cls._filtered_mapping(
+                response.proposed_action,
+                command.retained_proposed_action_keys,
+            ),
+            material_effects=cls._filtered_mapping(
+                response.material_effects,
+                command.retained_material_effect_keys,
+            )
+            or {},
+            record_refs=response.record_refs,
+            error_code=response.error_code,
+            error_message=response.error_message,
+            remediation_hint=response.remediation_hint,
+        )
+
+    @classmethod
+    def _response_mapping_for_persistence(
+        cls,
+        command: WriteCommand,
+        response: WriteSafetyResponse,
+    ) -> dict[str, object]:
+        retained = cls._response_for_persistence(command, response)
+        if not command.compact_persistence:
+            return retained.model_dump(mode="json")
+        action = retained.proposed_action or {}
+        effects = retained.material_effects
+        audit_payload = command.audit_payload or {}
+
+        def selected(key: str) -> object:
+            return effects.get(key, action.get(key, audit_payload.get(key)))
+
+        result: dict[str, object] = {
+            "status": retained.status,
+            "outcome": retained.outcome,
+            "request_id": retained.request_id,
+            "company_id": retained.company_id,
+            "operation": selected("operation"),
+            "payslip_id": selected("payslip_id"),
+            "input_id": selected("input_id"),
+            "result_input_id": selected("result_input_id"),
+            "before_source_state": selected("before_source_state"),
+            "after_source_state": selected("after_source_state"),
+        }
+        if retained.error_code is not None:
+            result.update(
+                {
+                    "error_code": retained.error_code.value,
+                    "error_message": retained.error_message,
+                    "remediation_hint": retained.remediation_hint,
+                }
+            )
+        return {key: value for key, value in result.items() if value is not None}
+
+    @classmethod
+    def _restore_persisted_response(
+        cls,
+        command: WriteCommand,
+        payload: Mapping[str, object] | None,
+    ) -> WriteSafetyResponse:
+        if not command.compact_persistence:
+            return WriteSafetyResponse.model_validate(payload)
+        if payload is None:
+            raise ValueError("A compact replay projection is required")
+        operation = payload.get("operation")
+        payslip_id = payload.get("payslip_id")
+        input_id = payload.get("input_id")
+        before_state = payload.get("before_source_state")
+        proposed_action = {
+            key: value
+            for key, value in {
+                "operation": operation,
+                "payslip_id": payslip_id,
+                "input_id": input_id,
+                "before_source_state": before_state,
+            }.items()
+            if value is not None
+        }
+        material_effects = {
+            key: value
+            for key, value in {
+                "operation": operation,
+                "payslip_id": payslip_id,
+                "input_id": input_id,
+                "result_input_id": payload.get("result_input_id"),
+                "before_source_state": before_state,
+                "after_source_state": payload.get("after_source_state"),
+            }.items()
+            if value is not None
+        }
+        return WriteSafetyResponse.model_validate(
+            {
+                "status": payload.get("status"),
+                "outcome": payload.get("outcome"),
+                "request_id": payload.get("request_id"),
+                "company_id": payload.get("company_id"),
+                "proposed_action": proposed_action or None,
+                "material_effects": material_effects,
+                "error_code": payload.get("error_code"),
+                "error_message": payload.get("error_message"),
+                "remediation_hint": payload.get("remediation_hint"),
+            }
         )
 
     def _append_or_fail(
@@ -847,6 +988,41 @@ class WriteSafetyCoordinator:
         affected_records: tuple[str, ...] = (),
     ) -> AuditEvent:
         error = response if response is not None and response.status == "failed" else None
+        retained_response = (
+            None
+            if response is None
+            else WriteSafetyCoordinator._response_for_persistence(command, response)
+        )
+        retained_action = WriteSafetyCoordinator._filtered_mapping(
+            proposed_action,
+            command.retained_proposed_action_keys,
+        )
+        if command.audit_payload is None:
+            input_payload: Mapping[str, object] = {
+                **command.request_payload,
+                "company_id": command.company_id,
+                "dry_run": command.dry_run,
+                "idempotency_key": command.idempotency_key,
+            }
+        else:
+            idempotency_state = "not_reserved"
+            if final_status == "attempted":
+                idempotency_state = "in_progress"
+            elif final_status not in {"rejected", "conflicted", "previewed"} and (
+                retained_response is not None
+            ):
+                if retained_response.outcome == "unknown":
+                    idempotency_state = "unknown"
+                elif retained_response.status == "succeeded":
+                    idempotency_state = "succeeded"
+                elif not command.dry_run and command.idempotency_key:
+                    idempotency_state = "failed"
+            input_payload = {
+                **command.audit_payload,
+                "company_id": command.company_id,
+                "dry_run": command.dry_run,
+                "idempotency_state": idempotency_state,
+            }
         return AuditEvent(
             request_id=request_id,
             tenant_id=binding.tenant_id,
@@ -860,15 +1036,14 @@ class WriteSafetyCoordinator:
             odoo_user=binding.connection.username,
             odoo_version=str(snapshot.version),
             odoo_transport=snapshot.transport,
-            input_payload={
-                **command.request_payload,
-                "company_id": command.company_id,
-                "dry_run": command.dry_run,
-                "idempotency_key": command.idempotency_key,
-            },
+            input_payload=input_payload,
             dry_run=command.dry_run,
-            proposed_action=proposed_action,
-            actual_result=None if response is None else response.model_dump(mode="json"),
+            proposed_action=retained_action,
+            actual_result=(
+                None
+                if response is None
+                else WriteSafetyCoordinator._response_mapping_for_persistence(command, response)
+            ),
             affected_odoo_records=affected_records,
             error_code=None
             if error is None or error.error_code is None

@@ -14,7 +14,7 @@ def test_release_metadata_is_consistent_and_installable() -> None:
     registry = json.loads((ROOT / "server.json").read_text(encoding="utf-8"))
     package = registry["packages"][0]
 
-    assert project["project"]["version"] == "0.2.0"
+    assert project["project"]["version"] == "0.3.0"
     assert project["project"]["name"] == "odoo-erp-mcp"
     assert registry["name"] == "io.github.ebmurha/odoo-mcp"
     assert registry["version"] == project["project"]["version"]
