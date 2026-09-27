@@ -2,7 +2,7 @@
 
 All notable public changes are documented here.
 
-## 0.3.0 — Unreleased
+## 0.3.0 — 2026-09-27
 
 - Add preview-first, idempotent draft Payroll input create, update, and removal.
 - Add separately confirmed Odoo payslip recalculation with fresh evidence,
