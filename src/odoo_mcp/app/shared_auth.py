@@ -218,6 +218,13 @@ class SharedOAuthProvider:
                 error="invalid_redirect_uri",
                 error_description="Every redirect URI must satisfy the callback policy",
             )
+        requested_scopes = set((client_info.scope or "").split())
+        if not requested_scopes.issubset(self._valid_scopes):
+            raise RegistrationError(
+                error="invalid_client_metadata",
+                error_description="The requested scope is invalid",
+            )
+        client_info.scope = " ".join(sorted(self._valid_scopes))
         now = timestamp()
         with self._database.transaction(write=True) as connection:
             connection.execute(
@@ -242,9 +249,15 @@ class SharedOAuthProvider:
             raise AuthorizeError(
                 error="invalid_target", error_description="The protected resource is invalid"
             )
-        scopes = tuple(params.scopes or ())
-        if not scopes or not set(scopes).issubset(self._valid_scopes):
+        requested_scopes = set(params.scopes or ())
+        client_scopes = tuple(sorted((client.scope or "").split()))
+        if (
+            not requested_scopes
+            or not requested_scopes.issubset(client_scopes)
+            or not set(client_scopes).issubset(self._valid_scopes)
+        ):
             raise AuthorizeError(error="invalid_scope", error_description="The scope is invalid")
+        scopes = client_scopes
         if len(params.code_challenge) < 43:
             raise AuthorizeError(error="invalid_request", error_description="S256 PKCE is required")
         session = _random_value()
@@ -556,22 +569,24 @@ class SharedOAuthProvider:
             row = self._token_row(connection, refresh_token.token, "refresh", client.client_id)
             if row is None:
                 invalid_grant = True
-            elif not set(requested).issubset(set(json.loads(str(row["scopes_json"])))):
-                invalid_scope = True
             else:
-                now = timestamp()
-                connection.execute(
-                    "UPDATE oauth_tokens SET rotated_at = ? WHERE token_hash = ?",
-                    (now, _hash(refresh_token.token)),
-                )
-                connection.execute(
-                    """
-                    UPDATE oauth_tokens SET revoked_at = ?
-                    WHERE grant_id = ? AND token_type = 'access' AND revoked_at IS NULL
-                    """,
-                    (now, str(row["grant_id"])),
-                )
-                issued = self._issue_tokens(connection, str(row["grant_id"]), requested)
+                persisted_scopes = list(json.loads(str(row["scopes_json"])))
+                if not set(requested).issubset(persisted_scopes):
+                    invalid_scope = True
+                else:
+                    now = timestamp()
+                    connection.execute(
+                        "UPDATE oauth_tokens SET rotated_at = ? WHERE token_hash = ?",
+                        (now, _hash(refresh_token.token)),
+                    )
+                    connection.execute(
+                        """
+                        UPDATE oauth_tokens SET revoked_at = ?
+                        WHERE grant_id = ? AND token_type = 'access' AND revoked_at IS NULL
+                        """,
+                        (now, str(row["grant_id"])),
+                    )
+                    issued = self._issue_tokens(connection, str(row["grant_id"]), persisted_scopes)
         if invalid_grant:
             raise TokenError(error="invalid_grant", error_description="Invalid refresh token")
         if invalid_scope:
